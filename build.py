@@ -93,15 +93,20 @@ def ensure_pyinstaller() -> None:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
 
-def build_binary() -> Path:
-    """Запускает PyInstaller и возвращает путь к собранному бинарнику."""
+def build_binary(console: bool = False, name: str | None = None) -> Path:
+    """Запускает PyInstaller и возвращает путь к собранному бинарнику.
+
+    console=True собирает версию с окном консоли — на Windows это позволяет
+    увидеть причину падения без лог-файла (полезно при отладке).
+    """
+    exe_name = name or (f"{APP_NAME}-console" if console else APP_NAME)
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
         "--onefile",
-        "--windowed",
-        "--name", APP_NAME,
+        "--console" if console else "--windowed",
+        "--name", exe_name,
         "--hidden-import", "pjsua2",
         "--hidden-import", "PySide6",
         "--hidden-import", "mss",
@@ -124,7 +129,7 @@ def build_binary() -> Path:
     subprocess.check_call(cmd)
 
     suffix = ".exe" if os.name == "nt" else ""
-    return ROOT / "dist" / f"{APP_NAME}{suffix}"
+    return ROOT / "dist" / f"{exe_name}{suffix}"
 
 
 def _download_appimagetool(dest: Path) -> Path:
@@ -207,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     want_appimage = "--appimage" in args
     allow_no_pjsip = "--allow-no-pjsip" in args
+    want_console = "--console" in args
 
     log("[+] Начало сборки MCU Client...")
 
@@ -221,6 +227,12 @@ def main(argv: list[str] | None = None) -> None:
     if want_appimage:
         appimage = build_appimage(binary)
         log(f"    AppImage: {appimage.resolve()}")
+
+    if want_console:
+        log("[+] Дополнительно: консольная сборка для отладки...")
+        console_bin = build_binary(console=True)
+        if console_bin.exists():
+            log(f"    Отладочный файл: {console_bin.resolve()}")
 
 
 if __name__ == "__main__":

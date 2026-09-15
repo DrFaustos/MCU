@@ -27,11 +27,11 @@ jobs:
       - name: Verify pjsua2 (required for SIP)
         run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable
+      - name: Build executable (+ debug console build)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py
+        run: python build.py --console
 
       - name: Download FFmpeg for Windows
         shell: pwsh
@@ -47,6 +47,7 @@ jobs:
           name: MCU-Client-Windows
           path: |
             dist/MCU-Client.exe
+            dist/MCU-Client-console.exe
             dist/ffmpeg.exe
 
   build-linux:
@@ -118,6 +119,7 @@ jobs:
         with:
           files: |
             release-files/MCU-Client.exe
+            release-files/MCU-Client-console.exe
             release-files/ffmpeg.exe
             release-files/MCU-Client
             release-files/MCU-Client-x86_64.AppImage
