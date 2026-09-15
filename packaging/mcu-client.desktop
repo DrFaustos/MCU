@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MCU Client
+GenericName=Video Conference Client
+Comment=Кроссплатформенный ВКС-клиент (SIP / H.323)
+Exec=MCU-Client
+Icon=mcu-client
+Terminal=false
+Categories=Network;AudioVideo;VideoConference;
+Keywords=SIP;H.323;MCU;video;conference;ВКС;
+StartupWMClass=MCU-Client

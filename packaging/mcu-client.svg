@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="40" fill="#0d2b45"/>
+  <rect x="40" y="72" width="120" height="112" rx="14" fill="#1f6feb"/>
+  <circle cx="100" cy="128" r="26" fill="#e6edf3"/>
+  <path d="M150 108 L216 84 L216 172 L150 148 Z" fill="#2ea043"/>
+  <text x="128" y="228" font-family="sans-serif" font-size="30" font-weight="700"
+        text-anchor="middle" fill="#e6edf3">MCU</text>
+</svg>

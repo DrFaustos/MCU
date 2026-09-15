@@ -2,49 +2,161 @@
 
 Использует PyInstaller для упаковки Python-приложения.
 FFmpeg распространяется отдельно (скачивается в workflow).
+
+На Linux дополнительно умеет собирать универсальный пакет **AppImage**
+(флаг ``--appimage``) — установка/удаление без root, работает на любом
+дистрибутиве. Для Flatpak см. ``packaging/build_flatpak.sh``.
+
+Примеры:
+    python build.py                 # собрать нативный бинарник
+    python build.py --appimage      # + собрать AppImage (только Linux)
 """
 
 from __future__ import annotations
 
+import os
+import platform
+import shutil
+import stat
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# UTF-8 везде. Windows CI использует cp1252 и падает на кириллице в print().
+# ---------------------------------------------------------------------------
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - старые/нестандартные потоки
+        pass
 
-def main() -> None:
-    print("[+] Начало сборки MCU Client...")
 
-    # Установка PyInstaller
+APP_NAME = "MCU-Client"
+ROOT = Path(__file__).resolve().parent
+APPIMAGETOOL_URL = (
+    "https://github.com/AppImage/AppImageKit/releases/download/continuous/"
+    "appimagetool-x86_64.AppImage"
+)
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def ensure_pyinstaller() -> None:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("[+] Установка PyInstaller...")
+        log("[+] Установка PyInstaller...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
-    # Команда PyInstaller
+
+def build_binary() -> Path:
+    """Запускает PyInstaller и возвращает путь к собранному бинарнику."""
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
+        "--clean",
         "--onefile",
         "--windowed",
-        "--name", "MCU-Client",
+        "--name", APP_NAME,
         "--hidden-import", "pjsua2",
         "--hidden-import", "PySide6",
         "--hidden-import", "mss",
         "--hidden-import", "pyvirtualcam",
         "--hidden-import", "numpy",
         "--hidden-import", "cv2",
-        "run.py"
+        "run.py",
     ]
-
-    print(f"[+] Запуск PyInstaller: {' '.join(cmd)}")
+    log("[+] Запуск PyInstaller: " + " ".join(cmd))
     subprocess.check_call(cmd)
 
-    print("[+] Сборка завершена!")
-    dist_dir = Path("dist")
-    if dist_dir.exists():
-        for f in dist_dir.iterdir():
-            print(f"    Готовый файл: {f.resolve()}")
+    suffix = ".exe" if os.name == "nt" else ""
+    return ROOT / "dist" / f"{APP_NAME}{suffix}"
+
+
+def _download_appimagetool(dest: Path) -> Path:
+    if dest.exists():
+        return dest
+    log(f"[+] Скачивание appimagetool -> {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(APPIMAGETOOL_URL, dest)
+    dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return dest
+
+
+def build_appimage(binary: Path) -> Path:
+    """Собирает AppImage из уже готового бинарника (только Linux)."""
+    if platform.system() != "Linux":
+        raise RuntimeError("AppImage можно собрать только на Linux")
+    if not binary.exists():
+        raise FileNotFoundError(f"Не найден бинарник: {binary}")
+
+    appdir = ROOT / "dist" / "AppDir"
+    if appdir.exists():
+        shutil.rmtree(appdir)
+
+    bin_dir = appdir / "usr" / "bin"
+    apps_dir = appdir / "usr" / "share" / "applications"
+    icon_dir = appdir / "usr" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    for directory in (bin_dir, apps_dir, icon_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    target = bin_dir / APP_NAME
+    shutil.copy2(binary, target)
+    target.chmod(0o755)
+
+    # AppRun — точка входа AppImage
+    apprun = appdir / "AppRun"
+    apprun.write_text(
+        "#!/bin/sh\n"
+        'HERE="$(dirname "$(readlink -f "${0}")")"\n'
+        f'exec "$HERE/usr/bin/{APP_NAME}" "$@"\n',
+        encoding="utf-8",
+    )
+    apprun.chmod(0o755)
+
+    # desktop-файл и иконка (лежат и в корне AppDir — требование AppImage)
+    desktop_src = ROOT / "packaging" / "mcu-client.desktop"
+    icon_src = ROOT / "packaging" / "mcu-client.svg"
+    shutil.copy2(desktop_src, apps_dir / desktop_src.name)
+    shutil.copy2(icon_src, icon_dir / icon_src.name)
+    shutil.copy2(desktop_src, appdir / desktop_src.name)
+    shutil.copy2(icon_src, appdir / icon_src.name)
+
+    tool = _download_appimagetool(ROOT / "dist" / "appimagetool-x86_64.AppImage")
+    out = ROOT / "dist" / f"{APP_NAME}-x86_64.AppImage"
+
+    env = dict(os.environ)
+    env.setdefault("ARCH", "x86_64")
+    # Позволяет запускать appimagetool без FUSE (важно для Docker/CI).
+    env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+
+    log(f"[+] Сборка AppImage -> {out}")
+    subprocess.check_call([str(tool), str(appdir), str(out)], env=env)
+    return out
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    want_appimage = "--appimage" in args
+
+    log("[+] Начало сборки MCU Client...")
+
+    ensure_pyinstaller()
+    binary = build_binary()
+
+    log("[+] Сборка завершена!")
+    if binary.exists():
+        log(f"    Готовый файл: {binary.resolve()}")
+
+    if want_appimage:
+        appimage = build_appimage(binary)
+        log(f"    AppImage: {appimage.resolve()}")
 
 
 if __name__ == "__main__":
