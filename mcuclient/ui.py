@@ -726,9 +726,16 @@ else:  # pragma: no cover
 
 def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     """Запустить Qt-приложение. Возвращает код выхода."""
+    log.info("GUI: проверка PySide6 (QT_AVAILABLE=%s)", QT_AVAILABLE)
     if not QT_AVAILABLE:
         raise RuntimeError("PySide6 не установлен — GUI недоступен")
+    log.info("GUI: создание QApplication...")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    log.info("GUI: создание главного окна...")
     window = MainWindow(config, engine, h323)
+    log.info("GUI: показ окна...")
     window.show()
-    return app.exec()
+    log.info("GUI: вход в цикл событий")
+    code = app.exec()
+    log.info("GUI: цикл событий завершён, код=%s", code)
+    return code

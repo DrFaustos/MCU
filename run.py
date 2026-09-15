@@ -8,6 +8,9 @@
     python run.py --list-video-devices
     python run.py --test-camera 0 --headless   # тест камеры до звонка
     python run.py --no-camera --no-mic         # старт с выключенными устройствами
+
+Логирование настраивается ДО тяжёлых импортов (pjsua2, PySide6), чтобы
+аварийное завершение на этапе импорта тоже попало в mcu-client.log.
 """
 
 from __future__ import annotations
@@ -15,11 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-
-from mcuclient.config import load_config, parse_listen
-from mcuclient.h323_gateway import H323Gateway
-from mcuclient.log import get_logger, log_file_path, setup_logging
-from mcuclient.sip_engine import SipEngine
+import traceback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +50,148 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _run_camera_commands(engine: SipEngine, args, log) -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    # === ШАГ 0: настройка логирования ДО любых тяжёлых импортов ===
+    # Импортируем только лёгкий модуль логирования (stdlib + pathlib).
+    from mcuclient.log import get_logger, log_environment, log_file_path, setup_logging
+
+    setup_logging(logging.DEBUG if args.verbose else logging.INFO)
+    log = get_logger("main")
+    log.info("=" * 64)
+    log.info("MCU Client: старт. Лог-файл: %s", log_file_path())
+    log.info("Аргументы: %s", argv if argv is not None else sys.argv[1:])
+
+    try:
+        log_environment()
+    except Exception:  # noqa: BLE001
+        log.exception("Не удалось собрать информацию об окружении")
+
+    # === ШАГ 1: тяжёлые импорты (pjsua2, PySide6 и т.п.) ===
+    try:
+        log.info("Импорт mcuclient.config...")
+        from mcuclient.config import load_config, parse_listen
+        log.info("Импорт mcuclient.h323_gateway...")
+        from mcuclient.h323_gateway import H323Gateway
+        log.info("Импорт mcuclient.sip_engine (включает pjsua2)...")
+        from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine
+        log.info("Импорт завершён. PJSIP_AVAILABLE=%s", PJSIP_AVAILABLE)
+    except Exception as exc:  # noqa: BLE001
+        log.critical("КРИТИЧЕСКАЯ ОШИБКА на этапе импорта:", exc_info=True)
+        log.critical("Трассировка:\n%s", traceback.format_exc())
+        return 3
+
+    try:
+        config = load_config(args.config)
+    except Exception:  # noqa: BLE001
+        log.critical("Не удалось загрузить конфигурацию:", exc_info=True)
+        return 3
+
+    # --- CLI overrides ---
+    if args.listen:
+        host, port = parse_listen(args.listen)
+        config.raw["sip"]["listen"] = host
+        config.raw["sip"]["port"] = port
+    if args.display_name:
+        config.raw["room"]["name"] = args.display_name
+    if args.transport:
+        config.raw["sip"]["transport"] = args.transport
+    if args.h323:
+        config.raw["h323"]["enabled"] = True
+    if args.h323_port:
+        config.raw["h323"]["port"] = args.h323_port
+
+    # === ШАГ 2: движок ===
+    try:
+        log.info("Шаг 2/6: создание SipEngine...")
+        engine = SipEngine(config)
+        log.info("Шаг 3/6: создание H323Gateway...")
+        h323 = H323Gateway(config)
+    except Exception:  # noqa: BLE001
+        log.critical("Ошибка создания движка:", exc_info=True)
+        return 3
+
+    if args.no_camera:
+        engine.media_state.toggle_camera(False)
+    if args.no_mic:
+        engine.media_state.toggle_microphone(False)
+
+    # === ШАГ 3: запуск SIP-движка ===
+    try:
+        log.info("Шаг 4/6: engine.start()...")
+        engine.start()
+        log.info("Шаг 4/6: SIP-движок запущен")
+    except Exception:  # noqa: BLE001
+        log.critical("Ошибка запуска SIP-движка:", exc_info=True)
+        return 3
+
+    if args.camera_device is not None:
+        engine.set_video_device(args.camera_device)
+
+    # --- Диагностика SIP-транспорта ---
+    if not engine.pjsip_available:
+        log.error("=" * 68)
+        log.error("pjsua2 (PJSIP) НЕ установлен — SIP-транспорт НЕ поднят.")
+        log.error("Порт %s:%s НЕ слушается, входящие вызовы приниматься не будут.",
+                  config.sip_listen, config.sip_port)
+        log.error("Установите биндинг:  sudo ./scripts/install_pjsua2.sh")
+        log.error("=" * 68)
+    else:
+        log.info("SIP-транспорт слушает %s:%s (%s)",
+                 config.sip_listen, config.sip_port, config.sip_transport)
+        if not engine._video_supported:
+            log.warning("PJSIP собран без видео — видеозвонки недоступны (только аудио).")
+
+    # --- Команды камеры (список/тест) ---
+    rc = _run_camera_commands(engine, args, log)
+    if rc != -1:
+        engine.stop()
+        return rc
+
+    if config.h323_enabled:
+        try:
+            h323.start()
+            st = h323.status()
+            log.info("H.323: %s", st.message)
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка запуска H.323")
+
+    if args.headless:
+        log.info("Headless-режим. Нажмите Ctrl+C для выхода.")
+        try:
+            import time
+
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            h323.stop()
+            engine.stop()
+        return 0
+
+    # === ШАГ 4: GUI ===
+    try:
+        log.info("Шаг 5/6: импорт GUI (mcuclient.ui)...")
+        from mcuclient.ui import run_gui
+
+        log.info("Шаг 6/6: запуск GUI (run_gui)...")
+        code = run_gui(config, engine, h323)
+        log.info("GUI завершился с кодом %s", code)
+        return code
+    except Exception:  # noqa: BLE001
+        log.critical("GUI недоступен или упал:", exc_info=True)
+        log.info("Запустите с --headless для серверного режима.")
+        try:
+            h323.stop()
+            engine.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        return 2
+
+
+def _run_camera_commands(engine, args, log) -> int:
     """Обработать команды камеры (список/тест). Вернуть код выхода или -1."""
     if args.list_video_devices:
         devices = engine.list_video_devices()
@@ -80,100 +220,6 @@ def _run_camera_commands(engine: SipEngine, args, log) -> int:
         return 0
 
     return -1
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    setup_logging(logging.DEBUG if args.verbose else logging.INFO)
-    log = get_logger("main")
-
-    # Пишем в лог первую строку — она подтверждает старт и указывает файл.
-    log.info("=" * 60)
-    log.info("MCU Client запускается. Лог-файл: %s", log_file_path())
-    log.info("Платформа: %s, Python %s", sys.platform, sys.version.split()[0])
-
-    config = load_config(args.config)
-
-    # --- CLI overrides ---
-    if args.listen:
-        host, port = parse_listen(args.listen)
-        config.raw["sip"]["listen"] = host
-        config.raw["sip"]["port"] = port
-    if args.display_name:
-        config.raw["room"]["name"] = args.display_name
-    if args.transport:
-        config.raw["sip"]["transport"] = args.transport
-    if args.h323:
-        config.raw["h323"]["enabled"] = True
-    if args.h323_port:
-        config.raw["h323"]["port"] = args.h323_port
-
-    engine = SipEngine(config)
-    h323 = H323Gateway(config)
-
-    # Стартовое состояние устройств (до звонка).
-    if args.no_camera:
-        engine.media_state.toggle_camera(False)
-    if args.no_mic:
-        engine.media_state.toggle_microphone(False)
-
-    # Запуск движка и (опционально) H.323
-    engine.start()
-
-    # Выбор камеры по ID (до приёма звонка).
-    if args.camera_device is not None:
-        engine.set_video_device(args.camera_device)
-
-    # --- Диагностика SIP-транспорта ---
-    if not engine.pjsip_available:
-        log.error("=" * 68)
-        log.error("pjsua2 (PJSIP) НЕ установлен — SIP-транспорт НЕ поднят.")
-        log.error("Порт %s:%s НЕ слушается, входящие вызовы приниматься не будут.",
-                  config.sip_listen, config.sip_port)
-        log.error("Установите биндинг:  sudo ./scripts/install_pjsua2.sh")
-        log.error("=" * 68)
-    else:
-        log.info("SIP-транспорт слушает %s:%s (%s)",
-                 config.sip_listen, config.sip_port, config.sip_transport)
-        if not engine._video_supported:
-            log.warning("PJSIP собран без видео — видеозвонки недоступны (только аудио).")
-
-    # --- Команды камеры (список/тест) — выполняются и завершают работу ---
-    rc = _run_camera_commands(engine, args, log)
-    if rc != -1:
-        engine.stop()
-        return rc
-
-    if config.h323_enabled:
-        h323.start()
-        st = h323.status()
-        log.info("H.323: %s", st.message)
-
-    if args.headless:
-        log.info("Headless-режим. Нажмите Ctrl+C для выхода.")
-        try:
-            import time
-
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            h323.stop()
-            engine.stop()
-        return 0
-
-    # --- GUI ---
-    try:
-        from mcuclient.ui import run_gui
-
-        return run_gui(config, engine, h323)
-    except RuntimeError as exc:
-        log.error("GUI недоступен: %s", exc)
-        log.info("Запустите с --headless для серверного режима.")
-        h323.stop()
-        engine.stop()
-        return 2
 
 
 if __name__ == "__main__":
