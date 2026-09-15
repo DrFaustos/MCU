@@ -23,10 +23,16 @@ jobs:
           pip install pyinstaller
 
       # pjsua2 (SWIG-биндинг PJSIP) не имеет официального wheel для Windows.
-      # Без него SIP-транспорт в собранном .exe не поднимется.
+      # Без него SIP-транспорт в собранном .exe не поднимется. Шаг только
+      # предупреждает и НИКОГДА не валит сборку (exit 0).
       - name: Check pjsua2 availability
+        shell: pwsh
         run: |
-          python -c "import pjsua2; print('pjsua2 OK')" || echo "::warning::pjsua2 не установлен — SIP в .exe будет в режиме-заглушке. См. README (установка pjsua2 на Windows)."
+          python -c "import pjsua2; print('pjsua2 OK')"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::pjsua2 не установлен — SIP в .exe будет в режиме-заглушке. См. README (установка pjsua2 на Windows)."
+          }
+          exit 0
 
       - name: Build executable
         env:
