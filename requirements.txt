@@ -1,17 +1,4 @@
-# MCU Client dependencies (Python 3.10-3.12)
-
-# --- GUI ---
-PySide6>=6.6,<7
-
-# --- SIP stack ---
-# pjsua2 НЕ ставится обычным pip на всех платформах.
-#   Linux (Debian/Ubuntu):  sudo apt install python3-pjsua2
-#   Windows:                сборка PJSIP из исходников или готовый wheel
-# Установите pjsua2 до запуска приложения:
-# pjsua2>=2.14
-
-# --- Вспомогательное ---
-psutil>=5.9
-
-# --- H.323 (опционально) ---
-# H.323-шлюз использует системный GStreamer и gst-launch-1.0, python-пакеты не нужны.
+PySide6>=6.5.0
+mss>=9.0.1
+numpy>=1.24.0
+pyvirtualcam>=0.11.0

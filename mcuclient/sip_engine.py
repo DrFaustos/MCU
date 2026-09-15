@@ -8,13 +8,11 @@
 * управление медиа: вкл/выкл камеры, микрофона, демонстрации экрана, записи;
 * **мут каждого участника** по отдельности;
 * **виды компоновки видео (layouts)**: speaker, gallery_2x2, gallery_3x3, grid_auto;
+* **демонстрация экрана** через mss + pyvirtualcam (виртуальная камера);
+* **запись конференции** (видео + аудио) через FFmpeg;
 * качество, битрейт, полоса.
 
 Работает в закрытом контуре без обязательного шифрования (SRTP/TLS опциональны).
-
-Модуль рассчитан на работу с установленным pjsua2. Если pjsua2 недоступен,
-поднимается заглушка (StubEndpoint), чтобы GUI и тесты запускались, а движок
-сообщал о своём состоянии через события.
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ from .config import Config, compute_auto_grid
 from .log import get_logger
 from .media_devices import MediaState, build_state
 from .recorder import ConferenceRecorder
+from .screen_share import ScreenSharer
 
 log = get_logger("sip")
 
@@ -54,14 +53,7 @@ class CallState(str, Enum):
 
 @dataclass
 class Participant:
-    """Участник комнаты (один вызов).
-
-    Добавлены поля:
-    * is_muted         — локальный мут (мы не слышим его);
-    * is_video_muted   — локальный мут видео (не показываем его поток);
-    * is_speaking      — флаг "говорит сейчас" (для раскладки speaker);
-    * volume_level     — уровень громкости 0..100 (для визуализации).
-    """
+    """Участник комнаты (один вызов)."""
 
     id: int
     remote_uri: str
@@ -112,11 +104,9 @@ class Room:
         return len(self.participants)
 
     def active_participants(self) -> List[Participant]:
-        """Участники в состоянии CONFIRMED (активные вызовы)."""
         return [p for p in self.participants.values() if p.state is CallState.CONFIRMED]
 
     def active_speaker(self) -> Optional[Participant]:
-        """Вернуть активного говорящего (или первого подключённого)."""
         active = self.active_participants()
         for p in active:
             if p.is_speaking:
@@ -146,7 +136,7 @@ class EventBus:
         for cb in subs:
             try:
                 cb(event, payload)
-            except Exception:  # noqa: BLE001 - UI не должен ломать движок
+            except Exception:  # noqa: BLE001
                 log.exception("Ошибка обработчика события %s", event)
 
 
@@ -154,8 +144,6 @@ class EventBus:
 
 
 class _StubEndpoint:
-    """Минимальная заглушка, повторяющая нужный нам интерфейс pjsua2.Endpoint."""
-
     _instance: Optional["_StubEndpoint"] = None
 
     @classmethod
@@ -164,7 +152,7 @@ class _StubEndpoint:
             cls._instance = cls()
         return cls._instance
 
-    def libCreate(self) -> None:  # noqa: N802 - имитируем API PJSIP
+    def libCreate(self) -> None:  # noqa: N802
         log.info("[stub] libCreate")
 
     def libDestroy(self) -> None:  # noqa: N802
@@ -191,10 +179,15 @@ class SipEngine:
         self._next_call_id = 1
         self._running = False
 
-        # Демонстрация экрана
+        # Демонстрация экрана (mss + pyvirtualcam)
+        self._screen_sharer = ScreenSharer(
+            fps=config.video.get("fps", 15),
+            target_width=config.video.get("width", 1280),
+            target_height=config.video.get("height", 720),
+        )
         self._screen_share_enabled = False
 
-        # Запись конференции
+        # Запись конференции (FFmpeg)
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
 
@@ -203,7 +196,6 @@ class SipEngine:
 
     # --- жизненный цикл ---
     def start(self) -> None:
-        """Инициализировать PJSIP, создать комнату и аккаунт приёма вызовов."""
         if self._running:
             return
         self._create_room()
@@ -232,9 +224,10 @@ class SipEngine:
         if not self._running:
             return
         try:
-            # Остановить запись если идёт
             if self._recorder.is_recording:
                 self._recorder.stop_recording()
+            if self._screen_sharer.is_running:
+                self._screen_sharer.stop()
             if PJSIP_AVAILABLE and self._endpoint is not None:
                 self._hangup_all()
                 self._endpoint.libDestroy()
@@ -250,12 +243,11 @@ class SipEngine:
             log.info("Автосоздана комната '%s'", self.room.name)
 
     # --- PJSIP ---
-    def _start_pjsip(self) -> None:  # pragma: no cover - требует pjsua2
+    def _start_pjsip(self) -> None:  # pragma: no cover
         ep = _pj.Endpoint.instance()
         ep_cfg = _pj.EpConfig()
         ep_cfg.logConfig.level = 3
         ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
-        # В закрытом контуре шифрование не обязательно
         ep_cfg.medConfig.noVad = False
         ep.libCreate()
         ep.libInit(ep_cfg)
@@ -277,7 +269,6 @@ class SipEngine:
             ep.transportCreate(_pj.PJSIP_TRANSPORT_UDP, cfg)
 
     def _configure_codecs(self, ep) -> None:  # pragma: no cover
-        """Выставить приоритеты кодеков из конфига."""
         wanted = self.config.audio_codecs + self.config.video_codecs
         try:
             for i, codec in enumerate(ep.codecEnum2()):
@@ -303,7 +294,6 @@ class SipEngine:
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = f"sip:{self.config.room_name}@{self.config.sip_listen}"
 
-        # Шифрование опционально — по умолчанию выключено для закрытого контура
         if self.config.require_encryption:
             acc_cfg.mediaConfig.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
         else:
@@ -313,7 +303,7 @@ class SipEngine:
         self._account.create(acc_cfg)
 
     # --- входящие/исходящие ---
-    def _on_incoming(self, prm) -> None:  # pragma: no cover - требует pjsua2
+    def _on_incoming(self, prm) -> None:  # pragma: no cover
         call = _pj.Call(self._account, prm.callId)
         info = call.getInfo()
         remote_uri = info.remoteUri
@@ -330,7 +320,6 @@ class SipEngine:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam(True)
-            # Не требуем шифрование при ответе, если оно выключено
             if not self.config.require_encryption:
                 prm.opt.audioCount = 1
                 prm.opt.videoCount = 1
@@ -343,12 +332,11 @@ class SipEngine:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam()
-            prm.statusCode = 486  # Busy Here
+            prm.statusCode = 486
             p._call.hangup(prm)  # pragma: no cover
         self._drop_participant(participant_id)
 
     def call(self, uri: str) -> Optional[int]:
-        """Совершить исходящий вызов по sip-URI или IP."""
         uri = uri.strip()
         if not uri:
             return None
@@ -389,9 +377,8 @@ class SipEngine:
     # --- управление медиа ---
     def set_camera_enabled(self, enabled: bool) -> bool:
         state = self.media_state.toggle_camera(enabled)
-        # Если включаем камеру, выключаем демонстрацию экрана
         if state:
-            self._screen_share_enabled = False
+            self.set_screen_share_enabled(False)
         self._apply_media_state()
         self.events.emit("media.camera", enabled=state)
         return state
@@ -405,15 +392,26 @@ class SipEngine:
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         """Включить/выключить демонстрацию экрана.
 
-        При включении демонстрации экрана камера автоматически отключается
-        (один видеопоток на вызов).
+        При включении: запускает mss + pyvirtualcam, камера отключается.
+        PJSIP затем выбирает виртуальную камеру как источник видео.
         """
-        self._screen_share_enabled = bool(enabled)
-        if self._screen_share_enabled:
-            self.media_state.toggle_camera(False)
+        if enabled and not self._screen_share_enabled:
+            # Запуск захвата экрана
+            if self._screen_sharer.start():
+                self._screen_share_enabled = True
+                self.media_state.toggle_camera(False)
+                log.info("Демонстрация экрана: вкл (виртуальная камера активна)")
+            else:
+                log.error("Не удалось запустить демонстрацию экрана")
+                self.events.emit("media.screen_share", enabled=False, error="start_failed")
+                return False
+        elif not enabled and self._screen_share_enabled:
+            self._screen_sharer.stop()
+            self._screen_share_enabled = False
+            log.info("Демонстрация экрана: выкл")
+
         self._apply_media_state()
         self.events.emit("media.screen_share", enabled=self._screen_share_enabled)
-        log.info("Демонстрация экрана: %s", "вкл" if self._screen_share_enabled else "выкл")
         return self._screen_share_enabled
 
     @property
@@ -421,7 +419,6 @@ class SipEngine:
         return self._screen_share_enabled
 
     def _apply_media_state(self, participant: Optional[Participant] = None) -> None:
-        """Применить вкл/выкл камеры и микрофона к активным вызовам."""
         if not PJSIP_AVAILABLE:
             return
         targets = [participant] if participant else list(
@@ -432,20 +429,11 @@ class SipEngine:
                 continue
             try:  # pragma: no cover
                 p._call.setHold(_pj.CallOpParam(False))
-                # Управление потоком видео/аудио на уровне pjsua2:
                 if hasattr(p._call, "vidSetStream"):
-                    if self._screen_share_enabled:
-                        p._call.vidSetStream(
-                            _pj.PJMEDIA_DIR_ENCODING_DECODING
-                        )
-                    elif self.media_state.camera_enabled:
-                        p._call.vidSetStream(
-                            _pj.PJMEDIA_DIR_ENCODING_DECODING
-                        )
+                    if self._screen_share_enabled or self.media_state.camera_enabled:
+                        p._call.vidSetStream(_pj.PJMEDIA_DIR_ENCODING_DECODING)
                     else:
-                        p._call.vidSetStream(
-                            _pj.PJMEDIA_DIR_DECODING
-                        )
+                        p._call.vidSetStream(_pj.PJMEDIA_DIR_DECODING)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Не удалось применить медиа-состояние: %s", exc)
 
@@ -467,22 +455,15 @@ class SipEngine:
 
     # --- мут участников ---
     def mute_participant(self, participant_id: int, muted: bool) -> bool:
-        """Включить/выключить мут конкретного участника (локально — мы его не слышим).
-
-        В MCU это реализуется отключением порта участника от conference bridge.
-        В клиентском режиме — через setHold или отключение аудиопотока.
-        """
         p = self._get_participant(participant_id)
         if p is None:
             return False
         p.is_muted = bool(muted)
         if PJSIP_AVAILABLE and p._call is not None:
             try:  # pragma: no cover
-                # Отключаем/включаем аудиопоток через setMute (если доступно)
                 if hasattr(p._call, "setMute"):
                     p._call.setMute(muted)
                 else:
-                    # Fallback: используем hold/unhold
                     prm = _pj.CallOpParam(not muted)
                     p._call.setHold(prm)
             except Exception as exc:  # noqa: BLE001
@@ -494,7 +475,6 @@ class SipEngine:
         return True
 
     def mute_participant_video(self, participant_id: int, muted: bool) -> bool:
-        """Включить/выключить показ видео конкретного участника."""
         p = self._get_participant(participant_id)
         if p is None:
             return False
@@ -506,7 +486,6 @@ class SipEngine:
         return True
 
     def mute_all_participants(self, muted: bool) -> None:
-        """Мут всех участников сразу."""
         if not self.room:
             return
         for pid in list(self.room.participants):
@@ -518,7 +497,6 @@ class SipEngine:
         return self._layout
 
     def set_layout(self, layout: str) -> str:
-        """Установить текущую раскладку видео."""
         available = self.config.available_layouts
         if layout not in available:
             log.warning("Раскладка '%s' недоступна, используем '%s'", layout, self._layout)
@@ -529,7 +507,6 @@ class SipEngine:
         return self._layout
 
     def get_layout_grid(self) -> tuple[int, int]:
-        """Вернуть сетку (rows, cols) для текущей раскладки."""
         from .config import LAYOUT_GRID
         grid = LAYOUT_GRID.get(self._layout, (1, 1))
         if self._layout == "grid_auto" and self.room:
@@ -537,7 +514,6 @@ class SipEngine:
         return grid
 
     def get_visible_participants(self) -> List[Participant]:
-        """Вернуть список участников, которые должны отображаться в текущей раскладке."""
         if not self.room:
             return []
         from .config import LAYOUT_CAPACITY
@@ -552,17 +528,25 @@ class SipEngine:
 
     # --- запись конференции ---
     def toggle_recording(self) -> bool:
-        """Переключить запись конференции."""
         if not self.config.features.get("allow_recording", True):
             log.warning("Запись отключена в конфигурации")
             return False
         result = self._recorder.toggle_recording()
-        self.events.emit("media.recording", enabled=self._recorder.is_recording)
+        self.events.emit(
+            "media.recording",
+            enabled=self._recorder.is_recording,
+            file=str(self._recorder.current_file) if self._recorder.current_file else None,
+        )
         return result
 
     @property
     def is_recording(self) -> bool:
         return self._recorder.is_recording
+
+    @property
+    def recording_file(self) -> Optional[str]:
+        f = self._recorder.current_file
+        return str(f) if f else None
 
     # --- помощники ---
     def _register_participant(
@@ -587,7 +571,6 @@ class SipEngine:
 
     @staticmethod
     def _extract_ip(uri: str) -> Optional[str]:
-        """Вытащить IP/хост из sip-URI."""
         if not uri:
             return None
         host = uri

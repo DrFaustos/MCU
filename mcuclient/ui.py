@@ -8,6 +8,9 @@
 * слайдеры качества видео, битрейта видео/аудио и общей полосы;
 * селектор раскладки (layout) видео.
 
+Демонстрация экрана: mss + pyvirtualcam (виртуальная камера).
+Запись конференции: FFmpeg (видео + аудио) в MP4.
+
 Модуль не падает при отсутствии PySide6: если GUI-библиотека недоступна,
 приложение запускается в консольном режиме (см. run.py).
 """
@@ -266,19 +269,19 @@ if QT_AVAILABLE:
             devices = QtWidgets.QGroupBox("Устройства и функции")
             dlayout = QtWidgets.QGridLayout(devices)
 
-            self.camera_toggle = QtWidgets.QCheckBox("Камера")
+            self.camera_toggle = QtWidgets.QCheckBox("📹 Камера")
             self.camera_toggle.setChecked(self.engine.media_state.camera_enabled)
             self.camera_toggle.toggled.connect(self.engine.set_camera_enabled)
 
-            self.mic_toggle = QtWidgets.QCheckBox("Микрофон")
+            self.mic_toggle = QtWidgets.QCheckBox("🎤 Микрофон")
             self.mic_toggle.setChecked(self.engine.media_state.microphone_enabled)
             self.mic_toggle.toggled.connect(self.engine.set_microphone_enabled)
 
-            self.screen_toggle = QtWidgets.QCheckBox("Демонстрация экрана")
+            self.screen_toggle = QtWidgets.QCheckBox("🖥 Демонстрация экрана")
             self.screen_toggle.setChecked(False)
-            self.screen_toggle.toggled.connect(self.engine.set_screen_share_enabled)
+            self.screen_toggle.toggled.connect(self._on_screen_toggle)
 
-            self.record_toggle = QtWidgets.QCheckBox("Запись конференции")
+            self.record_toggle = QtWidgets.QCheckBox("⏺ Запись конференции")
             self.record_toggle.setChecked(False)
             self.record_toggle.toggled.connect(self._on_record_toggle)
 
@@ -287,6 +290,12 @@ if QT_AVAILABLE:
             dlayout.addWidget(self.screen_toggle, 1, 0)
             dlayout.addWidget(self.record_toggle, 1, 1)
             right.addWidget(devices)
+
+            # Статус записи
+            self.recording_status = QtWidgets.QLabel("")
+            self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
+            self.recording_status.setWordWrap(True)
+            right.addWidget(self.recording_status)
 
             # Качество и битрейты
             quality = QtWidgets.QGroupBox("Качество и поток")
@@ -344,13 +353,11 @@ if QT_AVAILABLE:
         # --- сетка видео ---
         def _rebuild_video_grid(self) -> None:
             """Перестроить сетку видео в соответствии с текущей раскладкой."""
-            # Очистить старые тайлы
             for tile in self._tiles.values():
                 tile.setParent(None)
                 tile.deleteLater()
             self._tiles.clear()
 
-            # Очистить layout
             while self.video_grid_layout.count():
                 item = self.video_grid_layout.takeAt(0)
                 if item.widget():
@@ -359,14 +366,12 @@ if QT_AVAILABLE:
             rows, cols = self.engine.get_layout_grid()
             visible = self.engine.get_visible_participants()
 
-            # Если нет участников — показать пустую сетку
             if not visible:
                 empty = ParticipantTile()
                 empty.set_participant(None)
                 self.video_grid_layout.addWidget(empty, 0, 0)
                 return
 
-            # Заполнить сетку
             for idx, p in enumerate(visible):
                 row = idx // cols
                 col = idx % cols
@@ -380,7 +385,6 @@ if QT_AVAILABLE:
                 self._tiles[p.id] = tile
                 self.video_grid_layout.addWidget(tile, row, col)
 
-            # Заполнить оставшиеся ячейки пустыми тайлами
             for idx in range(len(visible), rows * cols):
                 row = idx // cols
                 col = idx % cols
@@ -424,6 +428,38 @@ if QT_AVAILABLE:
             status = "Все заглушены" if muted else "Мут снят со всех"
             self.statusBar().showMessage(status, 5000)
 
+        def _on_screen_toggle(self, checked: bool) -> None:
+            success = self.engine.set_screen_share_enabled(checked)
+            if not success and checked:
+                self.screen_toggle.setChecked(False)
+                self.statusBar().showMessage(
+                    "Не удалось запустить демонстрацию экрана. Проверьте зависимости (mss, pyvirtualcam).",
+                    10000,
+                )
+            # Если демонстрация включилась — выключить тумблер камеры
+            if success and checked:
+                self.camera_toggle.setChecked(False)
+            elif not checked and not self.engine.screen_share_enabled:
+                pass  # уже выключено
+
+        def _on_record_toggle(self, checked: bool) -> None:
+            success = self.engine.toggle_recording()
+            if not success and checked:
+                self.record_toggle.setChecked(False)
+            if success:
+                if self.engine.is_recording:
+                    self.recording_status.setText(
+                        f"⏺ Запись: {self.engine.recording_file or '—'}"
+                    )
+                    self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
+                else:
+                    self.recording_status.setText(
+                        f"✓ Запись сохранена: {self.engine.recording_file or '—'}"
+                    )
+                    self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
+            status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
+            self.statusBar().showMessage(status, 5000)
+
         def _current_id(self) -> Optional[int]:
             item = self.participants_list.currentItem()
             if item is None:
@@ -450,7 +486,6 @@ if QT_AVAILABLE:
                 self.engine.reject(pid)
 
         def _on_hangup_all(self) -> None:
-            """Завершить все активные вызовы."""
             if not self.engine.room:
                 return
             for pid in list(self.engine.room.participants):
@@ -459,13 +494,6 @@ if QT_AVAILABLE:
         def _on_quality(self, name: str) -> None:
             w, h, fps = self.QUALITY_PRESETS[name]
             self.engine.set_video_quality(w, h, fps)
-
-        def _on_record_toggle(self, checked: bool) -> None:
-            success = self.engine.toggle_recording()
-            if not success:
-                self.record_toggle.setChecked(False)
-            status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
-            self.statusBar().showMessage(status, 5000)
 
         def _update_buttons(self) -> None:
             pid = self._current_id()
@@ -499,13 +527,25 @@ if QT_AVAILABLE:
                 )
             elif event == "media.recording":
                 state = "начата" if payload.get("enabled") else "остановлена"
-                self.statusBar().showMessage(f"Запись конференции {state}", 5000)
+                file_path = payload.get("file")
+                self.statusBar().showMessage(f"Запись конференции {state}: {file_path or '—'}", 5000)
+                if payload.get("enabled") and file_path:
+                    self.recording_status.setText(f"⏺ Запись: {file_path}")
+                    self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
+                elif not payload.get("enabled"):
+                    self.recording_status.setText(f"✓ Запись сохранена: {file_path or '—'}")
+                    self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
+            elif event == "media.screen_share":
+                if payload.get("enabled"):
+                    self.statusBar().showMessage("Демонстрация экрана: вкл (виртуальная камера)", 5000)
+                    self.camera_toggle.setChecked(False)
+                else:
+                    self.statusBar().showMessage("Демонстрация экрана: выкл", 5000)
             elif event in {"participant.muted", "participant.video_muted"}:
                 self._refresh_tiles()
                 self._refresh_participants_list()
 
         def _refresh_participants_list(self) -> None:
-            """Обновить текстовый список участников."""
             self.participants_list.clear()
             if not self.engine.room:
                 return
