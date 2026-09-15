@@ -39,6 +39,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allow_screen_share": True,
         "allow_recording": True,
         "recording_path": "./recordings",
+        # Виды компоновки видео (layouts) — переключаются из UI
+        "layouts": {
+            "available": [
+                "speaker",       # Один спикер (активный занимает весь экран)
+                "gallery_2x2",   # Галерея 2x2
+                "gallery_3x3",   # Галерея 3x3
+                "grid_auto",     # Автоматическая сетка
+            ],
+            "default": "speaker",
+        },
     },
 }
 
@@ -82,6 +92,53 @@ class PeerFilter:
             except ValueError:
                 continue
         return False
+
+
+# --- раскладки видео --------------------------------------------------------
+
+LAYOUT_LABELS: Dict[str, str] = {
+    "speaker": "Один спикер",
+    "gallery_2x2": "Галерея 2×2",
+    "gallery_3x3": "Галерея 3×3",
+    "grid_auto": "Авто-сетка",
+}
+
+# Сколько участников помещается в раскладку (0 = без ограничений)
+LAYOUT_CAPACITY: Dict[str, int] = {
+    "speaker": 1,
+    "gallery_2x2": 4,
+    "gallery_3x3": 9,
+    "grid_auto": 0,
+}
+
+# Сетка (rows, cols) для каждой раскладки
+LAYOUT_GRID: Dict[str, tuple[int, int]] = {
+    "speaker": (1, 1),
+    "gallery_2x2": (2, 2),
+    "gallery_3x3": (3, 3),
+    "grid_auto": (0, 0),  # вычисляется динамически
+}
+
+
+def compute_auto_grid(count: int) -> tuple[int, int]:
+    """Вычислить оптимальную сетку для N участников."""
+    if count <= 0:
+        return (1, 1)
+    if count == 1:
+        return (1, 1)
+    if count == 2:
+        return (1, 2)
+    if count <= 4:
+        return (2, 2)
+    if count <= 6:
+        return (2, 3)
+    if count <= 9:
+        return (3, 3)
+    if count <= 12:
+        return (3, 4)
+    if count <= 16:
+        return (4, 4)
+    return (4, 4)
 
 
 @dataclass
@@ -147,6 +204,14 @@ class Config:
     @property
     def features(self) -> Dict[str, Any]:
         return self.raw.get("features", DEFAULT_CONFIG["features"])
+
+    @property
+    def available_layouts(self) -> List[str]:
+        return list(self.features.get("layouts", {}).get("available", ["speaker"]))
+
+    @property
+    def default_layout(self) -> str:
+        return str(self.features.get("layouts", {}).get("default", "speaker"))
 
     # --- изменение на лету ---
     def set_video_bitrate(self, kbps: int) -> None:

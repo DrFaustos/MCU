@@ -6,6 +6,8 @@
 * согласование кодеков (приоритеты из config);
 * одну автоматически создаваемую комнату (Room);
 * управление медиа: вкл/выкл камеры, микрофона, демонстрации экрана, записи;
+* **мут каждого участника** по отдельности;
+* **виды компоновки видео (layouts)**: speaker, gallery_2x2, gallery_3x3, grid_auto;
 * качество, битрейт, полоса.
 
 Работает в закрытом контуре без обязательного шифрования (SRTP/TLS опциональны).
@@ -23,7 +25,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
-from .config import Config
+from .config import Config, compute_auto_grid
 from .log import get_logger
 from .media_devices import MediaState, build_state
 from .recorder import ConferenceRecorder
@@ -52,7 +54,14 @@ class CallState(str, Enum):
 
 @dataclass
 class Participant:
-    """Участник комнаты (один вызов)."""
+    """Участник комнаты (один вызов).
+
+    Добавлены поля:
+    * is_muted         — локальный мут (мы не слышим его);
+    * is_video_muted   — локальный мут видео (не показываем его поток);
+    * is_speaking      — флаг "говорит сейчас" (для раскладки speaker);
+    * volume_level     — уровень громкости 0..100 (для визуализации).
+    """
 
     id: int
     remote_uri: str
@@ -62,6 +71,13 @@ class Participant:
     video_codec: Optional[str] = None
     rx_bitrate_kbps: int = 0
     tx_bitrate_kbps: int = 0
+
+    # Мут и состояние
+    is_muted: bool = False
+    is_video_muted: bool = False
+    is_speaking: bool = False
+    volume_level: int = 0
+
     _call: object = None  # pj.Call / None
 
     @property
@@ -71,7 +87,9 @@ class Participant:
             state = " [connected]"
         elif self.state is CallState.INCOMING:
             state = " [входящий]"
-        return f"{self.remote_uri}{state}"
+        muted = " 🔇" if self.is_muted else ""
+        video_muted = " 📷✕" if self.is_video_muted else ""
+        return f"{self.remote_uri}{state}{muted}{video_muted}"
 
 
 @dataclass
@@ -92,6 +110,18 @@ class Room:
     @property
     def count(self) -> int:
         return len(self.participants)
+
+    def active_participants(self) -> List[Participant]:
+        """Участники в состоянии CONFIRMED (активные вызовы)."""
+        return [p for p in self.participants.values() if p.state is CallState.CONFIRMED]
+
+    def active_speaker(self) -> Optional[Participant]:
+        """Вернуть активного говорящего (или первого подключённого)."""
+        active = self.active_participants()
+        for p in active:
+            if p.is_speaking:
+                return p
+        return active[0] if active else None
 
 
 # --- события ----------------------------------------------------------------
@@ -168,6 +198,9 @@ class SipEngine:
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
 
+        # Текущая раскладка видео
+        self._layout: str = config.default_layout
+
     # --- жизненный цикл ---
     def start(self) -> None:
         """Инициализировать PJSIP, создать комнату и аккаунт приёма вызовов."""
@@ -188,10 +221,11 @@ class SipEngine:
             pjsip=PJSIP_AVAILABLE,
         )
         log.info(
-            "Движок запущен: %s:%d, комната '%s', pjsip=%s, шифрование=%s",
+            "Движок запущен: %s:%d, комната '%s', pjsip=%s, шифрование=%s, раскладка=%s",
             self.config.sip_listen, self.config.sip_port,
             self.room.name if self.room else "-", PJSIP_AVAILABLE,
             "вкл" if self.config.require_encryption else "выкл",
+            self._layout,
         )
 
     def stop(self) -> None:
@@ -401,8 +435,6 @@ class SipEngine:
                 # Управление потоком видео/аудио на уровне pjsua2:
                 if hasattr(p._call, "vidSetStream"):
                     if self._screen_share_enabled:
-                        # При демонстрации экрана передаём только декодируемый поток
-                        # (реальный захват экрана требует GStreamer/FFmpeg интеграции)
                         p._call.vidSetStream(
                             _pj.PJMEDIA_DIR_ENCODING_DECODING
                         )
@@ -432,6 +464,91 @@ class SipEngine:
     def set_bandwidth(self, kbps: int) -> None:
         self.config.set_bandwidth(kbps)
         self.events.emit("media.bandwidth", kbps=int(kbps))
+
+    # --- мут участников ---
+    def mute_participant(self, participant_id: int, muted: bool) -> bool:
+        """Включить/выключить мут конкретного участника (локально — мы его не слышим).
+
+        В MCU это реализуется отключением порта участника от conference bridge.
+        В клиентском режиме — через setHold или отключение аудиопотока.
+        """
+        p = self._get_participant(participant_id)
+        if p is None:
+            return False
+        p.is_muted = bool(muted)
+        if PJSIP_AVAILABLE and p._call is not None:
+            try:  # pragma: no cover
+                # Отключаем/включаем аудиопоток через setMute (если доступно)
+                if hasattr(p._call, "setMute"):
+                    p._call.setMute(muted)
+                else:
+                    # Fallback: используем hold/unhold
+                    prm = _pj.CallOpParam(not muted)
+                    p._call.setHold(prm)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Не удалось применить мут: %s", exc)
+        self.events.emit(
+            "participant.muted", id=participant_id, muted=p.is_muted, uri=p.remote_uri
+        )
+        log.info("Участник %s: мут=%s", p.remote_uri, p.is_muted)
+        return True
+
+    def mute_participant_video(self, participant_id: int, muted: bool) -> bool:
+        """Включить/выключить показ видео конкретного участника."""
+        p = self._get_participant(participant_id)
+        if p is None:
+            return False
+        p.is_video_muted = bool(muted)
+        self.events.emit(
+            "participant.video_muted",
+            id=participant_id, muted=p.is_video_muted, uri=p.remote_uri,
+        )
+        return True
+
+    def mute_all_participants(self, muted: bool) -> None:
+        """Мут всех участников сразу."""
+        if not self.room:
+            return
+        for pid in list(self.room.participants):
+            self.mute_participant(pid, muted)
+
+    # --- раскладки видео ---
+    @property
+    def layout(self) -> str:
+        return self._layout
+
+    def set_layout(self, layout: str) -> str:
+        """Установить текущую раскладку видео."""
+        available = self.config.available_layouts
+        if layout not in available:
+            log.warning("Раскладка '%s' недоступна, используем '%s'", layout, self._layout)
+            return self._layout
+        self._layout = layout
+        self.events.emit("layout.changed", layout=layout)
+        log.info("Раскладка изменена: %s", layout)
+        return self._layout
+
+    def get_layout_grid(self) -> tuple[int, int]:
+        """Вернуть сетку (rows, cols) для текущей раскладки."""
+        from .config import LAYOUT_GRID
+        grid = LAYOUT_GRID.get(self._layout, (1, 1))
+        if self._layout == "grid_auto" and self.room:
+            return compute_auto_grid(self.room.count)
+        return grid
+
+    def get_visible_participants(self) -> List[Participant]:
+        """Вернуть список участников, которые должны отображаться в текущей раскладке."""
+        if not self.room:
+            return []
+        from .config import LAYOUT_CAPACITY
+        active = self.room.active_participants()
+        if self._layout == "speaker":
+            speaker = self.room.active_speaker()
+            return [speaker] if speaker else []
+        capacity = LAYOUT_CAPACITY.get(self._layout, 0)
+        if capacity == 0:
+            return active
+        return active[:capacity]
 
     # --- запись конференции ---
     def toggle_recording(self) -> bool:

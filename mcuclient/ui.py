@@ -1,11 +1,12 @@
 """Qt-интерфейс MCU Client (PySide6).
 
 Окно содержит:
-* превью камеры;
-* список участников комнаты (входящие/исходящие вызовы);
+* визуальную сетку видео участников (виды компоновки: speaker / gallery 2x2 / 3x3 / auto);
+* список участников с кнопками мута аудио и видео;
 * кнопки Принять / Отклонить / Завершить / Позвонить;
 * тумблеры камеры, микрофона, демонстрации экрана и записи;
-* слайдеры качества видео, битрейта видео/аудио и общей полосы.
+* слайдеры качества видео, битрейта видео/аудио и общей полосы;
+* селектор раскладки (layout) видео.
 
 Модуль не падает при отсутствии PySide6: если GUI-библиотека недоступна,
 приложение запускается в консольном режиме (см. run.py).
@@ -14,12 +15,12 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
+from typing import Dict, Optional
 
-from .config import Config
+from .config import Config, LAYOUT_LABELS
 from .h323_gateway import H323Gateway
 from .log import get_logger
-from .sip_engine import CallState, SipEngine
+from .sip_engine import CallState, Participant, SipEngine
 
 log = get_logger("ui")
 
@@ -35,6 +36,135 @@ except Exception as _exc:  # noqa: BLE001
 
 if QT_AVAILABLE:
 
+    # --- виджет ячейки видео участника ---
+    class ParticipantTile(QtWidgets.QWidget):
+        """Ячейка видео для одного участника с кнопками мута."""
+
+        mute_audio_clicked = QtCore.Signal(int, bool)
+        mute_video_clicked = QtCore.Signal(int, bool)
+        hangup_clicked = QtCore.Signal(int)
+
+        def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+            super().__init__(parent)
+            self.participant_id: Optional[int] = None
+            self._build_ui()
+
+        def _build_ui(self) -> None:
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(2)
+
+            # Видео-превью
+            self.video_label = QtWidgets.QLabel("Нет видео")
+            self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.video_label.setMinimumSize(160, 120)
+            self.video_label.setStyleSheet(
+                "background:#1a2028; color:#7a8592; border:1px solid #2a3138; border-radius:4px;"
+            )
+            layout.addWidget(self.video_label, stretch=1)
+
+            # Имя участника
+            self.name_label = QtWidgets.QLabel("—")
+            self.name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.name_label.setStyleSheet("color:#c0c8d0; font-size:11px;")
+            layout.addWidget(self.name_label)
+
+            # Кнопки управления
+            btn_row = QtWidgets.QHBoxLayout()
+            btn_row.setSpacing(4)
+
+            self.mute_audio_btn = QtWidgets.QPushButton("🔊")
+            self.mute_audio_btn.setToolTip("Мут аудио")
+            self.mute_audio_btn.setCheckable(True)
+            self.mute_audio_btn.setFixedSize(32, 28)
+            self.mute_audio_btn.clicked.connect(self._on_mute_audio)
+            self.mute_audio_btn.setStyleSheet(
+                "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
+                "QPushButton:checked { background:#8b2020; }"
+            )
+
+            self.mute_video_btn = QtWidgets.QPushButton("📹")
+            self.mute_video_btn.setToolTip("Мут видео")
+            self.mute_video_btn.setCheckable(True)
+            self.mute_video_btn.setFixedSize(32, 28)
+            self.mute_video_btn.clicked.connect(self._on_mute_video)
+            self.mute_video_btn.setStyleSheet(
+                "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
+                "QPushButton:checked { background:#8b2020; }"
+            )
+
+            self.hangup_btn = QtWidgets.QPushButton("✕")
+            self.hangup_btn.setToolTip("Завершить вызов")
+            self.hangup_btn.setFixedSize(32, 28)
+            self.hangup_btn.clicked.connect(self._on_hangup)
+            self.hangup_btn.setStyleSheet(
+                "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
+                "QPushButton:hover { background:#8b2020; }"
+            )
+
+            btn_row.addWidget(self.mute_audio_btn)
+            btn_row.addWidget(self.mute_video_btn)
+            btn_row.addWidget(self.hangup_btn)
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+
+        def set_participant(self, p: Optional[Participant]) -> None:
+            """Обновить отображение участника."""
+            if p is None:
+                self.participant_id = None
+                self.video_label.setText("Пусто")
+                self.name_label.setText("—")
+                self.mute_audio_btn.setChecked(False)
+                self.mute_video_btn.setChecked(False)
+                self.setEnabled(False)
+                return
+
+            self.participant_id = p.id
+            self.setEnabled(True)
+
+            # Имя (извлекаем из URI)
+            name = p.remote_uri
+            if name.startswith("sip:"):
+                name = name[4:]
+            if "@" in name:
+                name = name.split("@")[0]
+            self.name_label.setText(name)
+
+            # Статус видео
+            if p.is_video_muted:
+                self.video_label.setText("📷✕ Видео выкл")
+            elif p.state is CallState.INCOMING:
+                self.video_label.setText("📞 Входящий")
+            elif p.state is CallState.CONNECTING:
+                self.video_label.setText("📡 Соединение...")
+            elif p.state is CallState.CONFIRMED:
+                self.video_label.setText(f"🎥 {p.video_codec or 'video'}")
+            else:
+                self.video_label.setText("⏸ Неактивен")
+
+            # Состояние кнопок мута
+            self.mute_audio_btn.setChecked(p.is_muted)
+            self.mute_audio_btn.setText("🔇" if p.is_muted else "🔊")
+            self.mute_video_btn.setChecked(p.is_video_muted)
+            self.mute_video_btn.setText("📷✕" if p.is_video_muted else "📹")
+
+        def _on_mute_audio(self) -> None:
+            if self.participant_id is not None:
+                self.mute_audio_clicked.emit(
+                    self.participant_id, self.mute_audio_btn.isChecked()
+                )
+
+        def _on_mute_video(self) -> None:
+            if self.participant_id is not None:
+                self.mute_video_clicked.emit(
+                    self.participant_id, self.mute_video_btn.isChecked()
+                )
+
+        def _on_hangup(self) -> None:
+            if self.participant_id is not None:
+                self.hangup_clicked.emit(self.participant_id)
+
+    # --- главное окно ---
     class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
         """Главное окно ВКС-клиента."""
 
@@ -49,9 +179,9 @@ if QT_AVAILABLE:
             self.config = config
             self.engine = engine
             self.h323 = h323
-            self._incoming: dict = {}
+            self._tiles: Dict[int, ParticipantTile] = {}
             self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
-            self.resize(1100, 720)
+            self.resize(1280, 800)
             self._build_ui()
             self.engine.events.subscribe(self._on_event)
 
@@ -61,16 +191,32 @@ if QT_AVAILABLE:
             self.setCentralWidget(central)
             root = QtWidgets.QHBoxLayout(central)
 
-            # Левая часть: превью камеры
+            # === Левая часть: сетка видео + поле звонка ===
             left = QtWidgets.QVBoxLayout()
-            self.video_label = QtWidgets.QLabel("Камера (превью)")
-            self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.video_label.setMinimumSize(640, 480)
-            self.video_label.setStyleSheet(
-                "background:#101418; color:#7a8592; border:1px solid #2a3138;"
-            )
-            left.addWidget(self.video_label, stretch=1)
 
+            # Панель раскладки
+            layout_bar = QtWidgets.QHBoxLayout()
+            layout_bar.addWidget(QtWidgets.QLabel("Раскладка:"))
+            self.layout_combo = QtWidgets.QComboBox()
+            for key in self.config.available_layouts:
+                self.layout_combo.addItem(LAYOUT_LABELS.get(key, key), key)
+            self.layout_combo.setCurrentText(
+                LAYOUT_LABELS.get(self.engine.layout, self.engine.layout)
+            )
+            self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+            layout_bar.addWidget(self.layout_combo)
+            layout_bar.addStretch()
+            left.addLayout(layout_bar)
+
+            # Сетка видео
+            self.video_grid = QtWidgets.QWidget()
+            self.video_grid_layout = QtWidgets.QGridLayout(self.video_grid)
+            self.video_grid_layout.setSpacing(4)
+            self.video_grid_layout.setContentsMargins(4, 4, 4, 4)
+            self.video_grid.setStyleSheet("background:#0a0e12;")
+            left.addWidget(self.video_grid, stretch=1)
+
+            # Поле звонка
             call_row = QtWidgets.QHBoxLayout()
             self.uri_edit = QtWidgets.QLineEdit()
             self.uri_edit.setPlaceholderText("sip:100@192.168.1.50  или  192.168.1.50")
@@ -81,45 +227,61 @@ if QT_AVAILABLE:
             left.addLayout(call_row)
             root.addLayout(left, stretch=3)
 
-            # Правая часть: участники и управление
+            # === Правая часть: управление ===
             right = QtWidgets.QVBoxLayout()
-            right.addWidget(QtWidgets.QLabel("Участники комнаты"))
-            self.participants = QtWidgets.QListWidget()
-            self.participants.currentRowChanged.connect(self._update_buttons)
-            right.addWidget(self.participants, stretch=2)
 
+            # Кнопки звонка
+            right.addWidget(QtWidgets.QLabel("Управление вызовами"))
             btn_row = QtWidgets.QHBoxLayout()
             self.accept_btn = QtWidgets.QPushButton("Принять")
             self.accept_btn.clicked.connect(self._on_accept)
             self.reject_btn = QtWidgets.QPushButton("Отклонить")
             self.reject_btn.clicked.connect(self._on_reject)
             self.hangup_btn = QtWidgets.QPushButton("Завершить")
-            self.hangup_btn.clicked.connect(self._on_hangup)
+            self.hangup_btn.clicked.connect(self._on_hangup_all)
             btn_row.addWidget(self.accept_btn)
             btn_row.addWidget(self.reject_btn)
             btn_row.addWidget(self.hangup_btn)
             right.addLayout(btn_row)
 
+            # Мут всех
+            mute_all_row = QtWidgets.QHBoxLayout()
+            self.mute_all_btn = QtWidgets.QPushButton("🔇 Мут всех")
+            self.mute_all_btn.setCheckable(True)
+            self.mute_all_btn.clicked.connect(self._on_mute_all)
+            self.mute_all_btn.setStyleSheet(
+                "QPushButton:checked { background:#8b2020; color:white; }"
+            )
+            mute_all_row.addWidget(self.mute_all_btn)
+            mute_all_row.addStretch()
+            right.addLayout(mute_all_row)
+
+            # Список участников (текстовый, для детальной информации)
+            right.addWidget(QtWidgets.QLabel("Участники"))
+            self.participants_list = QtWidgets.QListWidget()
+            self.participants_list.currentRowChanged.connect(self._update_buttons)
+            right.addWidget(self.participants_list, stretch=1)
+
             # Тумблеры устройств и функций
             devices = QtWidgets.QGroupBox("Устройства и функции")
             dlayout = QtWidgets.QGridLayout(devices)
-            
+
             self.camera_toggle = QtWidgets.QCheckBox("Камера")
             self.camera_toggle.setChecked(self.engine.media_state.camera_enabled)
             self.camera_toggle.toggled.connect(self.engine.set_camera_enabled)
-            
+
             self.mic_toggle = QtWidgets.QCheckBox("Микрофон")
             self.mic_toggle.setChecked(self.engine.media_state.microphone_enabled)
             self.mic_toggle.toggled.connect(self.engine.set_microphone_enabled)
-            
+
             self.screen_toggle = QtWidgets.QCheckBox("Демонстрация экрана")
             self.screen_toggle.setChecked(False)
             self.screen_toggle.toggled.connect(self.engine.set_screen_share_enabled)
-            
+
             self.record_toggle = QtWidgets.QCheckBox("Запись конференции")
             self.record_toggle.setChecked(False)
             self.record_toggle.toggled.connect(self._on_record_toggle)
-            
+
             dlayout.addWidget(self.camera_toggle, 0, 0)
             dlayout.addWidget(self.mic_toggle, 0, 1)
             dlayout.addWidget(self.screen_toggle, 1, 0)
@@ -177,10 +339,93 @@ if QT_AVAILABLE:
 
             self.statusBar().showMessage("Готов")
             self._update_buttons()
+            self._rebuild_video_grid()
+
+        # --- сетка видео ---
+        def _rebuild_video_grid(self) -> None:
+            """Перестроить сетку видео в соответствии с текущей раскладкой."""
+            # Очистить старые тайлы
+            for tile in self._tiles.values():
+                tile.setParent(None)
+                tile.deleteLater()
+            self._tiles.clear()
+
+            # Очистить layout
+            while self.video_grid_layout.count():
+                item = self.video_grid_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            rows, cols = self.engine.get_layout_grid()
+            visible = self.engine.get_visible_participants()
+
+            # Если нет участников — показать пустую сетку
+            if not visible:
+                empty = ParticipantTile()
+                empty.set_participant(None)
+                self.video_grid_layout.addWidget(empty, 0, 0)
+                return
+
+            # Заполнить сетку
+            for idx, p in enumerate(visible):
+                row = idx // cols
+                col = idx % cols
+                if row >= rows:
+                    break
+                tile = ParticipantTile()
+                tile.set_participant(p)
+                tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
+                tile.mute_video_clicked.connect(self._on_tile_mute_video)
+                tile.hangup_clicked.connect(self._on_tile_hangup)
+                self._tiles[p.id] = tile
+                self.video_grid_layout.addWidget(tile, row, col)
+
+            # Заполнить оставшиеся ячейки пустыми тайлами
+            for idx in range(len(visible), rows * cols):
+                row = idx // cols
+                col = idx % cols
+                empty = ParticipantTile()
+                empty.set_participant(None)
+                self.video_grid_layout.addWidget(empty, row, col)
+
+        def _refresh_tiles(self) -> None:
+            """Обновить содержимое тайлов без перестройки сетки."""
+            if not self.engine.room:
+                return
+            for pid, tile in self._tiles.items():
+                p = self.engine.room.participants.get(pid)
+                tile.set_participant(p)
 
         # --- обработчики UI ---
+        def _on_layout_changed(self, index: int) -> None:
+            layout_key = self.layout_combo.itemData(index)
+            if layout_key:
+                self.engine.set_layout(layout_key)
+                self._rebuild_video_grid()
+
+        def _on_tile_mute_audio(self, pid: int, muted: bool) -> None:
+            self.engine.mute_participant(pid, muted)
+            self._refresh_tiles()
+            self._refresh_participants_list()
+
+        def _on_tile_mute_video(self, pid: int, muted: bool) -> None:
+            self.engine.mute_participant_video(pid, muted)
+            self._refresh_tiles()
+            self._refresh_participants_list()
+
+        def _on_tile_hangup(self, pid: int) -> None:
+            self.engine.hangup(pid)
+
+        def _on_mute_all(self) -> None:
+            muted = self.mute_all_btn.isChecked()
+            self.engine.mute_all_participants(muted)
+            self._refresh_tiles()
+            self._refresh_participants_list()
+            status = "Все заглушены" if muted else "Мут снят со всех"
+            self.statusBar().showMessage(status, 5000)
+
         def _current_id(self) -> Optional[int]:
-            item = self.participants.currentItem()
+            item = self.participants_list.currentItem()
             if item is None:
                 return None
             return item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -204,9 +449,11 @@ if QT_AVAILABLE:
             if pid is not None:
                 self.engine.reject(pid)
 
-        def _on_hangup(self) -> None:
-            pid = self._current_id()
-            if pid is not None:
+        def _on_hangup_all(self) -> None:
+            """Завершить все активные вызовы."""
+            if not self.engine.room:
+                return
+            for pid in list(self.engine.room.participants):
                 self.engine.hangup(pid)
 
         def _on_quality(self, name: str) -> None:
@@ -215,11 +462,8 @@ if QT_AVAILABLE:
 
         def _on_record_toggle(self, checked: bool) -> None:
             success = self.engine.toggle_recording()
-            if not checked and success:
-                self.record_toggle.setChecked(False)  # revert if failed
-            elif checked and not success:
-                self.record_toggle.setChecked(False)  # revert if failed
-            
+            if not success:
+                self.record_toggle.setChecked(False)
             status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
             self.statusBar().showMessage(status, 5000)
 
@@ -232,7 +476,6 @@ if QT_AVAILABLE:
 
         # --- события движка ---
         def _on_event(self, event: str, payload: dict) -> None:
-            # События приходят из потоков pjsua2 — переключаемся в GUI-поток.
             QtCore.QMetaObject.invokeMethod(
                 self, "_handle_event",
                 QtCore.Qt.ConnectionType.QueuedConnection,
@@ -243,7 +486,8 @@ if QT_AVAILABLE:
         @QtCore.Slot(str, dict)
         def _handle_event(self, event: str, payload: dict) -> None:
             if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
-                self._refresh_participants()
+                self._refresh_participants_list()
+                self._rebuild_video_grid()
                 self.statusBar().showMessage(f"{event}: {payload}", 5000)
             elif event == "call.rejected":
                 self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
@@ -256,15 +500,19 @@ if QT_AVAILABLE:
             elif event == "media.recording":
                 state = "начата" if payload.get("enabled") else "остановлена"
                 self.statusBar().showMessage(f"Запись конференции {state}", 5000)
+            elif event in {"participant.muted", "participant.video_muted"}:
+                self._refresh_tiles()
+                self._refresh_participants_list()
 
-        def _refresh_participants(self) -> None:
-            self.participants.clear()
+        def _refresh_participants_list(self) -> None:
+            """Обновить текстовый список участников."""
+            self.participants_list.clear()
             if not self.engine.room:
                 return
             for p in self.engine.room.participants.values():
                 item = QtWidgets.QListWidgetItem(p.label)
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, p.id)
-                self.participants.addItem(item)
+                self.participants_list.addItem(item)
             self._update_buttons()
 
         def closeEvent(self, event) -> None:  # noqa: N802

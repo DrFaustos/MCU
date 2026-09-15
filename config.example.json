@@ -45,6 +45,15 @@
   "features": {
     "allow_screen_share": true,
     "allow_recording": true,
-    "recording_path": "./recordings"
+    "recording_path": "./recordings",
+    "layouts": {
+      "available": [
+        "speaker",
+        "gallery_2x2",
+        "gallery_3x3",
+        "grid_auto"
+      ],
+      "default": "speaker"
+    }
   }
 }
