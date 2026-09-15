@@ -70,6 +70,16 @@ build_pjsip() {
     fi
 
     cd "${BUILD_DIR}"
+
+    # PJSIP 2.16 по умолчанию собирается БЕЗ видео (PJMEDIA_HAS_VIDEO=0).
+    # Без этого видео недоступно: нет видеокодеков и устройств, а попытка
+    # выставить videoCount=1 приводит к ассерту pjsua. Включаем видео явно.
+    cat > pjlib/include/pj/config_site.h <<'EOF'
+#define PJMEDIA_HAS_VIDEO 1
+#define PJMEDIA_VIDEO_DEV_HAS_V4L2 1
+EOF
+    log "config_site.h: видео включено (PJMEDIA_HAS_VIDEO=1)"
+
     if [ "${PJSIP_STATIC}" = "1" ]; then
         log "configure (статическая сборка — самодостаточный _pjsua2.so)"
         ./configure CFLAGS="-fPIC -O2" CXXFLAGS="-fPIC -O2" >/dev/null

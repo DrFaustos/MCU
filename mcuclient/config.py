@@ -18,6 +18,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transport": "udp",
         "allowed_peers": [],
         "require_encryption": False,  # Выключено по умолчанию для работы в закрытом контуре без сертификатов
+        "auto_answer": True,  # авто-приём входящих вызовов (режим MCU, без оператора)
         "codecs": {
             "audio": [
                 "opus/48000/2",
@@ -168,6 +169,10 @@ class Config:
     @property
     def require_encryption(self) -> bool:
         return bool(self.raw["sip"].get("require_encryption", False))
+
+    @property
+    def auto_answer(self) -> bool:
+        return bool(self.raw["sip"].get("auto_answer", True))
 
     @property
     def audio_codecs(self) -> List[str]:

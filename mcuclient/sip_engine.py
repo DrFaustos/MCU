@@ -178,6 +178,11 @@ class SipEngine:
         self._account = None
         self._next_call_id = 1
         self._running = False
+        # Поддерживает ли собранный PJSIP видео. Если нет — нельзя выставлять
+        # videoCount=1: pjsua падает с ассертом call->opt.vid_cnt == 0.
+        self._video_supported = False
+        # Активное локальное превью камеры (тест до звонка)
+        self._video_preview = None
 
         # Демонстрация экрана (mss + pyvirtualcam)
         self._screen_sharer = ScreenSharer(
@@ -226,6 +231,8 @@ class SipEngine:
         try:
             if self._recorder.is_recording:
                 self._recorder.stop_recording()
+            if self._video_preview is not None:
+                self.stop_local_preview()
             if self._screen_sharer.is_running:
                 self._screen_sharer.stop()
             if PJSIP_AVAILABLE and self._endpoint is not None:
@@ -256,6 +263,8 @@ class SipEngine:
         self._configure_transport(ep)
         ep.libStart()
         self._endpoint = ep
+        self._video_supported = self._detect_video_support(ep)
+        log.info("PJSIP: видео %s", "поддерживается" if self._video_supported else "НЕ поддерживается")
         self._configure_codecs(ep)
         self._start_account(ep)
 
@@ -283,6 +292,23 @@ class SipEngine:
                 ep.codecSetPriority(codec_id, prio)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось настроить кодеки: %s", exc)
+
+    @staticmethod
+    def _detect_video_support(ep) -> bool:  # pragma: no cover
+        """Есть ли в собранном PJSIP видео (устройства или видеокодеки)."""
+        try:
+            if ep.vidDevManager().getDevCount() > 0:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for codec in ep.codecEnum2():
+                cid = str(codec.codecId).lower()
+                if any(k in cid for k in ("h264", "h265", "vp8", "vp9", "h263")):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
     def _start_account(self, ep) -> None:  # pragma: no cover
         class _Account(_pj.Account):
@@ -354,16 +380,22 @@ class SipEngine:
         participant = self._register_participant(call, remote_uri, state=CallState.INCOMING)
         self.events.emit("call.incoming", id=participant.id, remote=remote_uri)
 
+        # В режиме MCU (без оператора) сразу принимаем вызов, иначе удалённая
+        # сторона получит 487 Request Terminated и не дозвонится.
+        if self.config.auto_answer:
+            log.info("Авто-ответ на вызов от %s", remote_uri)
+            self.accept(participant.id)
+
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam(True)
-            if not self.config.require_encryption:
-                prm.opt.audioCount = 1
-                prm.opt.videoCount = 1
+            prm.opt.audioCount = 1
+            prm.opt.videoCount = 1 if self._video_supported else 0
             p._call.answer(prm)  # pragma: no cover
             p.state = CallState.CONFIRMED
             self._apply_media_state(p)
+            log.info("Вызов принят: %s", p.remote_uri)
             self.events.emit("call.confirmed", id=p.id)
 
     def reject(self, participant_id: int) -> None:
@@ -387,7 +419,7 @@ class SipEngine:
             call = _pj.Call(self._account)
             prm = _pj.CallOpParam(True)
             prm.opt.audioCount = 1
-            prm.opt.videoCount = 1
+            prm.opt.videoCount = 1 if self._video_supported else 0
             call.makeCall(uri, prm)
             participant = self._register_participant(call, uri, state=CallState.CONNECTING)
             self.events.emit("call.outgoing", id=participant.id, remote=uri)
@@ -426,6 +458,91 @@ class SipEngine:
         self._apply_media_state()
         self.events.emit("media.microphone", enabled=state)
         return state
+
+    # --- камера: выбор устройства и локальный тест до звонка ---
+    def list_video_devices(self) -> List[dict]:
+        """Список видеоустройств, известных PJSIP (камера, SDL, colorbar)."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return []
+        devices: List[dict] = []
+        try:  # pragma: no cover
+            vdm = self._endpoint.vidDevManager()
+            for i in range(vdm.getDevCount()):
+                info = vdm.getDevInfo(i)
+                devices.append({"id": i, "name": info.name, "driver": info.driver})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось перечислить видеоустройства: %s", exc)
+        return devices
+
+    def set_video_device(self, dev_id: int) -> bool:
+        """Переключить камеру по id (см. list_video_devices)."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return False
+        try:  # pragma: no cover
+            param = _pj.VideoSwitchParam()
+            param.target_id = int(dev_id)
+            self._endpoint.vidDevManager().switchDev(dev_id, param)
+            self.media_state.camera_id = str(dev_id)
+            log.info("Камера переключена на устройство %s", dev_id)
+            self.events.emit("media.camera_device", id=dev_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось переключить камеру: %s", exc)
+            return False
+
+    def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
+        """Показать локальное превью камеры (тест до приёма звонка)."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            self.events.emit("media.preview", active=False, error="pjsip_unavailable")
+            return False
+        if not self._video_supported:
+            self.events.emit("media.preview", active=False, error="video_unsupported")
+            return False
+        try:  # pragma: no cover
+            # Определяем устройство: явный id -> сохранённый -> первый доступный.
+            target = dev_id
+            if target is None and self.media_state.camera_id is not None:
+                try:
+                    target = int(self.media_state.camera_id)
+                except (TypeError, ValueError):
+                    target = None
+            if target is None:
+                devices = self.list_video_devices()
+                if not devices:
+                    self.events.emit("media.preview", active=False, error="no_devices")
+                    return False
+                target = devices[0]["id"]
+
+            # Переключение не критично: не все драйверы поддерживают switch.
+            self.set_video_device(target)
+
+            if self._video_preview is None:
+                self._video_preview = _pj.VideoPreview(int(target))
+            prm = _pj.VideoPreviewOpParam()
+            self._video_preview.start(prm)
+            log.info("Локальное превью камеры запущено")
+            self.events.emit("media.preview", active=True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось запустить превью камеры: %s", exc)
+            self.events.emit("media.preview", active=False, error=str(exc))
+            return False
+
+    def stop_local_preview(self) -> None:
+        """Остановить локальное превью камеры."""
+        if self._video_preview is None:
+            return
+        try:  # pragma: no cover
+            self._video_preview.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Ошибка остановки превью: %s", exc)
+        self._video_preview = None
+        self.events.emit("media.preview", active=False)
+        log.info("Локальное превью камеры остановлено")
+
+    @property
+    def local_preview_active(self) -> bool:
+        return self._video_preview is not None
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         """Включить/выключить демонстрацию экрана.
