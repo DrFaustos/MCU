@@ -4,26 +4,30 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-      
+
       - name: Build executable
+        env:
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
         run: python build.py
-      
+
       - name: Download FFmpeg for Windows
         shell: pwsh
         run: |
@@ -31,7 +35,7 @@ jobs:
           Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_temp"
           Move-Item -Path "ffmpeg_temp\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe" -Destination "dist\ffmpeg.exe"
           Remove-Item -Recurse -Force "ffmpeg_temp", "ffmpeg.zip"
-      
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -44,30 +48,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
-      
+          sudo apt-get install -y ffmpeg fuse libfuse2 file desktop-file-utils
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-      
-      - name: Build executable
-        run: python build.py
-      
+
+      - name: Build executable + AppImage
+        env:
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: 'utf-8'
+        run: python build.py --appimage
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MCU-Client-Linux
-          path: dist/MCU-Client
+          path: |
+            dist/MCU-Client
+            dist/MCU-Client-x86_64.AppImage
 
   release:
     needs: [build-windows, build-linux]
@@ -79,12 +88,15 @@ jobs:
         with:
           name: MCU-Client-Windows
           path: release-files/
-      
+
       - uses: actions/download-artifact@v4
         with:
           name: MCU-Client-Linux
           path: release-files/
-      
+
+      - name: List release files
+        run: ls -la release-files/
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -92,6 +104,7 @@ jobs:
             release-files/MCU-Client.exe
             release-files/ffmpeg.exe
             release-files/MCU-Client
+            release-files/MCU-Client-x86_64.AppImage
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

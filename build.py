@@ -89,12 +89,26 @@ def _download_appimagetool(dest: Path) -> Path:
     return dest
 
 
+def _ensure_appimage_tools() -> None:
+    """appimagetool требует утилиту `file`; даём понятную ошибку вместо трейсбека."""
+    if shutil.which("file") is None:
+        raise RuntimeError(
+            "Не найдена утилита 'file', необходимая appimagetool.\n"
+            "Установите её:\n"
+            "  Debian/Ubuntu: sudo apt-get install -y file\n"
+            "  Fedora:        sudo dnf install -y file\n"
+            "  Arch:          sudo pacman -S file"
+        )
+
+
 def build_appimage(binary: Path) -> Path:
     """Собирает AppImage из уже готового бинарника (только Linux)."""
     if platform.system() != "Linux":
         raise RuntimeError("AppImage можно собрать только на Linux")
     if not binary.exists():
         raise FileNotFoundError(f"Не найден бинарник: {binary}")
+
+    _ensure_appimage_tools()
 
     appdir = ROOT / "dist" / "AppDir"
     if appdir.exists():
