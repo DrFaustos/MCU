@@ -61,6 +61,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Запуск движка и (опционально) H.323
     engine.start()
+
+    # --- Диагностика SIP-транспорта ---
+    if not engine.pjsip_available:
+        log.error("=" * 68)
+        log.error("pjsua2 (PJSIP) НЕ установлен — SIP-транспорт НЕ поднят.")
+        log.error("Порт %s:%s НЕ слушается, входящие вызовы приниматься не будут.",
+                  config.sip_listen, config.sip_port)
+        log.error("Установите биндинг:  sudo ./scripts/install_pjsua2.sh")
+        log.error("=" * 68)
+    else:
+        log.info("SIP-транспорт слушает %s:%s (%s)",
+                 config.sip_listen, config.sip_port, config.sip_transport)
+
     if config.h323_enabled:
         h323.start()
         st = h323.status()

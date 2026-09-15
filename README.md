@@ -281,3 +281,61 @@ CI (`.github/workflows/release.yml`) при пуше тега `v*` собира�
 
     git tag -a v0.1.4 -m "Release v0.1.4"
     git push origin v0.1.4
+
+---
+
+## Важно: установка pjsua2 (SIP-стек)
+
+Без Python-биндинга `pjsua2` приложение запускается, но **SIP-транспорт не
+поднимается**: порт 5060 не слушается, входящие вызовы не принимаются.
+В этом случае в логе будет явная ошибка:
+
+    pjsua2 (PJSIP) НЕ установлен — SIP-транспорт НЕ поднят.
+    Порт 0.0.0.0:5060 НЕ слушается, входящие вызовы приниматься не будут.
+    Установите биндинг:  sudo ./scripts/install_pjsua2.sh
+
+### Автоматическая установка (Linux)
+
+Скрипт собирает PJSIP 2.16 из исходников с полным SWIG-биндингом
+(Endpoint, mediaConfig, SRTP) и ставит его в нужный Python:
+
+    # в системный python3
+    sudo ./scripts/install_pjsua2.sh
+
+    # в виртуальное окружение
+    python3 -m venv .venv && . .venv/bin/activate
+    ./scripts/install_pjsua2.sh "$VIRTUAL_ENV/bin/python"
+
+Скрипт сам ставит зависимости через apt-get / dnf / pacman и проверяет импорт.
+
+### Ручная установка
+
+    sudo apt-get install -y build-essential python3-dev swig git pkg-config \
+        libssl-dev libasound2-dev libv4l-dev portaudio19-dev libsdl2-dev \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+        libavdevice-dev libx264-dev libx265-dev libsrtp2-dev libopus-dev libvpx-dev
+    git clone --depth 1 --branch 2.16 https://github.com/pjsip/pjproject.git /tmp/pjproject
+    cd /tmp/pjproject
+    ./configure --enable-shared CFLAGS="-fPIC -O2"
+    make dep && make -j$(nproc) && sudo make install && sudo ldconfig
+    cd pjsip-apps/src/swig && make
+    cd python && python3 setup.py build && sudo python3 setup.py install
+
+Проверка:
+
+    python3 -c "import pjsua2; ep=pjsua2.Endpoint(); ep.libCreate(); print('OK')"
+
+### Почему не из pip
+
+Пакет `pjsua2-pybind11` на PyPI — неполный (нет `mediaConfig`, SRTP-констант),
+а `pjsua2` 2.12 — устаревший. Поэтому рекомендуется сборка из исходников.
+
+### Проверка, что порт слушается
+
+    python run.py --headless --listen 0.0.0.0:5060 &
+    sleep 12
+    ss -tulnp | grep 5060
+
+В логе должно появиться:
+
+    SIP-транспорт слушает 0.0.0.0:5060 (udp)

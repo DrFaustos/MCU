@@ -244,7 +244,9 @@ class SipEngine:
 
     # --- PJSIP ---
     def _start_pjsip(self) -> None:  # pragma: no cover
-        ep = _pj.Endpoint.instance()
+        # SWIG-биндинг pjsua2: сначала конструктор Endpoint(), затем libCreate().
+        # Endpoint.instance() до libCreate() бросает PJ_ENOTFOUND и SIP не поднимается.
+        ep = _pj.Endpoint()
         ep_cfg = _pj.EpConfig()
         ep_cfg.logConfig.level = 3
         ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
@@ -292,7 +294,7 @@ class SipEngine:
                 self.engine._on_incoming(prm)
 
         acc_cfg = _pj.AccountConfig()
-        acc_cfg.idUri = f"sip:{self.config.room_name}@{self.config.sip_listen}"
+        acc_cfg.idUri = self._build_id_uri()
 
         if self.config.require_encryption:
             acc_cfg.mediaConfig.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
@@ -301,6 +303,42 @@ class SipEngine:
 
         self._account = _Account(self)
         self._account.create(acc_cfg)
+
+    def _build_id_uri(self) -> str:
+        """Собрать валидный SIP URI аккаунта.
+
+        PJSIP отвергает idUri с пробелами (room name) и с 0.0.0.0/:: в качестве
+        host. Поэтому имя комнаты приводится к безопасному токену, а wildcard-
+        адрес заменяется на реальный локальный IP.
+        """
+        import re
+
+        user = re.sub(r"[^A-Za-z0-9._-]+", "-", self.config.room_name).strip("-")
+        user = user or "mcu"
+
+        host = self.config.sip_listen
+        if host in ("", "0.0.0.0", "::", "*"):
+            host = self._local_ip()
+
+        return f"sip:{user}@{host}"
+
+    @staticmethod
+    def _local_ip() -> str:
+        """Определить локальный IP (без реального соединения)."""
+        import socket
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:  # noqa: BLE001
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:  # noqa: BLE001
+                return "127.0.0.1"
 
     # --- входящие/исходящие ---
     def _on_incoming(self, prm) -> None:  # pragma: no cover
