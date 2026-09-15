@@ -18,7 +18,7 @@ import sys
 
 from mcuclient.config import load_config, parse_listen
 from mcuclient.h323_gateway import H323Gateway
-from mcuclient.log import get_logger, setup_logging
+from mcuclient.log import get_logger, log_file_path, setup_logging
 from mcuclient.sip_engine import SipEngine
 
 
@@ -86,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("main")
+
+    # Пишем в лог первую строку — она подтверждает старт и указывает файл.
+    log.info("=" * 60)
+    log.info("MCU Client запускается. Лог-файл: %s", log_file_path())
+    log.info("Платформа: %s, Python %s", sys.platform, sys.version.split()[0])
 
     config = load_config(args.config)
 

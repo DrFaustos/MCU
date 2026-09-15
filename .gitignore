@@ -76,3 +76,7 @@ cython_debug/
 *~
 .DS_Store
 config.json
+
+# runtime log
+mcu-client.log
+*.log
