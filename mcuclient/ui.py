@@ -4,7 +4,7 @@
 * превью камеры;
 * список участников комнаты (входящие/исходящие вызовы);
 * кнопки Принять / Отклонить / Завершить / Позвонить;
-* тумблеры камеры и микрофона;
+* тумблеры камеры, микрофона, демонстрации экрана и записи;
 * слайдеры качества видео, битрейта видео/аудио и общей полосы.
 
 Модуль не падает при отсутствии PySide6: если GUI-библиотека недоступна,
@@ -64,7 +64,7 @@ if QT_AVAILABLE:
             # Левая часть: превью камеры
             left = QtWidgets.QVBoxLayout()
             self.video_label = QtWidgets.QLabel("Камера (превью)")
-            self.video_label.setAlignment(QtCore.Qt.AlignCenter)
+            self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.video_label.setMinimumSize(640, 480)
             self.video_label.setStyleSheet(
                 "background:#101418; color:#7a8592; border:1px solid #2a3138;"
@@ -100,17 +100,30 @@ if QT_AVAILABLE:
             btn_row.addWidget(self.hangup_btn)
             right.addLayout(btn_row)
 
-            # Тумблеры устройств
-            devices = QtWidgets.QGroupBox("Устройства")
+            # Тумблеры устройств и функций
+            devices = QtWidgets.QGroupBox("Устройства и функции")
             dlayout = QtWidgets.QGridLayout(devices)
+            
             self.camera_toggle = QtWidgets.QCheckBox("Камера")
             self.camera_toggle.setChecked(self.engine.media_state.camera_enabled)
             self.camera_toggle.toggled.connect(self.engine.set_camera_enabled)
+            
             self.mic_toggle = QtWidgets.QCheckBox("Микрофон")
             self.mic_toggle.setChecked(self.engine.media_state.microphone_enabled)
             self.mic_toggle.toggled.connect(self.engine.set_microphone_enabled)
+            
+            self.screen_toggle = QtWidgets.QCheckBox("Демонстрация экрана")
+            self.screen_toggle.setChecked(False)
+            self.screen_toggle.toggled.connect(self.engine.set_screen_share_enabled)
+            
+            self.record_toggle = QtWidgets.QCheckBox("Запись конференции")
+            self.record_toggle.setChecked(False)
+            self.record_toggle.toggled.connect(self._on_record_toggle)
+            
             dlayout.addWidget(self.camera_toggle, 0, 0)
             dlayout.addWidget(self.mic_toggle, 0, 1)
+            dlayout.addWidget(self.screen_toggle, 1, 0)
+            dlayout.addWidget(self.record_toggle, 1, 1)
             right.addWidget(devices)
 
             # Качество и битрейты
@@ -125,7 +138,7 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.quality_combo, 0, 1)
 
             qlayout.addWidget(QtWidgets.QLabel("Битрейт видео (kbps)"), 1, 0)
-            self.video_bitrate = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self.video_bitrate = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             self.video_bitrate.setRange(128, 8000)
             self.video_bitrate.setValue(self.config.video["bitrate_kbps"])
             self.video_bitrate.valueChanged.connect(self.engine.set_video_bitrate)
@@ -137,7 +150,7 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.video_bitrate_label, 1, 2)
 
             qlayout.addWidget(QtWidgets.QLabel("Битрейт аудио (kbps)"), 2, 0)
-            self.audio_bitrate = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self.audio_bitrate = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             self.audio_bitrate.setRange(6, 256)
             self.audio_bitrate.setValue(self.config.audio["bitrate_kbps"])
             self.audio_bitrate.valueChanged.connect(self.engine.set_audio_bitrate)
@@ -149,7 +162,7 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.audio_bitrate_label, 2, 2)
 
             qlayout.addWidget(QtWidgets.QLabel("Полоса (kbps)"), 3, 0)
-            self.bandwidth = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self.bandwidth = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             self.bandwidth.setRange(128, 20000)
             self.bandwidth.setValue(self.config.bandwidth_kbps)
             self.bandwidth.valueChanged.connect(self.engine.set_bandwidth)
@@ -170,7 +183,7 @@ if QT_AVAILABLE:
             item = self.participants.currentItem()
             if item is None:
                 return None
-            return item.data(QtCore.Qt.UserRole)
+            return item.data(QtCore.Qt.ItemDataRole.UserRole)
 
         def _on_call(self) -> None:
             uri = self.uri_edit.text().strip()
@@ -200,6 +213,16 @@ if QT_AVAILABLE:
             w, h, fps = self.QUALITY_PRESETS[name]
             self.engine.set_video_quality(w, h, fps)
 
+        def _on_record_toggle(self, checked: bool) -> None:
+            success = self.engine.toggle_recording()
+            if not checked and success:
+                self.record_toggle.setChecked(False)  # revert if failed
+            elif checked and not success:
+                self.record_toggle.setChecked(False)  # revert if failed
+            
+            status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
+            self.statusBar().showMessage(status, 5000)
+
         def _update_buttons(self) -> None:
             pid = self._current_id()
             p = self.engine.room.participants.get(pid) if (pid and self.engine.room) else None
@@ -212,7 +235,7 @@ if QT_AVAILABLE:
             # События приходят из потоков pjsua2 — переключаемся в GUI-поток.
             QtCore.QMetaObject.invokeMethod(
                 self, "_handle_event",
-                QtCore.Qt.QueuedConnection,
+                QtCore.Qt.ConnectionType.QueuedConnection,
                 QtCore.Q_ARG(str, event),
                 QtCore.Q_ARG(dict, payload),
             )
@@ -226,9 +249,13 @@ if QT_AVAILABLE:
                 self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
             elif event == "engine.started":
                 mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
+                enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"
                 self.statusBar().showMessage(
-                    f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode}"
+                    f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode} {enc}"
                 )
+            elif event == "media.recording":
+                state = "начата" if payload.get("enabled") else "остановлена"
+                self.statusBar().showMessage(f"Запись конференции {state}", 5000)
 
         def _refresh_participants(self) -> None:
             self.participants.clear()
@@ -236,7 +263,7 @@ if QT_AVAILABLE:
                 return
             for p in self.engine.room.participants.values():
                 item = QtWidgets.QListWidgetItem(p.label)
-                item.setData(QtCore.Qt.UserRole, p.id)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, p.id)
                 self.participants.addItem(item)
             self._update_buttons()
 

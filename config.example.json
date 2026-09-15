@@ -7,11 +7,8 @@
     "listen": "0.0.0.0",
     "port": 5060,
     "transport": "udp",
-    "allowed_peers": [
-      "192.168.0.0/16",
-      "10.0.0.0/8",
-      "172.16.0.0/12"
-    ],
+    "allowed_peers": [],
+    "require_encryption": false,
     "codecs": {
       "audio": [
         "opus/48000/2",
@@ -44,5 +41,10 @@
   "h323": {
     "enabled": false,
     "port": 1720
+  },
+  "features": {
+    "allow_screen_share": true,
+    "allow_recording": true,
+    "recording_path": "./recordings"
   }
 }

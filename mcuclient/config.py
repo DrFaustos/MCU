@@ -17,6 +17,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "port": 5060,
         "transport": "udp",
         "allowed_peers": [],
+        "require_encryption": False,  # Выключено по умолчанию для работы в закрытом контуре без сертификатов
         "codecs": {
             "audio": [
                 "opus/48000/2",
@@ -34,6 +35,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "bandwidth_kbps": 4000,
     },
     "h323": {"enabled": False, "port": 1720},
+    "features": {
+        "allow_screen_share": True,
+        "allow_recording": True,
+        "recording_path": "./recordings",
+    },
 }
 
 
@@ -85,7 +91,7 @@ class Config:
     raw: Dict[str, Any]
     path: Optional[Path] = None
 
-    # --- достуные свойства ---
+    # --- доступные свойства ---
     @property
     def room_name(self) -> str:
         return self.raw["room"]["name"]
@@ -101,6 +107,10 @@ class Config:
     @property
     def sip_transport(self) -> str:
         return str(self.raw["sip"]["transport"]).lower()
+
+    @property
+    def require_encryption(self) -> bool:
+        return bool(self.raw["sip"].get("require_encryption", False))
 
     @property
     def audio_codecs(self) -> List[str]:
@@ -134,6 +144,10 @@ class Config:
     def h323_port(self) -> int:
         return int(self.raw["h323"]["port"])
 
+    @property
+    def features(self) -> Dict[str, Any]:
+        return self.raw.get("features", DEFAULT_CONFIG["features"])
+
     # --- изменение на лету ---
     def set_video_bitrate(self, kbps: int) -> None:
         self.raw["media"]["video"]["bitrate_kbps"] = max(64, int(kbps))
@@ -153,6 +167,7 @@ class Config:
 
     def save(self, path: Optional[Path] = None) -> Path:
         target = Path(path or self.path or "config.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self.raw, indent=2, ensure_ascii=False), encoding="utf-8")
         self.path = target
         return target
@@ -162,9 +177,10 @@ def load_config(path: Optional[str] = None) -> Config:
     """Загрузить конфиг из файла, недостающие ключи — из DEFAULT_CONFIG."""
     if path:
         cfg_path = Path(path)
-        user = json.loads(cfg_path.read_text(encoding="utf-8"))
-        merged = _deep_merge(DEFAULT_CONFIG, user)
-        return Config(raw=merged, path=cfg_path)
+        if cfg_path.exists():
+            user = json.loads(cfg_path.read_text(encoding="utf-8"))
+            merged = _deep_merge(DEFAULT_CONFIG, user)
+            return Config(raw=merged, path=cfg_path)
     return Config(raw=copy.deepcopy(DEFAULT_CONFIG), path=None)
 
 
