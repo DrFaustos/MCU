@@ -6,6 +6,6 @@ Comment=Кроссплатформенный ВКС-клиент (SIP / H.323)
 Exec=MCU-Client
 Icon=mcu-client
 Terminal=false
-Categories=Network;AudioVideo;VideoConference;
+Categories=AudioVideo;Network;
 Keywords=SIP;H.323;MCU;video;conference;ВКС;
 StartupWMClass=MCU-Client

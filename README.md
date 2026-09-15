@@ -63,8 +63,6 @@ GUI — Qt (PySide6).
 
 ### Установка зависимостей
 
- 
-
 `requirements.txt` включает: `PySide6`, `mss`, `numpy`, `pyvirtualcam`.
 
 PJSIP/pjsua2 ставится отдельно:
@@ -73,7 +71,9 @@ PJSIP/pjsua2 ставится отдельно:
 * Linux (Debian/Ubuntu): `sudo apt install python3-pjsua2` или сборка PJSIP.
 
 Для демонстрации экрана на Linux требуется `v4l2loopback`:
- 
+
+    sudo apt install v4l2loopback-dkms v4l2loopback-utils
+    sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="OBS Virtual Camera" exclusive_caps=1
 
 Для Windows требуется **OBS Virtual Camera** (устанавливается вместе с OBS Studio).
 
@@ -100,7 +100,22 @@ PJSIP/pjsua2 ставится отдельно:
 
 ## Структура проекта
 
- 
+    MCU/
+    ├── run.py                     # точка входа
+    ├── build.py                   # сборка (PyInstaller + AppImage)
+    ├── requirements.txt
+    ├── config.example.json
+    ├── mcuclient/                 # основной пакет
+    │   ├── config.py              # загрузка/валидация config.json
+    │   ├── sip_engine.py          # SIP на pjsua2
+    │   ├── h323_gateway.py        # шлюз H.323 (опционально)
+    │   ├── media_devices.py       # камера/микрофон, вкл/выкл
+    │   ├── screen_share.py        # захват экрана -> виртуальная камера
+    │   ├── recorder.py            # запись конференции (FFmpeg)
+    │   └── ui.py                  # Qt-интерфейс (PySide6)
+    ├── packaging/                 # AppImage / Flatpak / desktop-файлы
+    ├── docs/ARCHITECTURE.md
+    └── tests/
 
 ---
 
@@ -114,8 +129,8 @@ PJSIP/pjsua2 ставится отдельно:
 | Вкл/выкл микрофон           | тумблер **Microphone**   |
 | Демонстрация экрана         | тумблер **Screen Share** |
 | Запись конференции          | тумблер **Recording**    |
-| Мут участника (аудио)       | кнопка 🔊/🔇 на тайле    |
-| Мут участника (видео)       | кнопка 📹/📷✕ на тайле   |
+| Мут участника (аудио)       | кнопка 🔇 на тайле       |
+| Мут участника (видео)       | кнопка 📷✕ на тайле      |
 | Мут всех                    | кнопка **Мут всех**      |
 | Раскладка видео             | селектор layouts         |
 | Качество видео (разрешение) | селектор 360p/720p/1080p |
@@ -146,20 +161,32 @@ PJSIP/pjsua2 ставится отдельно:
 рекомендуется **AppImage** (универсально, без root), для управляемых
 рабочих станций — **Flatpak**. Windows — готовый `.exe`.
 
+Все команды ниже даны с отступом в 4 пробела (копируйте строки без отступа).
+
 ### Windows 10/11
 
 **Установка (portable):**
+
 1. Скачайте из раздела *Releases* файлы `MCU-Client.exe` и `ffmpeg.exe`.
 2. Положите их в одну папку, например `C:\Program Files\MCU-Client\`.
 3. Запустите `MCU-Client.exe` (FFmpeg подхватывается рядом с .exe).
 
-Опционально — ярлык в меню «Пуск»:
+Опционально — ярлык в меню «Пуск» (PowerShell):
 
- 
+    $dir = "C:\Program Files\MCU-Client"
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk")
+    $s.TargetPath = "$dir\MCU-Client.exe"
+    $s.WorkingDirectory = $dir
+    $s.Save()
 
-**Удаление:**
+**Удаление (PowerShell):**
 
- 
+    Remove-Item -Recurse -Force "C:\Program Files\MCU-Client"
+    Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk"
+    Remove-Item -Recurse -Force "$env:APPDATA\MCU-Client"   # config.json и записи (если создавались)
+
+Если приложение запускалось «портативно» из другой папки — просто удалите
+эту папку вместе с `MCU-Client.exe` и `ffmpeg.exe`.
 
 ### Linux — AppImage (рекомендуется, универсально)
 
@@ -168,18 +195,36 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 **Установка:**
 
- 
+    # Скачать из Releases
+    wget https://github.com/DrFaustos/MCU/releases/latest/download/MCU-Client-x86_64.AppImage
+    chmod +x MCU-Client-x86_64.AppImage
+
+    # Установить в ~/.local (ярлык + иконка)
+    ./packaging/install.sh MCU-Client-x86_64.AppImage
 
 После этого приложение доступно в меню как **MCU Client** и командой
 `MCU-Client.AppImage`.
 
 **Запуск без установки (портативно):**
 
- 
+    chmod +x MCU-Client-x86_64.AppImage
+    ./MCU-Client-x86_64.AppImage --listen 0.0.0.0:5060
 
 **Удаление:**
 
- 
+    ./packaging/install.sh --uninstall
+
+Скрипт удаляет ровно то, что установил:
+
+    ~/.local/bin/MCU-Client.AppImage
+    ~/.local/share/applications/mcu-client.desktop
+    ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
+
+Ручное удаление (если скрипта под рукой нет):
+
+    rm -f ~/.local/bin/MCU-Client.AppImage
+    rm -f ~/.local/share/applications/mcu-client.desktop
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
 
 Если `fuse` недоступен (например, в контейнере), запускайте с
 `APPIMAGE_EXTRACT_AND_RUN=1 ./MCU-Client-x86_64.AppImage`.
@@ -188,22 +233,33 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 **Сборка пакета** (нужны `flatpak`, `flatpak-builder`):
 
- 
+    flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
+    ./packaging/build_flatpak.sh          # -> dist/MCU-Client.flatpak
 
 **Установка:**
 
- 
+    flatpak install --user dist/MCU-Client.flatpak
+    flatpak run ru.mcu.McuClient
 
 **Удаление:**
 
- 
+    flatpak uninstall --user ru.mcu.McuClient
+    flatpak uninstall --unused            # почистить неиспользуемые рантаймы
+    rm -rf ~/.var/app/ru.mcu.McuClient    # config.json и записи конференций
 
 ### Linux — из исходников
 
- 
+    python3 -m venv .venv && . .venv/bin/activate
+    pip install -r requirements.txt
+    sudo apt install python3-pjsua2 ffmpeg          # Debian/Ubuntu
+    python run.py --listen 0.0.0.0:5060
 
-Удаление — просто удалите каталог с исходниками и виртуальное окружение
-(системных файлов установка не создаёт).
+**Удаление:** установка из исходников не создаёт системных файлов —
+достаточно удалить каталог с проектом и виртуальное окружение:
+
+    deactivate 2>/dev/null || true
+    rm -rf .venv
+    cd .. && rm -rf MCU
 
 ---
 
@@ -211,10 +267,17 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 Локальная сборка:
 
- 
+    python build.py                 # нативный бинарник в dist/
+    python build.py --appimage      # + AppImage (только Linux)
+    ./packaging/build_flatpak.sh    # + Flatpak (нужен flatpak-builder)
 
 CI (`.github/workflows/release.yml`) при пуше тега `v*` собирает
 `MCU-Client.exe` + `ffmpeg.exe` (Windows) и `MCU-Client` +
 `MCU-Client-x86_64.AppImage` (Linux) и прикрепляет их к GitHub Release.
 Флаг `PYTHONUTF8=1` в workflow устраняет ошибку `UnicodeEncodeError`
 на Windows-раннере (cp1252).
+
+Чтобы выпустить новую версию:
+
+    git tag -a v0.1.4 -m "Release v0.1.4"
+    git push origin v0.1.4
