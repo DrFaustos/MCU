@@ -5,9 +5,16 @@
 # Python-окружение (по умолчанию — в текущий python3). Это единственный
 # надёжный способ получить полный API pjsua2 (Endpoint, mediaConfig, SRTP).
 #
+# Режимы сборки PJSIP:
+#   * shared (по умолчанию)  — системные .so, меньше размер бинарника;
+#   * static (PJSIP_STATIC=1) — PJSIP встраивается в _pjsua2.so, поэтому
+#     PyInstaller-сборка становится самодостаточной (рекомендуется для
+#     упаковки AppImage/Flatpak, где системных .so может не быть).
+#
 # Использование:
 #   sudo ./scripts/install_pjsua2.sh                     # в системный python3
 #   PJSIP_VERSION=2.16 ./scripts/install_pjsua2.sh /path/to/venv/bin/python
+#   PJSIP_STATIC=1 ./scripts/install_pjsua2.sh "$VIRTUAL_ENV/bin/python"
 #
 # Требуется: build-essential, python3-dev, swig, git и dev-пакеты медиастека
 # (скрипт ставит их сам через apt/dnf/pacman, если есть root).
@@ -17,6 +24,7 @@ PJSIP_VERSION="${PJSIP_VERSION:-2.16}"
 BUILD_DIR="${BUILD_DIR:-/tmp/pjproject-build}"
 PYTHON_BIN="${1:-python3}"
 JOBS="$(nproc 2>/dev/null || echo 2)"
+PJSIP_STATIC="${PJSIP_STATIC:-0}"
 
 log() { printf '[install-pjsua2] %s\n' "$*"; }
 
@@ -62,16 +70,24 @@ build_pjsip() {
     fi
 
     cd "${BUILD_DIR}"
-    log "configure"
-    ./configure --enable-shared CFLAGS="-fPIC -O2" >/dev/null
+    if [ "${PJSIP_STATIC}" = "1" ]; then
+        log "configure (статическая сборка — самодостаточный _pjsua2.so)"
+        ./configure CFLAGS="-fPIC -O2" CXXFLAGS="-fPIC -O2" >/dev/null
+    else
+        log "configure (shared)"
+        ./configure --enable-shared CFLAGS="-fPIC -O2" >/dev/null
+    fi
     log "make dep"
     make dep >/dev/null
     log "make -j${JOBS} (может занять несколько минут)"
     make -j"${JOBS}" >/dev/null
-    log "make install (системные библиотеки)"
-    SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
-    $SUDO make install >/dev/null
-    $SUDO ldconfig 2>/dev/null || true
+
+    if [ "${PJSIP_STATIC}" != "1" ]; then
+        log "make install (системные библиотеки)"
+        SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+        $SUDO make install >/dev/null
+        $SUDO ldconfig 2>/dev/null || true
+    fi
 }
 
 # --- 3. Python-биндинг -------------------------------------------------------

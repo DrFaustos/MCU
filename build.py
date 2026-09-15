@@ -7,9 +7,15 @@ FFmpeg распространяется отдельно (скачивается
 (флаг ``--appimage``) — установка/удаление без root, работает на любом
 дистрибутиве. Для Flatpak см. ``packaging/build_flatpak.sh``.
 
+Важно: сборка требует установленного pjsua2 (PJSIP). Если его нет, бинарник
+соберётся, но SIP-транспорт работать НЕ будет (режим-заглушка). Чтобы это не
+пропустить, скрипт завершается ошибкой; для отладочной сборки без SIP есть
+флаг ``--allow-no-pjsip``.
+
 Примеры:
     python build.py                 # собрать нативный бинарник
     python build.py --appimage      # + собрать AppImage (только Linux)
+    python build.py --allow-no-pjsip  # отладочная сборка без SIP
 """
 
 from __future__ import annotations
@@ -45,6 +51,38 @@ APPIMAGETOOL_URL = (
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def _pjsua2_available() -> bool:
+    try:
+        import pjsua2  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_pjsua2(allow_missing: bool) -> None:
+    """Проверить наличие pjsua2 до сборки.
+
+    Без pjsua2 в бинарник не попадает SIP-стек, и приложение молча уходит
+    в режим-заглушку (порт 5060 не слушается). Поэтому по умолчанию это
+    ошибка сборки.
+    """
+    if _pjsua2_available():
+        log("[+] pjsua2 найден — SIP-стек будет включён в сборку")
+        return
+    if allow_missing:
+        log("[!] pjsua2 НЕ найден — собираю БЕЗ SIP-стека (--allow-no-pjsip).")
+        log("[!] Такой бинарник НЕ будет принимать вызовы.")
+        return
+    raise SystemExit(
+        "[x] pjsua2 не найден. Без него SIP-транспорт не поднимется.\n"
+        "    Установите PJSIP:\n"
+        "      sudo ./scripts/install_pjsua2.sh\n"
+        "    Для упаковки AppImage/Flatpak используйте статическую сборку:\n"
+        "      PJSIP_STATIC=1 ./scripts/install_pjsua2.sh \"$VIRTUAL_ENV/bin/python\"\n"
+        "    Отладочная сборка без SIP:  python build.py --allow-no-pjsip"
+    )
 
 
 def ensure_pyinstaller() -> None:
@@ -158,9 +196,11 @@ def build_appimage(binary: Path) -> Path:
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     want_appimage = "--appimage" in args
+    allow_no_pjsip = "--allow-no-pjsip" in args
 
     log("[+] Начало сборки MCU Client...")
 
+    ensure_pjsua2(allow_missing=allow_no_pjsip)
     ensure_pyinstaller()
     binary = build_binary()
 

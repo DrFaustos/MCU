@@ -16,17 +16,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # pjsua2 (SWIG-биндинг PJSIP) не имеет официального wheel для Windows.
+      # Без него SIP-транспорт в собранном .exe не поднимется.
+      - name: Check pjsua2 availability
+        run: |
+          python -c "import pjsua2; print('pjsua2 OK')" || echo "::warning::pjsua2 не установлен — SIP в .exe будет в режиме-заглушке. См. README (установка pjsua2 на Windows)."
+
       - name: Build executable
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py
+        run: python build.py --allow-no-pjsip
 
       - name: Download FFmpeg for Windows
         shell: pwsh
@@ -63,6 +69,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      # Ставим pjsua2 статически, чтобы SIP-стек попал в AppImage
+      # и не зависел от системных libpjsua2*.so на машине пользователя.
+      - name: Install PJSIP (pjsua2, static)
+        env:
+          PJSIP_STATIC: '1'
+          PJSIP_VERSION: '2.16'
+        run: |
+          chmod +x scripts/install_pjsua2.sh
+          sudo -E ./scripts/install_pjsua2.sh "$(which python)"
+          python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
       - name: Build executable + AppImage
         env:
