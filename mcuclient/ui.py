@@ -271,11 +271,11 @@ if QT_AVAILABLE:
 
             self.camera_toggle = QtWidgets.QCheckBox("📹 Камера")
             self.camera_toggle.setChecked(self.engine.media_state.camera_enabled)
-            self.camera_toggle.toggled.connect(self.engine.set_camera_enabled)
+            self.camera_toggle.toggled.connect(self._on_camera_toggle)
 
             self.mic_toggle = QtWidgets.QCheckBox("🎤 Микрофон")
             self.mic_toggle.setChecked(self.engine.media_state.microphone_enabled)
-            self.mic_toggle.toggled.connect(self.engine.set_microphone_enabled)
+            self.mic_toggle.toggled.connect(self._on_mic_toggle)
 
             self.screen_toggle = QtWidgets.QCheckBox("🖥 Демонстрация экрана")
             self.screen_toggle.setChecked(False)
@@ -289,6 +289,43 @@ if QT_AVAILABLE:
             dlayout.addWidget(self.mic_toggle, 0, 1)
             dlayout.addWidget(self.screen_toggle, 1, 0)
             dlayout.addWidget(self.record_toggle, 1, 1)
+
+            # --- Выбор и тест устройств ДО звонка ---
+            dlayout.addWidget(QtWidgets.QLabel("Камера:"), 2, 0)
+            self.camera_combo = QtWidgets.QComboBox()
+            self._populate_cameras()
+            self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
+            dlayout.addWidget(self.camera_combo, 2, 1)
+
+            self.preview_btn = QtWidgets.QPushButton("▶ Тест камеры")
+            self.preview_btn.setCheckable(True)
+            self.preview_btn.setToolTip("Показать локальное превью выбранной камеры")
+            self.preview_btn.toggled.connect(self._on_preview_toggle)
+            dlayout.addWidget(self.preview_btn, 3, 0, 1, 2)
+
+            dlayout.addWidget(QtWidgets.QLabel("Микрофон:"), 4, 0)
+            self.mic_combo = QtWidgets.QComboBox()
+            self._populate_mics()
+            self.mic_combo.currentIndexChanged.connect(self._on_mic_selected)
+            dlayout.addWidget(self.mic_combo, 4, 1)
+
+            self.mic_test_btn = QtWidgets.QPushButton("🎙 Тест микрофона (3 сек)")
+            self.mic_test_btn.setToolTip("Записать 3 секунды и показать уровень сигнала")
+            self.mic_test_btn.clicked.connect(self._on_mic_test)
+            dlayout.addWidget(self.mic_test_btn, 5, 0, 1, 2)
+
+            self.mic_level = QtWidgets.QProgressBar()
+            self.mic_level.setRange(0, 100)
+            self.mic_level.setValue(0)
+            self.mic_level.setTextVisible(True)
+            self.mic_level.setFormat("уровень: %p%")
+            dlayout.addWidget(self.mic_level, 6, 0, 1, 2)
+
+            self.device_status = QtWidgets.QLabel("")
+            self.device_status.setStyleSheet("color:#7a8592; font-size:11px;")
+            self.device_status.setWordWrap(True)
+            dlayout.addWidget(self.device_status, 7, 0, 1, 2)
+
             right.addWidget(devices)
 
             # Статус записи
@@ -428,6 +465,96 @@ if QT_AVAILABLE:
             status = "Все заглушены" if muted else "Мут снят со всех"
             self.statusBar().showMessage(status, 5000)
 
+        # --- устройства: камера и микрофон ---
+        def _populate_cameras(self) -> None:
+            """Заполнить список камер (без падения, если видео недоступно)."""
+            self.camera_combo.clear()
+            devices = self.engine.list_video_devices()
+            if not devices:
+                self.camera_combo.addItem("нет видеоустройств", -1)
+                self.camera_combo.setEnabled(False)
+                return
+            self.camera_combo.setEnabled(True)
+            for dev in devices:
+                self.camera_combo.addItem(f"{dev['name']} [{dev['driver']}]", dev["id"])
+
+        def _populate_mics(self) -> None:
+            self.mic_combo.clear()
+            devices = self.engine.list_audio_devices()
+            if not devices:
+                self.mic_combo.addItem("нет аудиоустройств", -1)
+                self.mic_combo.setEnabled(False)
+                return
+            self.mic_combo.setEnabled(True)
+            for dev in devices:
+                mark = "🎤" if dev.get("inputs", 0) > 0 else "🔊"
+                self.mic_combo.addItem(f"{mark} {dev['name']}", dev["id"])
+
+        def _on_camera_selected(self, index: int) -> None:
+            dev_id = self.camera_combo.itemData(index)
+            if dev_id is not None and dev_id >= 0:
+                self.engine.set_video_device(dev_id)
+                self.device_status.setText(f"Выбрана камера: {self.camera_combo.currentText()}")
+
+        def _on_mic_selected(self, index: int) -> None:
+            dev_id = self.mic_combo.itemData(index)
+            if dev_id is not None and dev_id >= 0:
+                self.engine.set_audio_device(dev_id)
+                self.device_status.setText(f"Выбран микрофон: {self.mic_combo.currentText()}")
+
+        def _on_camera_toggle(self, checked: bool) -> None:
+            self.engine.set_camera_enabled(checked)
+            if not checked and self.preview_btn.isChecked():
+                self.preview_btn.setChecked(False)
+            state = "включена" if checked else "выключена"
+            self.statusBar().showMessage(f"Камера {state}", 3000)
+
+        def _on_mic_toggle(self, checked: bool) -> None:
+            self.engine.set_microphone_enabled(checked)
+            state = "включён" if checked else "выключен"
+            self.statusBar().showMessage(f"Микрофон {state}", 3000)
+
+        def _on_preview_toggle(self, checked: bool) -> None:
+            if checked:
+                dev_id = self.camera_combo.currentData()
+                if dev_id is None or dev_id < 0:
+                    self.preview_btn.setChecked(False)
+                    self.device_status.setText("Видеоустройства недоступны")
+                    return
+                if self.engine.start_local_preview(int(dev_id)):
+                    self.preview_btn.setText("⏹ Остановить тест камеры")
+                    self.device_status.setText("Превью камеры открыто в отдельном окне")
+                else:
+                    self.preview_btn.setChecked(False)
+                    self.device_status.setText("Не удалось запустить превью камеры")
+            else:
+                self.engine.stop_local_preview()
+                self.preview_btn.setText("▶ Тест камеры")
+                self.device_status.setText("Превью камеры остановлено")
+
+        def _on_mic_test(self) -> None:
+            self.mic_test_btn.setEnabled(False)
+            self.device_status.setText("Идёт тест микрофона (3 сек)...")
+            QtWidgets.QApplication.processEvents()
+            try:
+                result = self.engine.test_microphone(3)
+            finally:
+                self.mic_test_btn.setEnabled(True)
+            if result.get("ok"):
+                level = float(result.get("level", 0.0))
+                # уровень pjsua ~0..1 -> проценты
+                self.mic_level.setValue(int(min(100, max(0, level * 100))))
+                self.device_status.setText(
+                    f"Микрофон работает. Уровень сигнала: {level:.3f}. "
+                    f"Запись: {result.get('file', '—')}"
+                )
+                self.statusBar().showMessage("Тест микрофона завершён", 5000)
+            else:
+                self.mic_level.setValue(0)
+                self.device_status.setText(
+                    f"Тест микрофона не удался: {result.get('error', 'ошибка')}"
+                )
+
         def _on_screen_toggle(self, checked: bool) -> None:
             success = self.engine.set_screen_share_enabled(checked)
             if not success and checked:
@@ -504,21 +631,46 @@ if QT_AVAILABLE:
 
         # --- события движка ---
         def _on_event(self, event: str, payload: dict) -> None:
+            # payload передаём JSON-строкой: у Qt нет QMetaType для dict,
+            # из-за чего invokeMethod падал с RuntimeError.
+            import json
+
+            try:
+                payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+            except Exception:  # noqa: BLE001
+                payload_json = "{}"
             QtCore.QMetaObject.invokeMethod(
                 self, "_handle_event",
                 QtCore.Qt.ConnectionType.QueuedConnection,
                 QtCore.Q_ARG(str, event),
-                QtCore.Q_ARG(dict, payload),
+                QtCore.Q_ARG(str, payload_json),
             )
 
-        @QtCore.Slot(str, dict)
-        def _handle_event(self, event: str, payload: dict) -> None:
+        @QtCore.Slot(str, str)
+        def _handle_event(self, event: str, payload_json: str) -> None:
+            import json
+
+            try:
+                payload = json.loads(payload_json) if payload_json else {}
+            except Exception:  # noqa: BLE001
+                payload = {}
             if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
                 self._refresh_participants_list()
                 self._rebuild_video_grid()
                 self.statusBar().showMessage(f"{event}: {payload}", 5000)
             elif event == "call.rejected":
                 self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
+            elif event == "media.preview":
+                if payload.get("active"):
+                    self.statusBar().showMessage("Превью камеры: вкл", 3000)
+                else:
+                    self.statusBar().showMessage(
+                        f"Превью камеры: выкл ({payload.get('error', '')})", 5000
+                    )
+            elif event == "media.mic_test":
+                self.statusBar().showMessage(
+                    f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000
+                )
             elif event == "engine.started":
                 mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
                 enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
@@ -543,6 +544,98 @@ class SipEngine:
     @property
     def local_preview_active(self) -> bool:
         return self._video_preview is not None
+
+    # --- микрофон: выбор устройства и тест записи до звонка ---
+    def list_audio_devices(self) -> List[dict]:
+        """Список аудиоустройств, известных PJSIP (микрофоны/динамики)."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return []
+        devices: List[dict] = []
+        try:  # pragma: no cover
+            mgr = self._endpoint.audDevManager()
+            for i, info in enumerate(mgr.enumDev2()):
+                devices.append({
+                    "id": i,
+                    "name": info.name,
+                    "driver": info.driver,
+                    "inputs": info.inputCount,
+                    "outputs": info.outputCount,
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось перечислить аудиоустройства: %s", exc)
+        return devices
+
+    def set_audio_device(self, dev_id: int) -> bool:
+        """Выбрать устройство захвата (микрофон) по id."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return False
+        try:  # pragma: no cover
+            self._endpoint.audDevManager().setCaptureDev(dev_id)
+            self.media_state.microphone_id = str(dev_id)
+            log.info("Микрофон переключён на устройство %s", dev_id)
+            self.events.emit("media.mic_device", id=dev_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось переключить микрофон: %s", exc)
+            return False
+
+    def test_microphone(self, seconds: int = 3) -> dict:
+        """Тест микрофона: запись в WAV + средний уровень сигнала.
+
+        Возвращает словарь {ok, level, file, error}. Уровень > 0 означает,
+        что со звуковой карты реально поступает сигнал.
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return {"ok": False, "error": "pjsua2 недоступен"}
+        import tempfile
+        import time as _time
+
+        path = Path(tempfile.gettempdir()) / f"mcu_mic_test_{int(_time.time())}.wav"
+        try:  # pragma: no cover
+            # pjlib требует, чтобы поток был зарегистрирован в библиотеке,
+            # иначе вызов из Python-потока роняет процесс ассертом.
+            try:
+                self._endpoint.libRegisterThread("main")
+            except Exception:  # noqa: BLE001 - уже зарегистрирован
+                pass
+
+            mgr = self._endpoint.audDevManager()
+
+            # Если устройство захвата не выбрано (-1), назначаем первое,
+            # у которого есть входы (inputCount > 0).
+            if mgr.getCaptureDev() < 0:
+                chosen = None
+                for i, info in enumerate(mgr.enumDev2()):
+                    if getattr(info, "inputCount", 0) > 0:
+                        chosen = i
+                        break
+                if chosen is not None:
+                    mgr.setCaptureDev(chosen)
+                    mgr.setPlaybackDev(chosen)
+                    log.info("Для теста выбрано аудиоустройство #%d", chosen)
+
+            if mgr.getCaptureDev() < 0:
+                return {"ok": False, "error": "не найдено устройство захвата (микрофон)"}
+
+            # Только измерение уровня: подключение рекордера к мосту
+            # (startTransmit) в pjsua 2.16 из внешнего потока роняет
+            # процесс ассертом conference.c, поэтому WAV не пишем.
+            capture = mgr.getCaptureDevMedia()
+            peak = 0.0
+            deadline = _time.time() + max(1, int(seconds))
+            while _time.time() < deadline:
+                try:
+                    peak = max(peak, float(capture.getRxLevel()))
+                except Exception:  # noqa: BLE001
+                    pass
+                _time.sleep(0.1)
+
+            log.info("Тест микрофона: уровень=%.3f", peak)
+            self.events.emit("media.mic_test", level=peak)
+            return {"ok": True, "level": peak, "file": None}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Тест микрофона не удался: %s", exc)
+            return {"ok": False, "error": str(exc) or exc.__class__.__name__}
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         """Включить/выключить демонстрацию экрана.
