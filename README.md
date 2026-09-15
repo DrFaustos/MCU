@@ -294,6 +294,22 @@ CI (`.github/workflows/release.yml`) при пуше тега `v*` собира�
     Порт 0.0.0.0:5060 НЕ слушается, входящие вызовы приниматься не будут.
     Установите биндинг:  sudo ./scripts/install_pjsua2.sh
 
+### Windows 10/11 — готовые колёса
+
+Для Windows не нужно собирать PJSIP: есть предкомпилированные колёса
+`pjsua2-wheel`, которые содержат и PJSIP, и Visual C++ Runtime.
+
+    pip install pjsua2-wheel
+
+Импортируется как обычный `pjsua2` (Python 3.9-3.12, Windows x64).
+Проверка:
+
+    python -c "import pjsua2; ep=pjsua2.Endpoint(); ep.libCreate(); print('OK')"
+
+Версия 2.15.3 (на Linux используется 2.16). API, задействованный в проекте
+(`Endpoint()`, `mediaConfig.srtpUse`, `codecEnum2`, `vidSetStream`),
+в 2.15.3 присутствует.
+
 ### Автоматическая установка (Linux)
 
 Скрипт собирает PJSIP 2.16 из исходников с полным SWIG-биндингом

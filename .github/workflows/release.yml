@@ -21,24 +21,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+          pip install pjsua2-wheel
 
-      # pjsua2 (SWIG-биндинг PJSIP) не имеет официального wheel для Windows.
-      # Без него SIP-транспорт в собранном .exe не поднимется. Шаг только
-      # предупреждает и НИКОГДА не валит сборку (exit 0).
-      - name: Check pjsua2 availability
-        shell: pwsh
-        run: |
-          python -c "import pjsua2; print('pjsua2 OK')"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::pjsua2 не установлен — SIP в .exe будет в режиме-заглушке. См. README (установка pjsua2 на Windows)."
-          }
-          exit 0
+      # pjsua2 обязателен: без него SIP-транспорт в .exe не поднимется.
+      - name: Verify pjsua2 (required for SIP)
+        run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
       - name: Build executable
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --allow-no-pjsip
+        run: python build.py
 
       - name: Download FFmpeg for Windows
         shell: pwsh

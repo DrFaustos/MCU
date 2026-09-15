@@ -110,6 +110,16 @@ def build_binary() -> Path:
         "--hidden-import", "cv2",
         "run.py",
     ]
+
+    # На Windows pjsua2-wheel кладёт нативные DLL в отдельные подпакеты
+    # (pjsua2.libs). Без --collect-all PyInstaller их не находит, и в .exe
+    # не оказывается SIP-стека. _pjsua2 — нативный модуль, импортируемый
+    # обёрткой pjsua2.
+    if sys.platform == "win32":
+        cmd[cmd.index("run.py"):cmd.index("run.py")] = [
+            "--collect-all", "pjsua2",
+            "--collect-all", "_pjsua2",
+        ]
     log("[+] Запуск PyInstaller: " + " ".join(cmd))
     subprocess.check_call(cmd)
 
