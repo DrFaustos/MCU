@@ -2,9 +2,10 @@
 
 Использует mss для быстрого захвата экрана и pyvirtualcam для передачи
 захваченного изображения в виртуальную камеру, которую затем выбирает PJSIP.
+Оптимизировано для минимальной нагрузки на CPU (низкий FPS, эффективное масштабирование).
 
 Требования:
-* pip install mss numpy pyvirtualcam
+* pip install mss numpy pyvirtualcam opencv-python
 * Windows: OBS Virtual Camera
 * Linux: v4l2loopback (sudo apt install v4l2loopback-dkms)
 """
@@ -12,7 +13,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from typing import Optional
 
 from .log import get_logger
@@ -21,7 +21,6 @@ log = get_logger("screen_share")
 
 try:  # pragma: no cover
     import mss
-    import mss.tools
     import numpy as np
     import pyvirtualcam
 
@@ -34,7 +33,8 @@ except ImportError as exc:  # pragma: no cover
 class ScreenSharer:
     """Управляет захватом экрана и трансляцией в виртуальную камеру."""
 
-    def __init__(self, fps: int = 15, target_width: int = 1280, target_height: int = 720) -> None:
+    def __init__(self, fps: int = 10, target_width: int = 1280, target_height: int = 720) -> None:
+        # FPS снижен до 10 для минимизации нагрузки на CPU при демонстрации слайдов/интерфейса
         self.fps = fps
         self.target_width = target_width
         self.target_height = target_height
@@ -72,7 +72,7 @@ class ScreenSharer:
         log.info("Демонстрация экрана остановлена")
 
     def _capture_loop(self) -> None:
-        """Основной цикл захвата экрана."""
+        """Основной цикл захвата экрана с оптимизацией."""
         try:
             with mss.mss() as sct:
                 # Захватываем основной монитор
@@ -87,18 +87,21 @@ class ScreenSharer:
                 ) as cam:
                     log.info("Виртуальная камера запущена: %s", cam.device)
                     
+                    # Предварительная инициализация cv2 для масштабирования
+                    import cv2
+                    
                     while not self._stop_event.is_set():
                         # Захват кадра
                         screenshot = sct.grab(monitor)
                         
                         # Конвертация в numpy array (BGR -> RGB)
-                        img = np.array(screenshot)
-                        img = img[..., [2, 1, 0]]  # BGR to RGB
+                        # mss выдает BGRA, берем только BGR и меняем на RGB
+                        img = np.array(screenshot)[..., :3][..., ::-1]
                         
                         # Масштабирование до целевого разрешения (если нужно)
+                        # Использование INTER_AREA дает лучшее качество при уменьшении
                         if img.shape[1] != self.target_width or img.shape[0] != self.target_height:
-                            import cv2
-                            img = cv2.resize(img, (self.target_width, self.target_height))
+                            img = cv2.resize(img, (self.target_width, self.target_height), interpolation=cv2.INTER_AREA)
                         
                         # Отправка кадра в виртуальную камеру
                         cam.send(img)

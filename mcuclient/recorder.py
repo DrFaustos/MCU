@@ -2,6 +2,7 @@
 
 Использует FFmpeg для записи экрана (где отображается сетка участников)
 с аудио из системного устройства захвата.
+Оптимизировано для минимальной нагрузки на CPU с использованием аппаратного ускорения.
 
 Требования:
 * FFmpeg должен быть установлен в системе (ffmpeg в PATH)
@@ -9,28 +10,59 @@
 
 from __future__ import annotations
 
-import os
+import platform
+import shutil
 import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .log import get_logger
 
 log = get_logger("recorder")
 
 
+def _detect_hw_encoder() -> str:
+    """Определяет доступный аппаратный видеокодер FFmpeg."""
+    # Порядок предпочтения: NVIDIA -> Intel -> AMD -> Software
+    encoders_to_try = [
+        ("h264_nvenc", "NVIDIA NVENC"),
+        ("h264_qsv", "Intel Quick Sync Video"),
+        ("h264_amf", "AMD AMF"),
+        ("h264_videotoolbox", "Apple VideoToolbox"),
+    ]
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            capture_output=True, text=True, timeout=5, check=False
+        )
+        if result.returncode == 0:
+            output = result.stdout.lower()
+            for encoder, name in encoders_to_try:
+                if encoder in output:
+                    log.info("Обнаружен аппаратный кодер: %s (%s)", encoder, name)
+                    return encoder
+    except Exception as exc:
+        log.warning("Не удалось проверить кодеры FFmpeg: %s", exc)
+
+    log.info("Аппаратные кодеры не найдены, используется программный libx264")
+    return "libx264"
+
+
 class ConferenceRecorder:
     """Управляет записью конференции (видео + аудио) через FFmpeg."""
 
-    def __init__(self, output_dir: str = "./recordings") -> None:
+    def __init__(self, output_dir: str = "./recordings", fps: int = 15) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.fps = fps
         self._process: Optional[subprocess.Popen] = None
         self._is_recording = False
         self._lock = threading.Lock()
         self._current_file: Optional[Path] = None
+        self._hw_encoder = _detect_hw_encoder()
 
     @property
     def is_recording(self) -> bool:
@@ -54,9 +86,6 @@ class ConferenceRecorder:
             filepath = self.output_dir / filename
             self._current_file = filepath
 
-            # FFmpeg команда для записи экрана и аудио
-            # Используем GDI grab для Windows или x11grab для Linux
-            # Аудио захватывается из виртуального устройства (если настроено)
             cmd = self._build_ffmpeg_command(filepath)
 
             try:
@@ -66,7 +95,7 @@ class ConferenceRecorder:
                     stderr=subprocess.DEVNULL,
                 )
                 self._is_recording = True
-                log.info("Запись начата: %s (pid=%d)", filepath, self._process.pid)
+                log.info("Запись начата: %s (pid=%d, кодер=%s)", filepath, self._process.pid, self._hw_encoder)
                 return True
             except Exception as exc:
                 log.error("Ошибка начала записи: %s", exc)
@@ -98,18 +127,17 @@ class ConferenceRecorder:
             return self.stop_recording()
         return self.start_recording()
 
-    def _build_ffmpeg_command(self, output_path: Path) -> list[str]:
-        """Построить команду FFmpeg для записи."""
-        import platform
+    def _build_ffmpeg_command(self, output_path: Path) -> List[str]:
+        """Построить команду FFmpeg для записи с аппаратным ускорением."""
+        sys_platform = platform.system()
 
         cmd = ["ffmpeg", "-y"]  # -y = перезаписывать без запроса
 
         # Видео источник
-        if platform.system() == "Windows":
-            # Windows: GDI grab для захвата экрана
+        if sys_platform == "Windows":
             cmd.extend([
                 "-f", "gdigrab",
-                "-framerate", "15",
+                "-framerate", str(self.fps),
                 "-offset_x", "0",
                 "-offset_y", "0",
                 "-show_region", "0",
@@ -117,28 +145,48 @@ class ConferenceRecorder:
                 "-i", "desktop",
             ])
         else:
-            # Linux: x11grab для захвата экрана
             cmd.extend([
                 "-f", "x11grab",
-                "-framerate", "15",
+                "-framerate", str(self.fps),
                 "-video_size", "1280x720",
                 "-i", ":0.0",
             ])
 
-        # Аудио источник (опционально, если настроено системное аудио)
-        # Для простоты пока записываем только видео
-        # В будущем можно добавить PulseAudio/WASAPI захват
+        # Настройки кодирования в зависимости от выбранного кодера
+        if self._hw_encoder == "h264_nvenc":
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",  # Баланс скорости и качества для NVENC
+                "-rc", "vbr",
+                "-cq", "23",
+            ])
+        elif self._hw_encoder == "h264_qsv":
+            cmd.extend([
+                "-c:v", "h264_qsv",
+                "-preset", "veryfast",
+                "-global_quality", "23",
+            ])
+        elif self._hw_encoder == "h264_amf":
+            cmd.extend([
+                "-c:v", "h264_amf",
+                "-quality", "quality",
+                "-rc", "vbr_latency",
+                "-qp_i", "23",
+                "-qp_p", "23",
+            ])
+        else:
+            # Программное кодирование (fallback)
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "ultrafast",  # Минимальная нагрузка на CPU
+                "-crf", "23",
+            ])
 
-        # Видео кодек и настройки
+        # Общие настройки видео
         cmd.extend([
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
             "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",  # Для быстрого воспроизведения в браузере
         ])
-
-        # Аудио кодек (если есть аудио вход)
-        # cmd.extend(["-c:a", "aac", "-b:a", "128k"])
 
         # Выходной файл
         cmd.append(str(output_path))
