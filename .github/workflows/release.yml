@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      build_linux:
+        description: 'Собирать Linux (PJSIP из исходников + AppImage) — долго'
+        type: boolean
+        default: false
 
 jobs:
   build-windows:
@@ -50,7 +55,12 @@ jobs:
             dist/MCU-Client-console.exe
             dist/ffmpeg.exe
 
+  # Linux/AppImage собирается ТОЛЬКО по ручному запуску (workflow_dispatch)
+  # с включённой галочкой build_linux. Это сильно ускоряет обычную сборку
+  # по тегу, пока идёт отладка Windows. Вернуть в тег можно в любой момент,
+  # убрав условие `if` ниже.
   build-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +106,8 @@ jobs:
             dist/MCU-Client-x86_64.AppImage
 
   release:
-    needs: [build-windows, build-linux]
+    # Зависим только от Windows: Linux теперь опционален.
+    needs: [build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -106,10 +117,12 @@ jobs:
           name: MCU-Client-Windows
           path: release-files/
 
-      - uses: actions/download-artifact@v4
+      - name: Download Linux artifacts (optional)
+        uses: actions/download-artifact@v4
         with:
           name: MCU-Client-Linux
           path: release-files/
+        continue-on-error: true
 
       - name: List release files
         run: ls -la release-files/
@@ -117,12 +130,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release-files/MCU-Client.exe
-            release-files/MCU-Client-console.exe
-            release-files/ffmpeg.exe
-            release-files/MCU-Client
-            release-files/MCU-Client-x86_64.AppImage
+          # Звёздочка берёт все файлы, которые реально скачались:
+          # Windows всегда, Linux/AppImage — только если собирались.
+          files: release-files/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

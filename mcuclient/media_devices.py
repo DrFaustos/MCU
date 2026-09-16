@@ -84,20 +84,27 @@ def _list_linux_mics() -> List[DeviceInfo]:
 
 
 def _list_windows_devices() -> tuple[List[DeviceInfo], List[DeviceInfo]]:
+    """Перечислить устройства на Windows БЕЗ pjsua2.
+
+    ВАЖНО: pjsua2 здесь использовать нельзя. ``Endpoint.instance()`` до
+    ``libCreate()`` в колёсной сборке pjsua2 на Windows уходит в бесконечную
+    рекурсию и роняет процесс с stack overflow (проверено на практике).
+    Реальные аудио/видеоустройства PJSIP перечисляет уже после старта
+    движка (см. SipEngine.list_audio_devices / list_video_devices).
+
+    Здесь делаем максимально безопасное перечисление через sounddevice,
+    если он установлен; иначе возвращаем пустые списки.
+    """
     cameras: List[DeviceInfo] = []
     mics: List[DeviceInfo] = []
-    try:  # pjsua2 умеет перечислять устройства
-        import pjsua2 as pj  # type: ignore
+    try:
+        import sounddevice as sd  # type: ignore
 
-        try:
-            ep = pj.Endpoint.instance()
-        except Exception:  # noqa: BLE001 - endpoint мог ещё не быть создан
-            ep = None
-        if ep is not None:
-            for i, dev in enumerate(ep.audDevManager().enumDev2()):
-                mics.append(DeviceInfo(id=str(i), name=dev.name))
+        for i, dev in enumerate(sd.query_devices()):
+            if int(dev.get("max_input_channels", 0)) > 0:
+                mics.append(DeviceInfo(id=str(i), name=str(dev.get("name", f"dev{i}"))))
     except Exception as exc:  # noqa: BLE001
-        log.debug("pjsua2 недоступен для перечисления устройств: %s", exc)
+        log.debug("sounddevice недоступен: %s", exc)
     return cameras, mics
 
 
@@ -112,7 +119,13 @@ def enumerate_devices() -> tuple[List[DeviceInfo], List[DeviceInfo]]:
 
 
 def build_state() -> MediaState:
-    cameras, mics = enumerate_devices()
+    # Перечисление устройств не должно ронять приложение ни при каких
+    # обстоятельствах: это лишь информационный шаг.
+    try:
+        cameras, mics = enumerate_devices()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не удалось перечислить устройства: %s", exc)
+        cameras, mics = [], []
     state = MediaState(cameras=cameras, microphones=mics)
     if cameras:
         state.camera_id = cameras[0].id
