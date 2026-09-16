@@ -31,7 +31,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "media": {
-        "video": {"width": 1280, "height": 720, "fps": 30, "bitrate_kbps": 1500},
+        # enabled — использовать видео В ЗВОНКЕ. По умолчанию False:
+        # видеоканал в pjsua на части сборок приводит к аварийному
+        # завершению. Локальный тест камеры/превью при этом работает.
+        "video": {"enabled": False, "width": 1280, "height": 720,
+                  "fps": 30, "bitrate_kbps": 1500},
         "audio": {"bitrate_kbps": 48, "echo_cancel": True, "noise_suppress": True},
         "bandwidth_kbps": 4000,
     },
@@ -189,6 +193,11 @@ class Config:
     @property
     def video(self) -> Dict[str, Any]:
         return self.raw["media"]["video"]
+
+    @property
+    def video_call_enabled(self) -> bool:
+        """Использовать ли видео в звонке (по умолчанию выключено)."""
+        return bool(self.raw["media"]["video"].get("enabled", False))
 
     @property
     def audio(self) -> Dict[str, Any]:

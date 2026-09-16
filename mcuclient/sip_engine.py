@@ -403,7 +403,9 @@ class SipEngine:
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam(True)
             prm.opt.audioCount = 1
-            prm.opt.videoCount = 1 if self._video_supported else 0
+            prm.opt.videoCount = (
+                1 if (self._video_supported and self.config.video_call_enabled) else 0
+            )
             p._call.answer(prm)  # pragma: no cover
             p.state = CallState.CONFIRMED
             log.info("Вызов принят: %s", p.remote_uri)
@@ -430,7 +432,9 @@ class SipEngine:
             call = _pj.Call(self._account)
             prm = _pj.CallOpParam(True)
             prm.opt.audioCount = 1
-            prm.opt.videoCount = 1 if self._video_supported else 0
+            prm.opt.videoCount = (
+                1 if (self._video_supported and self.config.video_call_enabled) else 0
+            )
             call.makeCall(uri, prm)
             participant = self._register_participant(call, uri, state=CallState.CONNECTING)
             self.events.emit("call.outgoing", id=participant.id, remote=uri)
