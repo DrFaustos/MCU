@@ -83,3 +83,6 @@ mcu-client.log
 
 # generated icon
 packaging/mcu-client.ico
+
+# GitHub token (локально, не коммитить)
+.gh_token
