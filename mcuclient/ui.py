@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 import sys
+import signal
+import traceback
 from typing import Dict, Optional
 
 from .config import Config, LAYOUT_LABELS
@@ -821,19 +823,20 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     if not QT_AVAILABLE:
         raise RuntimeError("PySide6 не установлен — GUI недоступен")
 
-    # === ИСПРАВЛЕНИЕ ДЛЯ PYINSTALLER + LINUX ===
-    # PyInstaller в режиме --onefile распаковывает файлы во временную директорию.
-    # Qt на Linux часто пытается использовать Wayland по умолчанию, но в упаковке
-    # отсутствуют нужные библиотеки Wayland, что вызывает мгновенный Abort.
-    # Принудительно переключаем на XCB (X11) и указываем путь к плагинам Qt.
-    if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
-        os.environ['QT_QPA_PLATFORM'] = 'xcb'
-        if hasattr(sys, '_MEIPASS'):
-            plugin_path = os.path.join(sys._MEIPASS, 'PySide6', 'Qt', 'plugins')
-            if os.path.isdir(plugin_path):
-                os.environ['QT_PLUGIN_PATH'] = plugin_path
-                os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(plugin_path, 'platforms')
-                log.info("GUI: настроены переменные Qt для PyInstaller (XCB)")
+    # Перехват SIGABRT для записи crash-дампа
+    def sigabrt_handler(signum, frame):
+        log.critical("SIGABRT получен! Завершение работы Qt.")
+        try:
+            crash_file = os.path.join(os.getcwd(), 'sigabrt_crash.log')
+            with open(crash_file, 'w', encoding='utf-8') as f:
+                f.write(f"SIGABRT at {__import__('datetime').datetime.now().isoformat()}\n")
+                f.write(f"Frame: {frame}\n")
+                traceback.print_stack(frame, file=f)
+        except Exception:
+            pass
+        sys.exit(1)
+    
+    signal.signal(signal.SIGABRT, sigabrt_handler)
 
     log.info("GUI: создание QApplication...")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -842,6 +845,10 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     log.info("GUI: показ окна...")
     window.show()
     log.info("GUI: вход в цикл событий")
-    code = app.exec()
-    log.info("GUI: цикл событий завершён, код=%s", code)
-    return code
+    try:
+        code = app.exec()
+        log.info("GUI: цикл событий завершён, код=%s", code)
+        return code
+    except Exception as e:
+        log.critical("Исключение в app.exec():", exc_info=True)
+        return 1
