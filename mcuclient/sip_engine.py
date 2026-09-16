@@ -371,26 +371,6 @@ class SipEngine:
                 return "127.0.0.1"
 
     # --- входящие/исходящие ---
-    def _deferred_answer(self, participant_id: int) -> None:
-        """Ответить на вызов из отдельного потока, зарегистрированного в pjlib.
-
-        Вызов accept() из callback-потока PJSIP и последующие медиа-операции
-        (setHold, vidSetStream) приводят к abort в pjmedia. Поэтому отвечаем
-        в собственном потоке и регистрируем его в pjlib.
-        """
-        def _worker() -> None:
-            try:
-                if self._endpoint is not None:
-                    try:
-                        self._endpoint.libRegisterThread("auto-answer")
-                    except Exception:  # noqa: BLE001 - уже зарегистрирован
-                        pass
-                self.accept(participant_id)
-            except Exception:  # noqa: BLE001
-                log.exception("Авто-ответ не удался")
-
-        threading.Thread(target=_worker, name="auto-answer", daemon=True).start()
-
     def _on_incoming(self, prm) -> None:  # pragma: no cover
         call = _pj.Call(self._account, prm.callId)
         info = call.getInfo()
@@ -408,10 +388,15 @@ class SipEngine:
         # сторона получит 487 Request Terminated и не дозвонится.
         if self.config.auto_answer:
             log.info("Авто-ответ на вызов от %s", remote_uri)
-            # ВАЖНО: accept() нельзя вызывать из callback-потока PJSIP —
-            # медиа-операции (setHold/vidSetStream) из незарегистрированного
-            # потока роняют процесс ассертом pjmedia. Уходим в свой поток.
-            self._deferred_answer(participant.id)
+            # Ответ выполняем прямо здесь, в callback-потоке PJSIP: answer()
+            # в этом потоке безопасен, а перенос его в отдельный Python-поток
+            # приводит к abort в pjsua (создание медиа-канала).
+            # Медиа-операции (setHold/vidSetStream) из accept() убраны, чтобы
+            # не трогать медиа-мост из callback.
+            try:
+                self.accept(participant.id)
+            except Exception:  # noqa: BLE001
+                log.exception("Авто-ответ не удался")
 
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
