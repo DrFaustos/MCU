@@ -56,17 +56,28 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-          pip install pjsua2-pybind11
 
-      # Тот же биндинг, что и на Windows (pybind11-wheel). SWIG-сборка
-      # pjsua2 2.16 на Linux роняла процесс в answer() при входящем вызове.
-      - name: Verify pjsua2 (pybind11)
-        run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
+      # SWIG-сборка PJSIP: видит реальные аудиоустройства (в pybind11-wheel
+      # их нет). Крэш при входящем вызове устранён установкой
+      # CallOpParam.statusCode=200 в answer().
+      - name: Install PJSIP (pjsua2, static)
+        env:
+          PJSIP_STATIC: '1'
+          PJSIP_VERSION: '2.16'
+        run: |
+          chmod +x scripts/install_pjsua2.sh
+          sudo -E ./scripts/install_pjsua2.sh "$(which python)"
+          python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
       - name: Build executable
         env:
