@@ -59,7 +59,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          # Qt xcb (X11) требует libxcb-cursor0 (с Qt 6.5) — нужен для
+          # корректного позиционирования курсора на Wayland-сессиях.
+          sudo apt-get install -y ffmpeg libxcb-cursor0 libxcb-xinerama0             libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1             libxcb-randr0 libxcb-render-util0 libxcb-shape0
 
       - name: Install Python dependencies
         run: |

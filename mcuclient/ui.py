@@ -30,6 +30,27 @@ from .sip_engine import CallState, Participant, SipEngine
 
 log = get_logger("ui")
 
+# --- Выбор Qt-платформы ДО импорта PySide6 -------------------------------
+# На Wayland встроенный бэкенд Qt нередко даёт смещение курсора (ввод
+# «не туда», чем нарисовано). Классическое лечение — X11-бэкенд (xcb)
+# через XWayland. Управляется переменной MCU_QT_PLATFORM:
+#   auto (по умолчанию) — xcb на Wayland, иначе платформа по умолчанию;
+#   wayland / xcb / x11     — принудительно;
+#   (пусто)                 — не трогать окружение.
+if sys.platform.startswith("linux") and "QT_QPA_PLATFORM" not in os.environ:
+    _choice = os.environ.get("MCU_QT_PLATFORM", "auto").lower()
+    _session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if _choice in ("xcb", "x11"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        log.info("Qt: принудительно X11-бэкенд (xcb)")
+    elif _choice == "wayland":
+        os.environ["QT_QPA_PLATFORM"] = "wayland"
+        log.info("Qt: принудительно Wayland-бэкенд")
+    elif _choice == "auto" and _session == "wayland":
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
+        log.info("Qt: Wayland-сессия → используем X11-бэкенд (xcb) "
+                 "для корректного позиционирования курсора")
+
 try:  # pragma: no cover - зависит от окружения
     from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -660,10 +681,14 @@ if QT_AVAILABLE:
             success = self.engine.set_screen_share_enabled(checked)
             if not success and checked:
                 self.screen_toggle.setChecked(False)
-                self.statusBar().showMessage(
-                    "Не удалось запустить демонстрацию экрана. Проверьте зависимости (mss, pyvirtualcam).",
-                    10000,
-                )
+                err = getattr(self.engine._screen_sharer, "last_error", None)
+                msg = "Не удалось запустить демонстрацию экрана"
+                if err:
+                    msg += f": {err}"
+                else:
+                    msg += ". Проверьте mss/pyvirtualcam и v4l2loopback (Linux)."
+                self.statusBar().showMessage(msg, 15000)
+                log.warning(msg)
             # Если демонстрация включилась — выключить тумблер камеры
             if success and checked:
                 self.camera_toggle.setChecked(False)

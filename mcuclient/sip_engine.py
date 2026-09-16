@@ -554,18 +554,46 @@ class SipEngine:
         return self._video_windows.get(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        """Встроить нативное окно видео в Qt-виджет (через winId)."""
+        """Показать видео вызова.
+
+        Сначала пробуем встроить нативное окно pjsua2 в Qt-виджет
+        (VideoWindowHandle.handle.window = winId). Если не удалось
+        (например, Wayland), показываем видео отдельным нативным окном
+        через VideoWindow.Show(True) — так изображение всё равно видно.
+        """
+        window = self._video_windows.get(participant_id)
+        if window is None or not PJSIP_AVAILABLE:
+            return False
+
+        embedded = False
+        try:  # pragma: no cover
+            handle = _pj.VideoWindowHandle()
+            # handle — вложенная WindowHandle с полем window (XID/HWND).
+            handle.handle.window = int(widget.winId())
+            handle.type = 0
+            window.setWindow(handle)
+            embedded = True
+        except Exception as exc:  # noqa: BLE001
+            log.info("Встраивание видео в тайл не удалось (%s); "
+                     "показываю отдельным окном", exc)
+
+        try:  # pragma: no cover
+            window.Show(True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось показать видеоокно: %s", exc)
+            return False
+        return embedded
+
+    def show_video_window(self, participant_id: int) -> bool:
+        """Показать видео вызова отдельным нативным окном."""
         window = self._video_windows.get(participant_id)
         if window is None or not PJSIP_AVAILABLE:
             return False
         try:  # pragma: no cover
-            handle = _pj.VideoWindowHandle()
-            handle.handle = int(widget.winId())
-            window.setWindow(handle)
             window.Show(True)
             return True
         except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось встроить видеоокно: %s", exc)
+            log.warning("Не удалось показать видеоокно: %s", exc)
             return False
 
     def _build_id_uri(self) -> str:
