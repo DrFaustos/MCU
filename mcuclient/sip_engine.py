@@ -593,6 +593,11 @@ class SipEngine:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam(True)
+            # statusCode обязателен: в SWIG-биндинге CallOpParam() по умолчанию
+            # даёт 0, и answer() падает в pjsip_dlg_modify_response (assert
+            # st_code 100..699). В pybind11 по умолчанию 200 — поэтому там
+            # работало. Ставим 200 OK явно.
+            prm.statusCode = 200
             prm.opt.audioCount = 1
             prm.opt.videoCount = (
                 1 if (self._video_supported and self.config.video_call_enabled) else 0
