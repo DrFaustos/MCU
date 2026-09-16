@@ -780,9 +780,11 @@ if QT_AVAILABLE:
                 payload = json.loads(payload_json) if payload_json else {}
             except Exception:  # noqa: BLE001
                 payload = {}
-            if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
+            if event in {"call.incoming", "call.outgoing", "call.confirmed",
+                         "call.closed", "call.state"}:
                 self._refresh_participants_list()
                 self._rebuild_video_grid()
+                self._attach_video_windows()
                 self.statusBar().showMessage(f"{event}: {payload}", 5000)
             elif event == "call.rejected":
                 self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)

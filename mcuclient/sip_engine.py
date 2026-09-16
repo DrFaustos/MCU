@@ -1,19 +1,4 @@
-"""SIP-движок на базе pjsua2 (PJSIP).
-
-Реализует:
-* приём входящих вызовов только по сети (фильтр по IP/подсетям);
-* исходящие вызовы к аппаратным и программным ВКС по sip-URI или IP;
-* согласование кодеков (приоритеты из config);
-* одну автоматически создаваемую комнату (Room);
-* управление медиа: вкл/выкл камеры, микрофона, демонстрации экрана, записи;
-* **мут каждого участника** по отдельности;
-* **виды компоновки видео (layouts)**: speaker, gallery_2x2, gallery_3x3, grid_auto;
-* **демонстрация экрана** через mss + pyvirtualcam (виртуальная камера);
-* **запись конференции** (видео + аудио) через FFmpeg;
-* качество, битрейт, полоса.
-
-Работает в закрытом контуре без обязательного шифрования (SRTP/TLS опциональны).
-"""
+"""SIP-движок на базе pjsua2 (PJSIP)."""
 
 from __future__ import annotations
 
@@ -32,10 +17,8 @@ from .screen_share import ScreenSharer
 
 log = get_logger("sip")
 
-# --- попытка импорта pjsua2 -------------------------------------------------
-
 _pj = None
-try:  # pragma: no cover - зависит от окружения
+try:  # pragma: no cover
     import pjsua2 as _pj  # type: ignore
     PJSIP_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001
@@ -54,8 +37,6 @@ class CallState(str, Enum):
 
 @dataclass
 class Participant:
-    """Участник комнаты (один вызов)."""
-
     id: int
     remote_uri: str
     state: CallState = CallState.IDLE
@@ -64,14 +45,11 @@ class Participant:
     video_codec: Optional[str] = None
     rx_bitrate_kbps: int = 0
     tx_bitrate_kbps: int = 0
-
-    # Мут и состояние
     is_muted: bool = False
     is_video_muted: bool = False
     is_speaking: bool = False
     volume_level: int = 0
-
-    _call: object = None  # pj.Call / None
+    _call: object = None
 
     @property
     def label(self) -> str:
@@ -87,8 +65,6 @@ class Participant:
 
 @dataclass
 class Room:
-    """Одна автоматически создаваемая комната."""
-
     name: str
     auto_created: bool = True
     created_at: datetime = field(default_factory=datetime.now)
@@ -115,14 +91,10 @@ class Room:
         return active[0] if active else None
 
 
-# --- события ----------------------------------------------------------------
-
 EventCallback = Callable[[str, dict], None]
 
 
 class EventBus:
-    """Простейшая шина событий для связи движка и UI."""
-
     def __init__(self) -> None:
         self._subs: List[EventCallback] = []
         self._lock = threading.Lock()
@@ -139,9 +111,6 @@ class EventBus:
                 cb(event, payload)
             except Exception:  # noqa: BLE001
                 log.exception("Ошибка обработчика события %s", event)
-
-
-# --- заглушка, если pjsua2 отсутствует -------------------------------------
 
 
 class _StubEndpoint:
@@ -163,12 +132,7 @@ class _StubEndpoint:
         pass
 
 
-# --- основной движок --------------------------------------------------------
-
-
 class SipEngine:
-    """Обёртка над pjsua2 с моделью комнаты и управлением медиа."""
-
     def __init__(self, config: Config) -> None:
         self.config = config
         self.events = EventBus()
@@ -179,23 +143,13 @@ class SipEngine:
         self._account = None
         self._next_call_id = 1
         self._running = False
-        # Защита комнаты: callback-поток PJSIP пишет участников,
-        # а поток Qt читает их одновременно.
         self._room_lock = threading.Lock()
-        # Поддерживает ли собранный PJSIP видео. Если нет — нельзя выставлять
-        # videoCount=1: pjsua падает с ассертом call->opt.vid_cnt == 0.
         self._video_supported = False
-        # Активное локальное превью камеры (тест до звонка)
         self._video_preview = None
-        # Отложенный ответ на входящий вызов: GUI выставляет сюда функцию,
-        # которая вызовет accept() в главном потоке, зарегистрированном
-        # в pjlib (вызов answer() из callback-потока SWIG-биндинга роняет
-        # процесс).
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
-        # Нативные видеоокна вызовов: participant_id -> pj.VideoWindow
         self._video_windows: Dict[int, object] = {}
+        self._CallClass = None  # подкласс pj.Call
 
-        # Демонстрация экрана (mss + pyvirtualcam)
         self._screen_sharer = ScreenSharer(
             fps=config.video.get("fps", 15),
             target_width=config.video.get("width", 1280),
@@ -203,14 +157,10 @@ class SipEngine:
         )
         self._screen_share_enabled = False
 
-        # Запись конференции (FFmpeg)
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
-
-        # Текущая раскладка видео
         self._layout: str = config.default_layout
 
-    # --- жизненный цикл ---
     def start(self) -> None:
         if self._running:
             return
@@ -254,17 +204,10 @@ class SipEngine:
             self.events.emit("engine.stopped")
             log.info("Движок остановлен")
 
-    # --- комната ---
     def register_main_thread(self) -> None:
-        """Зарегистрировать текущий (главный) поток в pjlib.
-
-        Вызовы pjsua2 из главного потока (например, answer()) должны идти
-        из потока, известного pjlib, иначе возможен abort.
-        """
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return
         if not hasattr(self._endpoint, "libRegisterThread"):
-            log.debug("libRegisterThread недоступен в этом биндинге pjsua2")
             return
         try:  # pragma: no cover
             self._endpoint.libRegisterThread("main")
@@ -273,7 +216,6 @@ class SipEngine:
             log.debug("libRegisterThread(main): %s", exc)
 
     def set_answer_dispatch(self, dispatch) -> None:
-        """Задать функцию, вызывающую accept() в главном потоке."""
         self._answer_dispatch = dispatch
 
     def _create_room(self) -> None:
@@ -281,14 +223,10 @@ class SipEngine:
             self.room = Room(name=self.config.room_name, auto_created=True)
             log.info("Автосоздана комната '%s'", self.room.name)
 
-    # --- PJSIP ---
     def _start_pjsip(self) -> None:  # pragma: no cover
-        # SWIG-биндинг pjsua2: сначала конструктор Endpoint(), затем libCreate().
-        # Endpoint.instance() до libCreate() бросает PJ_ENOTFOUND и SIP не поднимается.
         ep = _pj.Endpoint()
         ep_cfg = _pj.EpConfig()
         ep_cfg.logConfig.level = 3
-        # pybind11-версия pjsua2 может не иметь userAgent/noVad — не критично.
         if hasattr(ep_cfg.uaConfig, "userAgent"):
             ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
         if hasattr(ep_cfg.medConfig, "noVad"):
@@ -306,29 +244,19 @@ class SipEngine:
 
     @staticmethod
     def _transport_type(name: str):  # pragma: no cover
-        """Константа типа транспорта для SWIG- и pybind11-биндингов.
-
-        SWIG:    pjsua2.PJSIP_TRANSPORT_UDP
-        pybind11: pjsua2.TransportType.UDP
-        """
         legacy_map = {
             "udp": "PJSIP_TRANSPORT_UDP",
             "tcp": "PJSIP_TRANSPORT_TCP",
             "tls": "PJSIP_TRANSPORT_TLS",
         }
         legacy_name = legacy_map.get(name)
-        
-        # Пробуем получить константу напрямую (безопасно через getattr с default)
         if legacy_name:
             ttype = getattr(_pj, legacy_name, None)
             if ttype is not None:
                 return ttype
-                
-        # Пробуем pybind11 Enum (TransportType.UDP)
         if hasattr(_pj, "TransportType"):
             tt = _pj.TransportType
             return getattr(tt, name.upper(), None)
-            
         return None
 
     def _configure_transport(self, ep) -> None:  # pragma: no cover
@@ -342,7 +270,6 @@ class SipEngine:
 
     @staticmethod
     def _aud_mgr(ep):  # pragma: no cover
-        """Получить AudDevManager: в SWIG это метод, в pybind11 — свойство."""
         attr = getattr(ep, "audDevManager", None)
         if attr is None:
             return None
@@ -350,7 +277,6 @@ class SipEngine:
 
     @staticmethod
     def _dev_int(mgr, prop: str, getter: str, default: int = -1) -> int:  # pragma: no cover
-        """Прочитать целое поле устройства (свойство pybind11 или getter SWIG)."""
         try:
             if hasattr(mgr, prop):
                 return int(getattr(mgr, prop))
@@ -366,7 +292,6 @@ class SipEngine:
 
     @staticmethod
     def _dev_set(mgr, prop: str, setter: str, value: int) -> bool:  # pragma: no cover
-        """Записать поле устройства (свойство pybind11 или setter SWIG)."""
         try:
             if hasattr(mgr, prop):
                 setattr(mgr, prop, value)
@@ -384,7 +309,6 @@ class SipEngine:
 
     @staticmethod
     def _enum_devices(mgr):  # pragma: no cover
-        """Список аудиоустройств (enumDev2 — свойство или метод)."""
         if mgr is None:
             return []
         try:
@@ -398,13 +322,6 @@ class SipEngine:
         return []
 
     def _init_audio_devices(self, ep) -> None:  # pragma: no cover
-        """Выбрать аудиоустройства; при их отсутствии — null-устройство.
-
-        Без выбранного устройства makeCall/answer падают с
-        PJMEDIA_EAUD_NODEFDEV. Если аудиоустройств нет вообще (например,
-        pybind11-сборка без ALSA), включаем null-устройство, чтобы звонки
-        устанавливались (без реального звука).
-        """
         try:
             mgr = self._aud_mgr(ep)
         except Exception as exc:  # noqa: BLE001
@@ -412,38 +329,18 @@ class SipEngine:
             return
         if mgr is None:
             return
-
-        # Список устройств (enumDev2 — свойство или метод).
-        devices = []
-        try:
-            enum = getattr(mgr, "enumDev2", None)
-            if enum is not None:
-                devices = list(enum() if callable(enum) else enum)
-            elif hasattr(mgr, "getDevCount"):
-                devices = [mgr.getDevInfo(i) for i in range(int(mgr.getDevCount()))]
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось перечислить аудиоустройства: %s", exc)
-            devices = []
-
+        devices = self._enum_devices(mgr)
         if not devices:
-            # Нет реальных устройств — включаем null-устройство.
             try:
                 fn = getattr(mgr, "setNullDev", None)
                 if callable(fn):
                     fn()
-                    log.warning(
-                        "Аудиоустройства не найдены — включено null-устройство "
-                        "(звонки работают без звука)"
-                    )
-                else:
-                    log.warning("Аудиоустройства не найдены, setNullDev недоступен")
+                    log.warning("Аудиоустройства не найдены — включено null-устройство")
             except Exception as exc:  # noqa: BLE001
                 log.warning("Не удалось включить null-устройство: %s", exc)
             return
-
         cap = self._dev_int(mgr, "captureDev", "getCaptureDev")
         play = self._dev_int(mgr, "playbackDev", "getPlaybackDev")
-
         if play < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "outputCount", 0) > 0:
@@ -454,7 +351,6 @@ class SipEngine:
                 if getattr(dev, "inputCount", 0) > 0:
                     self._dev_set(mgr, "captureDev", "setCaptureDev", i)
                     break
-
         log.info(
             "Аудиоустройства: capture=%s, playback=%s (всего %d)",
             self._dev_int(mgr, "captureDev", "getCaptureDev"),
@@ -481,7 +377,6 @@ class SipEngine:
 
     @staticmethod
     def _detect_video_support(ep) -> bool:  # pragma: no cover
-        """Есть ли в собранном PJSIP видео (устройства или видеокодеки)."""
         if not hasattr(ep, "vidDevManager"):
             return False
         try:
@@ -499,34 +394,61 @@ class SipEngine:
         return False
 
     def _start_account(self, ep) -> None:  # pragma: no cover
+        engine = self
+
+        class _Call(_pj.Call):
+            """Подкласс Call: onCallMediaState/onCallState живут здесь."""
+
+            def __init__(self, account, call_id=None) -> None:
+                if call_id is not None:
+                    super().__init__(account, call_id)
+                else:
+                    super().__init__(account)
+
+            def onCallMediaState(self, prm) -> None:  # noqa: N802
+                engine._on_call_media_state(prm)
+
+            def onCallState(self, prm) -> None:  # noqa: N802
+                engine._on_call_state(self, prm)
+
+        self._CallClass = _Call
+
         class _Account(_pj.Account):
-            def __init__(self, engine: "SipEngine") -> None:
+            def __init__(self) -> None:
                 super().__init__()
-                self.engine = engine
 
-            def onIncomingCall(self, prm) -> None:  # noqa: N802, ANN001
-                self.engine._on_incoming(prm)
-
-            def onCallMediaState(self, prm) -> None:  # noqa: N802, ANN001
-                self.engine._on_call_media_state(prm)
+            def onIncomingCall(self, prm) -> None:  # noqa: N802
+                engine._on_incoming(prm)
 
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = self._build_id_uri()
-
-        # mediaConfig/srtpUse есть только в SWIG-сборке. В pybind11-версии
-        # (pjsua2-pybind11) их нет — шифрование просто не настраиваем.
         media_cfg = getattr(acc_cfg, "mediaConfig", None)
         if media_cfg is not None and hasattr(_pj, "PJMEDIA_SRTP_DISABLED"):
             if self.config.require_encryption:
                 media_cfg.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
             else:
                 media_cfg.srtpUse = _pj.PJMEDIA_SRTP_DISABLED
-
-        self._account = _Account(self)
+        self._account = _Account()
         self._account.create(acc_cfg)
 
+    def _on_call_state(self, call, prm) -> None:  # pragma: no cover
+        try:
+            ci = call.getInfo()
+            call_id = ci.id
+            state_text = ci.stateText
+        except Exception:  # noqa: BLE001
+            return
+        p = self._get_participant(call_id)
+        if p is None:
+            return
+        if state_text == "CONFIRMED":
+            p.state = CallState.CONFIRMED
+        elif state_text == "DISCONNECTED":
+            p.state = CallState.DISCONNECTED
+        log.info("Вызов %s: состояние %s", call_id, state_text)
+        self.events.emit("call.state", id=call_id, state=state_text)
+
     def _on_call_media_state(self, prm) -> None:  # pragma: no cover
-        """Обработать активацию медиа: подключить видеопоток к окну."""
         try:
             ci = prm.callInfo
         except Exception:  # noqa: BLE001
@@ -550,33 +472,21 @@ class SipEngine:
                 self.events.emit("call.video", id=call_id, active=False)
 
     def get_video_window(self, participant_id: int):
-        """Вернуть нативное VideoWindow участника (или None)."""
         return self._video_windows.get(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        """Показать видео вызова.
-
-        Сначала пробуем встроить нативное окно pjsua2 в Qt-виджет
-        (VideoWindowHandle.handle.window = winId). Если не удалось
-        (например, Wayland), показываем видео отдельным нативным окном
-        через VideoWindow.Show(True) — так изображение всё равно видно.
-        """
         window = self._video_windows.get(participant_id)
         if window is None or not PJSIP_AVAILABLE:
             return False
-
         embedded = False
         try:  # pragma: no cover
             handle = _pj.VideoWindowHandle()
-            # handle — вложенная WindowHandle с полем window (XID/HWND).
             handle.handle.window = int(widget.winId())
             handle.type = 0
             window.setWindow(handle)
             embedded = True
         except Exception as exc:  # noqa: BLE001
-            log.info("Встраивание видео в тайл не удалось (%s); "
-                     "показываю отдельным окном", exc)
-
+            log.info("Встраивание видео в тайл не удалось (%s); показываю отдельным окном", exc)
         try:  # pragma: no cover
             window.Show(True)
         except Exception as exc:  # noqa: BLE001
@@ -585,7 +495,6 @@ class SipEngine:
         return embedded
 
     def show_video_window(self, participant_id: int) -> bool:
-        """Показать видео вызова отдельным нативным окном."""
         window = self._video_windows.get(participant_id)
         if window is None or not PJSIP_AVAILABLE:
             return False
@@ -597,28 +506,17 @@ class SipEngine:
             return False
 
     def _build_id_uri(self) -> str:
-        """Собрать валидный SIP URI аккаунта.
-
-        PJSIP отвергает idUri с пробелами (room name) и с 0.0.0.0/:: в качестве
-        host. Поэтому имя комнаты приводится к безопасному токену, а wildcard-
-        адрес заменяется на реальный локальный IP.
-        """
         import re
-
         user = re.sub(r"[^A-Za-z0-9._-]+", "-", self.config.room_name).strip("-")
         user = user or "mcu"
-
         host = self.config.sip_listen
         if host in ("", "0.0.0.0", "::", "*"):
             host = self._local_ip()
-
         return f"sip:{user}@{host}"
 
     @staticmethod
     def _local_ip() -> str:
-        """Определить локальный IP (без реального соединения)."""
         import socket
-
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -632,9 +530,8 @@ class SipEngine:
             except Exception:  # noqa: BLE001
                 return "127.0.0.1"
 
-    # --- входящие/исходящие ---
     def _on_incoming(self, prm) -> None:  # pragma: no cover
-        call = _pj.Call(self._account, prm.callId)
+        call = self._CallClass(self._account, prm.callId)
         info = call.getInfo()
         remote_uri = info.remoteUri
         remote_ip = self._extract_ip(remote_uri)
@@ -645,15 +542,8 @@ class SipEngine:
             return
         participant = self._register_participant(call, remote_uri, state=CallState.INCOMING)
         self.events.emit("call.incoming", id=participant.id, remote=remote_uri)
-
-        # В режиме MCU (без оператора) сразу принимаем вызов, иначе удалённая
-        # сторона получит 487 Request Terminated и не дозвонится.
         if self.config.auto_answer:
             log.info("Авто-ответ на вызов от %s", remote_uri)
-            # answer() нельзя вызывать из callback-потока SWIG-биндинга —
-            # создание медиа-канала роняет процесс. Если GUI задал dispatch,
-            # отвечаем в главном потоке (зарегистрированном в pjlib).
-            # Иначе (headless) — отвечаем здесь.
             if self._answer_dispatch is not None:
                 try:
                     self._answer_dispatch(participant.id)
@@ -669,10 +559,6 @@ class SipEngine:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             prm = _pj.CallOpParam(True)
-            # statusCode обязателен: в SWIG-биндинге CallOpParam() по умолчанию
-            # даёт 0, и answer() падает в pjsip_dlg_modify_response (assert
-            # st_code 100..699). В pybind11 по умолчанию 200 — поэтому там
-            # работало. Ставим 200 OK явно.
             prm.statusCode = 200
             prm.opt.audioCount = 1
             prm.opt.videoCount = (
@@ -701,7 +587,7 @@ class SipEngine:
             self.events.emit("call.error", reason="pjsua2 недоступен")
             return None
         try:  # pragma: no cover
-            call = _pj.Call(self._account)
+            call = self._CallClass(self._account)
             prm = _pj.CallOpParam(True)
             prm.opt.audioCount = 1
             prm.opt.videoCount = (
@@ -720,9 +606,11 @@ class SipEngine:
         p = self._get_participant(participant_id)
         if p and p._call is not None and PJSIP_AVAILABLE:
             try:  # pragma: no cover
-                p._call.hangup(_pj.CallOpParam())
+                prm = _pj.CallOpParam()
+                prm.statusCode = 200
+                p._call.hangup(prm)
             except Exception:  # noqa: BLE001
-                log.exception("Ошибка завершения вызова")
+                log.debug("Ошибка завершения вызова (уже завершён)")
         self._drop_participant(participant_id)
 
     def _hangup_all(self) -> None:  # pragma: no cover
@@ -731,7 +619,6 @@ class SipEngine:
         for pid in list(self.room.participants):
             self.hangup(pid)
 
-    # --- управление медиа ---
     def set_camera_enabled(self, enabled: bool) -> bool:
         state = self.media_state.toggle_camera(enabled)
         if state:
@@ -746,9 +633,7 @@ class SipEngine:
         self.events.emit("media.microphone", enabled=state)
         return state
 
-    # --- камера: выбор устройства и локальный тест до звонка ---
     def list_video_devices(self) -> List[dict]:
-        """Список видеоустройств, известных PJSIP (камера, SDL, colorbar)."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return []
         devices: List[dict] = []
@@ -762,7 +647,6 @@ class SipEngine:
         return devices
 
     def set_video_device(self, dev_id: int) -> bool:
-        """Переключить камеру по id (см. list_video_devices)."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return False
         try:  # pragma: no cover
@@ -778,7 +662,6 @@ class SipEngine:
             return False
 
     def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
-        """Показать локальное превью камеры (тест до приёма звонка)."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             self.events.emit("media.preview", active=False, error="pjsip_unavailable")
             return False
@@ -786,7 +669,6 @@ class SipEngine:
             self.events.emit("media.preview", active=False, error="video_unsupported")
             return False
         try:  # pragma: no cover
-            # Определяем устройство: явный id -> сохранённый -> первый доступный.
             target = dev_id
             if target is None and self.media_state.camera_id is not None:
                 try:
@@ -799,10 +681,7 @@ class SipEngine:
                     self.events.emit("media.preview", active=False, error="no_devices")
                     return False
                 target = devices[0]["id"]
-
-            # Переключение не критично: не все драйверы поддерживают switch.
             self.set_video_device(target)
-
             if self._video_preview is None:
                 self._video_preview = _pj.VideoPreview(int(target))
             prm = _pj.VideoPreviewOpParam()
@@ -816,7 +695,6 @@ class SipEngine:
             return False
 
     def stop_local_preview(self) -> None:
-        """Остановить локальное превью камеры."""
         if self._video_preview is None:
             return
         try:  # pragma: no cover
@@ -831,9 +709,7 @@ class SipEngine:
     def local_preview_active(self) -> bool:
         return self._video_preview is not None
 
-    # --- микрофон: выбор устройства и тест записи до звонка ---
     def list_audio_devices(self) -> List[dict]:
-        """Список аудиоустройств, известных PJSIP (микрофоны/динамики)."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return []
         devices: List[dict] = []
@@ -852,7 +728,6 @@ class SipEngine:
         return devices
 
     def set_audio_device(self, dev_id: int) -> bool:
-        """Выбрать устройство захвата (микрофон) по id."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return False
         try:  # pragma: no cover
@@ -868,68 +743,7 @@ class SipEngine:
             log.warning("Не удалось переключить микрофон: %s", exc)
             return False
 
-    def test_microphone(self, seconds: int = 3) -> dict:
-        """Тест микрофона: запись в WAV + средний уровень сигнала.
-
-        Возвращает словарь {ok, level, file, error}. Уровень > 0 означает,
-        что со звуковой карты реально поступает сигнал.
-        """
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return {"ok": False, "error": "pjsua2 недоступен"}
-        import tempfile
-        import time as _time
-
-        path = Path(tempfile.gettempdir()) / f"mcu_mic_test_{int(_time.time())}.wav"
-        try:  # pragma: no cover
-            # pjlib требует, чтобы поток был зарегистрирован в библиотеке,
-            # иначе вызов из Python-потока роняет процесс ассертом.
-            try:
-                self._endpoint.libRegisterThread("main")
-            except Exception:  # noqa: BLE001 - уже зарегистрирован
-                pass
-
-            mgr = self._aud_mgr(self._endpoint)
-
-            # Если устройство захвата не выбрано (-1), назначаем первое,
-            # у которого есть входы (inputCount > 0).
-            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
-                for i, info in enumerate(self._enum_devices(mgr)):
-                    if getattr(info, "inputCount", 0) > 0:
-                        self._dev_set(mgr, "captureDev", "setCaptureDev", i)
-                        self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
-                        log.info("Для теста выбрано аудиоустройство #%d", i)
-                        break
-
-            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
-                return {"ok": False, "error": "не найдено устройство захвата (микрофон)"}
-
-            # Только измерение уровня: подключение рекордера к мосту
-            # (startTransmit) в pjsua 2.16 из внешнего потока роняет
-            # процесс ассертом conference.c, поэтому WAV не пишем.
-            capture = mgr.getCaptureDevMedia()
-            peak = 0.0
-            deadline = _time.time() + max(1, int(seconds))
-            while _time.time() < deadline:
-                try:
-                    peak = max(peak, float(capture.getRxLevel()))
-                except Exception:  # noqa: BLE001
-                    pass
-                _time.sleep(0.1)
-
-            log.info("Тест микрофона: уровень=%.3f", peak)
-            self.events.emit("media.mic_test", level=peak)
-            return {"ok": True, "level": peak, "file": None}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Тест микрофона не удался: %s", exc)
-            return {"ok": False, "error": str(exc) or exc.__class__.__name__}
-
-    # --- монитор уровня микрофона (для окна-эквалайзера) ---
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
-        """Подготовить микрофон к живому мониторингу уровня.
-
-        Возвращает True, если устройство захвата выбрано и готово к чтению
-        уровня (см. read_mic_level).
-        """
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return False
         try:  # pragma: no cover
@@ -953,7 +767,6 @@ class SipEngine:
             return False
 
     def read_mic_level(self) -> float:
-        """Текущий уровень сигнала микрофона (0.0..1.0) или 0.0."""
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return 0.0
         try:  # pragma: no cover
@@ -967,13 +780,7 @@ class SipEngine:
             return 0.0
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
-        """Включить/выключить демонстрацию экрана.
-
-        При включении: запускает mss + pyvirtualcam, камера отключается.
-        PJSIP затем выбирает виртуальную камеру как источник видео.
-        """
         if enabled and not self._screen_share_enabled:
-            # Запуск захвата экрана
             if self._screen_sharer.start():
                 self._screen_share_enabled = True
                 self.media_state.toggle_camera(False)
@@ -986,7 +793,6 @@ class SipEngine:
             self._screen_sharer.stop()
             self._screen_share_enabled = False
             log.info("Демонстрация экрана: выкл")
-
         self._apply_media_state()
         self.events.emit("media.screen_share", enabled=self._screen_share_enabled)
         return self._screen_share_enabled
@@ -1005,7 +811,6 @@ class SipEngine:
             if p is None or p._call is None:
                 continue
             try:  # pragma: no cover
-                p._call.setHold(_pj.CallOpParam(False))
                 if hasattr(p._call, "vidSetStream"):
                     if self._screen_share_enabled or self.media_state.camera_enabled:
                         p._call.vidSetStream(_pj.PJMEDIA_DIR_ENCODING_DECODING)
@@ -1030,7 +835,6 @@ class SipEngine:
         self.config.set_bandwidth(kbps)
         self.events.emit("media.bandwidth", kbps=int(kbps))
 
-    # --- мут участников ---
     def mute_participant(self, participant_id: int, muted: bool) -> bool:
         p = self._get_participant(participant_id)
         if p is None:
@@ -1068,7 +872,6 @@ class SipEngine:
         for pid in list(self.room.participants):
             self.mute_participant(pid, muted)
 
-    # --- раскладки видео ---
     @property
     def layout(self) -> str:
         return self._layout
@@ -1103,7 +906,6 @@ class SipEngine:
             return active
         return active[:capacity]
 
-    # --- запись конференции ---
     def toggle_recording(self) -> bool:
         if not self.config.features.get("allow_recording", True):
             log.warning("Запись отключена в конфигурации")
@@ -1125,7 +927,6 @@ class SipEngine:
         f = self._recorder.current_file
         return str(f) if f else None
 
-    # --- помощники ---
     def _register_participant(
         self, call, remote_uri: str, state: CallState
     ) -> Participant:

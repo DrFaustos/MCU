@@ -91,6 +91,7 @@ class ConferenceRecorder:
             try:
                 self._process = subprocess.Popen(
                     cmd,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -110,12 +111,18 @@ class ConferenceRecorder:
             if self._process is not None:
                 try:
                     # Отправляем 'q' для корректного завершения FFmpeg
-                    self._process.stdin.write(b'q\n')
-                    self._process.stdin.flush()
+                    if self._process.stdin is not None:
+                        self._process.stdin.write(b'q\n')
+                        self._process.stdin.flush()
+                    else:
+                        self._process.terminate()
                     self._process.wait(timeout=5)
                 except Exception as exc:
                     log.warning("Ошибка остановки FFmpeg: %s", exc)
-                    self._process.kill()
+                    try:
+                        self._process.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
 
             self._is_recording = False
             log.info("Запись остановлена: %s", self._current_file)
