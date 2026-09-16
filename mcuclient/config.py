@@ -1,13 +1,41 @@
-"""Конфигурация MCU Client: загрузка/сохранение JSON, значения по умолчанию."""
+"""Конфигурация MCU Client: загрузка/сохранение JSON, значения по умолчанию, валидация."""
 
 from __future__ import annotations
 
 import copy
 import ipaddress
 import json
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+# --- Границы допустимых значений (используются валидацией и сеттерами) ---
+PORT_MIN, PORT_MAX = 1, 65535
+VIDEO_BITRATE_MIN, VIDEO_BITRATE_MAX = 64, 100_000
+AUDIO_BITRATE_MIN, AUDIO_BITRATE_MAX = 6, 510
+BANDWIDTH_MIN, BANDWIDTH_MAX = 128, 1_000_000
+VIDEO_DIM_MIN, VIDEO_DIM_MAX = 16, 7680
+VIDEO_FPS_MIN, VIDEO_FPS_MAX = 1, 120
+SUPPORTED_TRANSPORTS = ("udp", "tcp", "tls")
+
+
+def default_recording_dir() -> Path:
+    """Кроссплатформенный путь по умолчанию для записей конференций.
+
+    Linux:   ``$XDG_DATA_HOME/mcu-client/recordings`` (или ``~/.local/share/...``)
+    Windows: ``%APPDATA%\\MCU-Client\\recordings``
+    macOS:   ``~/Library/Application Support/MCU-Client/recordings``
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "MCU-Client" / "recordings"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "MCU-Client" / "recordings"
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "mcu-client" / "recordings"
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -40,13 +68,122 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "features": {
         "allow_screen_share": True,
         "allow_recording": True,
-        "recording_path": "./recordings",
+        "recording_path": str(default_recording_dir()),
         "layouts": {
             "available": ["speaker", "gallery_2x2", "gallery_3x3", "grid_auto"],
             "default": "speaker",
         },
     },
 }
+
+
+class ConfigError(ValueError):
+    """Некорректная конфигурация (тип, диапазон, обязательное поле)."""
+
+
+def _check_int(key: str, value: Any, lo: int, hi: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"{key}: ожидалось целое число, получено {type(value).__name__}"
+        )
+    if not (lo <= value <= hi):
+        raise ConfigError(f"{key}: значение {value} вне диапазона [{lo}, {hi}]")
+    return value
+
+
+def _check_bool(key: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{key}: ожидалось true/false, получено {type(value).__name__}")
+    return value
+
+
+def _check_str(key: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{key}: ожидалась непустая строка")
+    return value
+
+
+def _check_str_list(key: str, value: Any) -> List[str]:
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ConfigError(f"{key}: ожидался список строк")
+    return value
+
+
+def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Проверяет типы, диапазоны и обязательные поля. Возвращает тот же dict.
+
+    Бросает :class:`ConfigError` с понятным сообщением при первой ошибке.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("корень конфигурации должен быть объектом JSON")
+
+    for section in ("room", "sip", "media", "h323", "features"):
+        if section not in raw:
+            raise ConfigError(f"отсутствует обязательная секция '{section}'")
+        if not isinstance(raw[section], dict):
+            raise ConfigError(f"секция '{section}' должна быть объектом")
+
+    _check_str("room.name", raw["room"].get("name"))
+    _check_bool("room.auto_create", raw["room"].get("auto_create"))
+
+    sip = raw["sip"]
+    _check_str("sip.listen", sip.get("listen"))
+    _check_int("sip.port", sip.get("port"), PORT_MIN, PORT_MAX)
+    transport = str(sip.get("transport", "")).lower()
+    if transport not in SUPPORTED_TRANSPORTS:
+        raise ConfigError(
+            f"sip.transport: '{transport}' не поддерживается, ожидается одно из {SUPPORTED_TRANSPORTS}"
+        )
+    _check_bool("sip.require_encryption", sip.get("require_encryption"))
+    _check_bool("sip.auto_answer", sip.get("auto_answer"))
+    _check_str_list("sip.allowed_peers", sip.get("allowed_peers"))
+    for pattern in sip.get("allowed_peers", []):
+        try:
+            if "/" in pattern:
+                ipaddress.ip_network(pattern, strict=False)
+            else:
+                ipaddress.ip_address(pattern)
+        except ValueError as exc:
+            raise ConfigError(f"sip.allowed_peers: некорректный адрес/CIDR '{pattern}'") from exc
+
+    codecs = sip.get("codecs")
+    if not isinstance(codecs, dict):
+        raise ConfigError("sip.codecs должен быть объектом")
+    _check_str_list("sip.codecs.audio", codecs.get("audio"))
+    _check_str_list("sip.codecs.video", codecs.get("video"))
+
+    media = raw["media"]
+    video = media.get("video")
+    audio = media.get("audio")
+    if not isinstance(video, dict) or not isinstance(audio, dict):
+        raise ConfigError("media.video и media.audio должны быть объектами")
+    _check_bool("media.video.enabled", video.get("enabled"))
+    _check_int("media.video.width", video.get("width"), VIDEO_DIM_MIN, VIDEO_DIM_MAX)
+    _check_int("media.video.height", video.get("height"), VIDEO_DIM_MIN, VIDEO_DIM_MAX)
+    _check_int("media.video.fps", video.get("fps"), VIDEO_FPS_MIN, VIDEO_FPS_MAX)
+    _check_int("media.video.bitrate_kbps", video.get("bitrate_kbps"),
+               VIDEO_BITRATE_MIN, VIDEO_BITRATE_MAX)
+    _check_int("media.audio.bitrate_kbps", audio.get("bitrate_kbps"),
+               AUDIO_BITRATE_MIN, AUDIO_BITRATE_MAX)
+    _check_int("media.bandwidth_kbps", media.get("bandwidth_kbps"),
+               BANDWIDTH_MIN, BANDWIDTH_MAX)
+
+    _check_bool("h323.enabled", raw["h323"].get("enabled"))
+    _check_int("h323.port", raw["h323"].get("port"), PORT_MIN, PORT_MAX)
+
+    features = raw["features"]
+    _check_str("features.recording_path", features.get("recording_path"))
+    layouts = features.get("layouts")
+    if not isinstance(layouts, dict):
+        raise ConfigError("features.layouts должен быть объектом")
+    _check_str_list("features.layouts.available", layouts.get("available"))
+    _check_str("features.layouts.default", layouts.get("default"))
+    if layouts["default"] not in layouts["available"]:
+        raise ConfigError(
+            f"features.layouts.default '{layouts['default']}' отсутствует в available"
+        )
+
+    return raw
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -196,6 +333,10 @@ class Config:
         return self.raw.get("features", DEFAULT_CONFIG["features"])
 
     @property
+    def recording_path(self) -> str:
+        return str(self.features.get("recording_path", DEFAULT_CONFIG["features"]["recording_path"]))
+
+    @property
     def available_layouts(self) -> List[str]:
         return list(self.features.get("layouts", {}).get("available", ["speaker"]))
 
@@ -204,13 +345,13 @@ class Config:
         return str(self.features.get("layouts", {}).get("default", "speaker"))
 
     def set_video_bitrate(self, kbps: int) -> None:
-        self.raw["media"]["video"]["bitrate_kbps"] = max(64, int(kbps))
+        self.raw["media"]["video"]["bitrate_kbps"] = max(VIDEO_BITRATE_MIN, int(kbps))
 
     def set_audio_bitrate(self, kbps: int) -> None:
-        self.raw["media"]["audio"]["bitrate_kbps"] = max(6, int(kbps))
+        self.raw["media"]["audio"]["bitrate_kbps"] = max(AUDIO_BITRATE_MIN, int(kbps))
 
     def set_bandwidth(self, kbps: int) -> None:
-        self.raw["media"]["bandwidth_kbps"] = max(128, int(kbps))
+        self.raw["media"]["bandwidth_kbps"] = max(BANDWIDTH_MIN, int(kbps))
 
     def set_video_quality(self, width: int, height: int, fps: int) -> None:
         self.raw["media"]["video"].update(width=width, height=height, fps=fps)
@@ -227,20 +368,35 @@ class Config:
 
 
 def load_config(path: Optional[str] = None) -> Config:
+    """Загружает конфиг, сливает с DEFAULT_CONFIG и валидирует результат.
+
+    :raises ConfigError: при некорректном JSON или значениях.
+    """
     if path:
         cfg_path = Path(path)
         if cfg_path.exists():
-            user = json.loads(cfg_path.read_text(encoding="utf-8"))
+            try:
+                user = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ConfigError(f"Некорректный JSON в {cfg_path}: {exc}") from exc
+            if not isinstance(user, dict):
+                raise ConfigError(f"Корень {cfg_path} должен быть объектом JSON")
             merged = _deep_merge(DEFAULT_CONFIG, user)
+            validate_config(merged)
             return Config(raw=merged, path=cfg_path)
-    return Config(raw=copy.deepcopy(DEFAULT_CONFIG), path=None)
+    raw = copy.deepcopy(DEFAULT_CONFIG)
+    validate_config(raw)
+    return Config(raw=raw, path=None)
 
 
 def parse_listen(value: str) -> tuple[str, int]:
     if ":" in value:
         host, _, port_s = value.rpartition(":")
         try:
-            return host or "0.0.0.0", int(port_s)
+            port = int(port_s)
         except ValueError as exc:  # pragma: no cover
             raise ValueError(f"Некорректный порт в '{value}'") from exc
+        if not (PORT_MIN <= port <= PORT_MAX):
+            raise ValueError(f"Порт вне диапазона [{PORT_MIN}, {PORT_MAX}] в '{value}'")
+        return host or "0.0.0.0", port
     return value, 5060

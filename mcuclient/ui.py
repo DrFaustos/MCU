@@ -23,6 +23,19 @@ import signal
 import traceback
 from typing import Dict, Optional
 
+# === КРИТИЧЕСКИ ВАЖНО: переменные Qt должны быть установлены ДО импорта PySide6 ===
+if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+    os.environ['QT_QPA_PLATFORMTHEME'] = ''
+    os.environ['QT_FORCE_STDERR_LOGGING'] = '1'
+    os.environ['QT_LOGGING_RULES'] = 'qt.*=true'
+    os.environ['QT_DEBUG_PLUGINS'] = '0'
+    if hasattr(sys, '_MEIPASS'):
+        plugin_path = os.path.join(sys._MEIPASS, 'PySide6', 'Qt', 'plugins')
+        if os.path.isdir(plugin_path):
+            os.environ['QT_PLUGIN_PATH'] = plugin_path
+            os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(plugin_path, 'platforms')
+
 from .config import Config, LAYOUT_LABELS
 from .h323_gateway import H323Gateway
 from .log import get_logger
@@ -30,30 +43,8 @@ from .sip_engine import CallState, Participant, SipEngine
 
 log = get_logger("ui")
 
-# --- Выбор Qt-платформы ДО импорта PySide6 -------------------------------
-# На Wayland встроенный бэкенд Qt нередко даёт смещение курсора (ввод
-# «не туда», чем нарисовано). Классическое лечение — X11-бэкенд (xcb)
-# через XWayland. Управляется переменной MCU_QT_PLATFORM:
-#   auto (по умолчанию) — xcb на Wayland, иначе платформа по умолчанию;
-#   wayland / xcb / x11     — принудительно;
-#   (пусто)                 — не трогать окружение.
-if sys.platform.startswith("linux") and "QT_QPA_PLATFORM" not in os.environ:
-    _choice = os.environ.get("MCU_QT_PLATFORM", "auto").lower()
-    _session = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    if _choice in ("xcb", "x11"):
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
-        log.info("Qt: принудительно X11-бэкенд (xcb)")
-    elif _choice == "wayland":
-        os.environ["QT_QPA_PLATFORM"] = "wayland"
-        log.info("Qt: принудительно Wayland-бэкенд")
-    elif _choice == "auto" and _session == "wayland":
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
-        log.info("Qt: Wayland-сессия → используем X11-бэкенд (xcb) "
-                 "для корректного позиционирования курсора")
-
-try:  # pragma: no cover - зависит от окружения
+try:  # pragma: no cover
     from PySide6 import QtCore, QtGui, QtWidgets
-
     QT_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001
     QT_AVAILABLE = False
@@ -63,7 +54,6 @@ except Exception as _exc:  # noqa: BLE001
 
 if QT_AVAILABLE:
 
-    # --- виджет ячейки видео участника ---
     class ParticipantTile(QtWidgets.QWidget):
         """Ячейка видео для одного участника с кнопками мута."""
 
@@ -81,30 +71,19 @@ if QT_AVAILABLE:
             layout.setContentsMargins(4, 4, 4, 4)
             layout.setSpacing(2)
 
-            # Контейнер для нативного видеоокна pjsua2 + текстовый статус.
-            self.video_host = QtWidgets.QWidget()
-            self.video_host.setMinimumSize(160, 120)
-            self.video_host.setStyleSheet(
-                "background:#1a2028; border:1px solid #2a3138; border-radius:4px;"
-            )
-            self.video_host.setAttribute(
-                QtCore.Qt.WidgetAttribute.WA_NativeWindow, True
-            )
-            self.video_label = QtWidgets.QLabel("Нет видео", self.video_host)
+            self.video_label = QtWidgets.QLabel("Нет видео")
             self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.video_label.setStyleSheet("background:transparent; color:#7a8592;")
-            host_layout = QtWidgets.QVBoxLayout(self.video_host)
-            host_layout.setContentsMargins(0, 0, 0, 0)
-            host_layout.addWidget(self.video_label)
-            layout.addWidget(self.video_host, stretch=1)
+            self.video_label.setMinimumSize(160, 120)
+            self.video_label.setStyleSheet(
+                "background:#1a2028; color:#7a8592; border:1px solid #2a3138; border-radius:4px;"
+            )
+            layout.addWidget(self.video_label, stretch=1)
 
-            # Имя участника
             self.name_label = QtWidgets.QLabel("—")
             self.name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.name_label.setStyleSheet("color:#c0c8d0; font-size:11px;")
             layout.addWidget(self.name_label)
 
-            # Кнопки управления
             btn_row = QtWidgets.QHBoxLayout()
             btn_row.setSpacing(4)
 
@@ -144,7 +123,6 @@ if QT_AVAILABLE:
             layout.addLayout(btn_row)
 
         def set_participant(self, p: Optional[Participant]) -> None:
-            """Обновить отображение участника."""
             if p is None:
                 self.participant_id = None
                 self.video_label.setText("Пусто")
@@ -157,7 +135,6 @@ if QT_AVAILABLE:
             self.participant_id = p.id
             self.setEnabled(True)
 
-            # Имя (извлекаем из URI)
             name = p.remote_uri
             if name.startswith("sip:"):
                 name = name[4:]
@@ -165,7 +142,6 @@ if QT_AVAILABLE:
                 name = name.split("@")[0]
             self.name_label.setText(name)
 
-            # Статус видео
             if p.is_video_muted:
                 self.video_label.setText("📷✕ Видео выкл")
             elif p.state is CallState.INCOMING:
@@ -177,7 +153,6 @@ if QT_AVAILABLE:
             else:
                 self.video_label.setText("⏸ Неактивен")
 
-            # Состояние кнопок мута
             self.mute_audio_btn.setChecked(p.is_muted)
             self.mute_audio_btn.setText("🔇" if p.is_muted else "🔊")
             self.mute_video_btn.setChecked(p.is_video_muted)
@@ -185,24 +160,17 @@ if QT_AVAILABLE:
 
         def _on_mute_audio(self) -> None:
             if self.participant_id is not None:
-                self.mute_audio_clicked.emit(
-                    self.participant_id, self.mute_audio_btn.isChecked()
-                )
+                self.mute_audio_clicked.emit(self.participant_id, self.mute_audio_btn.isChecked())
 
         def _on_mute_video(self) -> None:
             if self.participant_id is not None:
-                self.mute_video_clicked.emit(
-                    self.participant_id, self.mute_video_btn.isChecked()
-                )
+                self.mute_video_clicked.emit(self.participant_id, self.mute_video_btn.isChecked())
 
         def _on_hangup(self) -> None:
             if self.participant_id is not None:
                 self.hangup_clicked.emit(self.participant_id)
 
-    # --- окно монитора микрофона (живой эквалайзер) ---
     class MicMonitorWindow(QtWidgets.QDialog):
-        """Окно с живым уровнем микрофона: полоса + история (эквалайзер)."""
-
         BARS = 32
 
         def __init__(self, engine: SipEngine, dev_id: Optional[int] = None,
@@ -216,7 +184,7 @@ if QT_AVAILABLE:
             self._build_ui()
             self._opened = engine.open_mic_monitor(dev_id)
             self._timer = QtCore.QTimer(self)
-            self._timer.setInterval(50)  # 20 кадров/сек
+            self._timer.setInterval(50)
             self._timer.timeout.connect(self._tick)
             self._timer.start()
 
@@ -226,11 +194,9 @@ if QT_AVAILABLE:
             self.info.setWordWrap(True)
             root.addWidget(self.info)
 
-            # Гистограмма-эквалайзер (рисуем сами)
             self.bars = _LevelBars(self.BARS)
             root.addWidget(self.bars, stretch=1)
 
-            # Текущий уровень + пик
             self.level_bar = QtWidgets.QProgressBar()
             self.level_bar.setRange(0, 100)
             self.level_bar.setFormat("уровень: %p%")
@@ -245,7 +211,6 @@ if QT_AVAILABLE:
 
         def _tick(self) -> None:
             level = self.engine.read_mic_level() if self._opened else 0.0
-            # сглаживание, чтобы столбики не дёргались
             self._levels.append(level)
             self._levels.pop(0)
             self._peak = max(self._peak * 0.98, level)
@@ -259,8 +224,6 @@ if QT_AVAILABLE:
             super().closeEvent(event)
 
     class _LevelBars(QtWidgets.QWidget):
-        """Простой виджет-эквалайзер: N столбиков по истории уровня."""
-
         def __init__(self, count: int, parent: Optional[QtWidgets.QWidget] = None) -> None:
             super().__init__(parent)
             self._count = count
@@ -287,11 +250,7 @@ if QT_AVAILABLE:
                 painter.fillRect(x, h - 4 - bh, bw, bh, color)
             painter.end()
 
-    # --- главное окно ---
     class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
-        """Главное окно ВКС-клиента."""
-
-        # Переносит ответ на входящий вызов в главный поток Qt (см. ниже).
         _answer_requested = QtCore.Signal(int)
 
         QUALITY_PRESETS = {
@@ -311,36 +270,27 @@ if QT_AVAILABLE:
             self._build_ui()
             self.engine.events.subscribe(self._on_event)
 
-            # Авто-ответ должен выполняться в главном потоке Qt: answer()
-            # из callback-потока SWIG-биндинга pjsua2 роняет процесс.
             self._answer_requested.connect(self._on_answer_requested)
             self.engine.register_main_thread()
             self.engine.set_answer_dispatch(self._request_answer)
 
-        # --- построение интерфейса ---
         def _build_ui(self) -> None:
             central = QtWidgets.QWidget()
             self.setCentralWidget(central)
             root = QtWidgets.QHBoxLayout(central)
 
-            # === Левая часть: сетка видео + поле звонка ===
             left = QtWidgets.QVBoxLayout()
-
-            # Панель раскладки
             layout_bar = QtWidgets.QHBoxLayout()
             layout_bar.addWidget(QtWidgets.QLabel("Раскладка:"))
             self.layout_combo = QtWidgets.QComboBox()
             for key in self.config.available_layouts:
                 self.layout_combo.addItem(LAYOUT_LABELS.get(key, key), key)
-            self.layout_combo.setCurrentText(
-                LAYOUT_LABELS.get(self.engine.layout, self.engine.layout)
-            )
+            self.layout_combo.setCurrentText(LAYOUT_LABELS.get(self.engine.layout, self.engine.layout))
             self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
             layout_bar.addWidget(self.layout_combo)
             layout_bar.addStretch()
             left.addLayout(layout_bar)
 
-            # Сетка видео
             self.video_grid = QtWidgets.QWidget()
             self.video_grid_layout = QtWidgets.QGridLayout(self.video_grid)
             self.video_grid_layout.setSpacing(4)
@@ -348,7 +298,6 @@ if QT_AVAILABLE:
             self.video_grid.setStyleSheet("background:#0a0e12;")
             left.addWidget(self.video_grid, stretch=1)
 
-            # Поле звонка
             call_row = QtWidgets.QHBoxLayout()
             self.uri_edit = QtWidgets.QLineEdit()
             self.uri_edit.setPlaceholderText("sip:100@192.168.1.50  или  192.168.1.50")
@@ -359,10 +308,7 @@ if QT_AVAILABLE:
             left.addLayout(call_row)
             root.addLayout(left, stretch=3)
 
-            # === Правая часть: управление ===
             right = QtWidgets.QVBoxLayout()
-
-            # Кнопки звонка
             right.addWidget(QtWidgets.QLabel("Управление вызовами"))
             btn_row = QtWidgets.QHBoxLayout()
             self.accept_btn = QtWidgets.QPushButton("Принять")
@@ -376,25 +322,20 @@ if QT_AVAILABLE:
             btn_row.addWidget(self.hangup_btn)
             right.addLayout(btn_row)
 
-            # Мут всех
             mute_all_row = QtWidgets.QHBoxLayout()
             self.mute_all_btn = QtWidgets.QPushButton("🔇 Мут всех")
             self.mute_all_btn.setCheckable(True)
             self.mute_all_btn.clicked.connect(self._on_mute_all)
-            self.mute_all_btn.setStyleSheet(
-                "QPushButton:checked { background:#8b2020; color:white; }"
-            )
+            self.mute_all_btn.setStyleSheet("QPushButton:checked { background:#8b2020; color:white; }")
             mute_all_row.addWidget(self.mute_all_btn)
             mute_all_row.addStretch()
             right.addLayout(mute_all_row)
 
-            # Список участников (текстовый, для детальной информации)
             right.addWidget(QtWidgets.QLabel("Участники"))
             self.participants_list = QtWidgets.QListWidget()
             self.participants_list.currentRowChanged.connect(self._update_buttons)
             right.addWidget(self.participants_list, stretch=1)
 
-            # Тумблеры устройств и функций
             devices = QtWidgets.QGroupBox("Устройства и функции")
             dlayout = QtWidgets.QGridLayout(devices)
 
@@ -419,7 +360,6 @@ if QT_AVAILABLE:
             dlayout.addWidget(self.screen_toggle, 1, 0)
             dlayout.addWidget(self.record_toggle, 1, 1)
 
-            # --- Выбор и тест устройств ДО звонка ---
             dlayout.addWidget(QtWidgets.QLabel("Камера:"), 2, 0)
             self.camera_combo = QtWidgets.QComboBox()
             self._populate_cameras()
@@ -439,9 +379,7 @@ if QT_AVAILABLE:
             dlayout.addWidget(self.mic_combo, 4, 1)
 
             self.mic_test_btn = QtWidgets.QPushButton("🎙 Открыть монитор микрофона")
-            self.mic_test_btn.setToolTip(
-                "Открыть окно с живым эквалайзером: видно, когда вы говорите"
-            )
+            self.mic_test_btn.setToolTip("Открыть окно с живым эквалайзером: видно, когда вы говорите")
             self.mic_test_btn.clicked.connect(self._on_mic_monitor)
             dlayout.addWidget(self.mic_test_btn, 5, 0, 1, 2)
 
@@ -452,13 +390,11 @@ if QT_AVAILABLE:
 
             right.addWidget(devices)
 
-            # Статус записи
             self.recording_status = QtWidgets.QLabel("")
             self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
             self.recording_status.setWordWrap(True)
             right.addWidget(self.recording_status)
 
-            # Качество и битрейты
             quality = QtWidgets.QGroupBox("Качество и поток")
             qlayout = QtWidgets.QGridLayout(quality)
 
@@ -475,9 +411,7 @@ if QT_AVAILABLE:
             self.video_bitrate.setValue(self.config.video["bitrate_kbps"])
             self.video_bitrate.valueChanged.connect(self.engine.set_video_bitrate)
             self.video_bitrate_label = QtWidgets.QLabel(str(self.video_bitrate.value()))
-            self.video_bitrate.valueChanged.connect(
-                lambda v: self.video_bitrate_label.setText(str(v))
-            )
+            self.video_bitrate.valueChanged.connect(lambda v: self.video_bitrate_label.setText(str(v)))
             qlayout.addWidget(self.video_bitrate, 1, 1)
             qlayout.addWidget(self.video_bitrate_label, 1, 2)
 
@@ -487,9 +421,7 @@ if QT_AVAILABLE:
             self.audio_bitrate.setValue(self.config.audio["bitrate_kbps"])
             self.audio_bitrate.valueChanged.connect(self.engine.set_audio_bitrate)
             self.audio_bitrate_label = QtWidgets.QLabel(str(self.audio_bitrate.value()))
-            self.audio_bitrate.valueChanged.connect(
-                lambda v: self.audio_bitrate_label.setText(str(v))
-            )
+            self.audio_bitrate.valueChanged.connect(lambda v: self.audio_bitrate_label.setText(str(v)))
             qlayout.addWidget(self.audio_bitrate, 2, 1)
             qlayout.addWidget(self.audio_bitrate_label, 2, 2)
 
@@ -499,9 +431,7 @@ if QT_AVAILABLE:
             self.bandwidth.setValue(self.config.bandwidth_kbps)
             self.bandwidth.valueChanged.connect(self.engine.set_bandwidth)
             self.bandwidth_label = QtWidgets.QLabel(str(self.bandwidth.value()))
-            self.bandwidth.valueChanged.connect(
-                lambda v: self.bandwidth_label.setText(str(v))
-            )
+            self.bandwidth.valueChanged.connect(lambda v: self.bandwidth_label.setText(str(v)))
             qlayout.addWidget(self.bandwidth, 3, 1)
             qlayout.addWidget(self.bandwidth_label, 3, 2)
             right.addWidget(quality)
@@ -511,57 +441,78 @@ if QT_AVAILABLE:
             self._update_buttons()
             self._rebuild_video_grid()
 
-        # --- сетка видео ---
         def _rebuild_video_grid(self) -> None:
             """Перестроить сетку видео в соответствии с текущей раскладкой."""
-            for tile in self._tiles.values():
-                tile.setParent(None)
-                tile.deleteLater()
-            self._tiles.clear()
+            try:
+                if not self.engine or not hasattr(self.engine, 'room') or self.engine.room is None:
+                    while self.video_grid_layout.count():
+                        item = self.video_grid_layout.takeAt(0)
+                        if item.widget():
+                            w = item.widget()
+                            w.setParent(None)
+                            w.deleteLater()
+                    self._tiles.clear()
+                    empty = ParticipantTile()
+                    empty.set_participant(None)
+                    self.video_grid_layout.addWidget(empty, 0, 0)
+                    return
 
-            while self.video_grid_layout.count():
-                item = self.video_grid_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
+                # Безопасная очистка старых тайлов
+                while self.video_grid_layout.count():
+                    item = self.video_grid_layout.takeAt(0)
+                    if item.widget():
+                        w = item.widget()
+                        w.setParent(None)
+                        w.deleteLater()
+                self._tiles.clear()
 
-            rows, cols = self.engine.get_layout_grid()
-            visible = self.engine.get_visible_participants()
+                rows, cols = 1, 1
+                try:
+                    rows, cols = self.engine.get_layout_grid()
+                except Exception as e:
+                    log.warning("Ошибка get_layout_grid: %s", e)
 
-            if not visible:
-                empty = ParticipantTile()
-                empty.set_participant(None)
-                self.video_grid_layout.addWidget(empty, 0, 0)
-                return
+                visible = []
+                try:
+                    visible = self.engine.get_visible_participants()
+                except Exception as e:
+                    log.warning("Ошибка get_visible_participants: %s", e)
 
-            for idx, p in enumerate(visible):
-                row = idx // cols
-                col = idx % cols
-                if row >= rows:
-                    break
-                tile = ParticipantTile()
-                tile.set_participant(p)
-                tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
-                tile.mute_video_clicked.connect(self._on_tile_mute_video)
-                tile.hangup_clicked.connect(self._on_tile_hangup)
-                self._tiles[p.id] = tile
-                self.video_grid_layout.addWidget(tile, row, col)
+                if not visible:
+                    empty = ParticipantTile()
+                    empty.set_participant(None)
+                    self.video_grid_layout.addWidget(empty, 0, 0)
+                    return
 
-            for idx in range(len(visible), rows * cols):
-                row = idx // cols
-                col = idx % cols
-                empty = ParticipantTile()
-                empty.set_participant(None)
-                self.video_grid_layout.addWidget(empty, row, col)
+                for idx, p in enumerate(visible):
+                    row = idx // cols
+                    col = idx % cols
+                    if row >= rows:
+                        break
+                    tile = ParticipantTile()
+                    tile.set_participant(p)
+                    tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
+                    tile.mute_video_clicked.connect(self._on_tile_mute_video)
+                    tile.hangup_clicked.connect(self._on_tile_hangup)
+                    self._tiles[p.id] = tile
+                    self.video_grid_layout.addWidget(tile, row, col)
+
+                for idx in range(len(visible), rows * cols):
+                    row = idx // cols
+                    col = idx % cols
+                    empty = ParticipantTile()
+                    empty.set_participant(None)
+                    self.video_grid_layout.addWidget(empty, row, col)
+            except Exception as e:
+                log.exception("Критическая ошибка в _rebuild_video_grid: %s", e)
 
         def _refresh_tiles(self) -> None:
-            """Обновить содержимое тайлов без перестройки сетки."""
-            if not self.engine.room:
+            if not self.engine or not self.engine.room:
                 return
             for pid, tile in self._tiles.items():
                 p = self.engine.room.participants.get(pid)
                 tile.set_participant(p)
 
-        # --- обработчики UI ---
         def _on_layout_changed(self, index: int) -> None:
             layout_key = self.layout_combo.itemData(index)
             if layout_key:
@@ -589,9 +540,7 @@ if QT_AVAILABLE:
             status = "Все заглушены" if muted else "Мут снят со всех"
             self.statusBar().showMessage(status, 5000)
 
-        # --- устройства: камера и микрофон ---
         def _populate_cameras(self) -> None:
-            """Заполнить список камер (без падения, если видео недоступно)."""
             self.camera_combo.clear()
             devices = self.engine.list_video_devices()
             if not devices:
@@ -657,19 +606,16 @@ if QT_AVAILABLE:
                 self.device_status.setText("Превью камеры остановлено")
 
         def _request_answer(self, participant_id: int) -> None:
-            """Вызвано из callback-потока PJSIP: планируем ответ в Qt-потоке."""
             self._answer_requested.emit(int(participant_id))
 
         @QtCore.Slot(int)
         def _on_answer_requested(self, participant_id: int) -> None:
-            """Ответ на вызов выполняется в главном потоке (безопасно)."""
             try:
                 self.engine.accept(participant_id)
             except Exception:  # noqa: BLE001
                 log.exception("Авто-ответ не удался")
 
         def _on_mic_monitor(self) -> None:
-            """Открыть окно с живым эквалайзером микрофона."""
             dev_id = self.mic_combo.currentData()
             if dev_id is not None and dev_id < 0:
                 dev_id = None
@@ -681,19 +627,12 @@ if QT_AVAILABLE:
             success = self.engine.set_screen_share_enabled(checked)
             if not success and checked:
                 self.screen_toggle.setChecked(False)
-                err = getattr(self.engine._screen_sharer, "last_error", None)
-                msg = "Не удалось запустить демонстрацию экрана"
-                if err:
-                    msg += f": {err}"
-                else:
-                    msg += ". Проверьте mss/pyvirtualcam и v4l2loopback (Linux)."
-                self.statusBar().showMessage(msg, 15000)
-                log.warning(msg)
-            # Если демонстрация включилась — выключить тумблер камеры
+                self.statusBar().showMessage(
+                    "Не удалось запустить демонстрацию экрана. Проверьте зависимости (mss, pyvirtualcam).",
+                    10000,
+                )
             if success and checked:
                 self.camera_toggle.setChecked(False)
-            elif not checked and not self.engine.screen_share_enabled:
-                pass  # уже выключено
 
         def _on_record_toggle(self, checked: bool) -> None:
             success = self.engine.toggle_recording()
@@ -701,14 +640,10 @@ if QT_AVAILABLE:
                 self.record_toggle.setChecked(False)
             if success:
                 if self.engine.is_recording:
-                    self.recording_status.setText(
-                        f"⏺ Запись: {self.engine.recording_file or '—'}"
-                    )
+                    self.recording_status.setText(f"⏺ Запись: {self.engine.recording_file or '—'}")
                     self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
                 else:
-                    self.recording_status.setText(
-                        f"✓ Запись сохранена: {self.engine.recording_file or '—'}"
-                    )
+                    self.recording_status.setText(f"✓ Запись сохранена: {self.engine.recording_file or '—'}")
                     self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
             status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
             self.statusBar().showMessage(status, 5000)
@@ -755,12 +690,8 @@ if QT_AVAILABLE:
             self.reject_btn.setEnabled(bool(p and p.state is CallState.INCOMING))
             self.hangup_btn.setEnabled(bool(p and p.state is not CallState.DISCONNECTED))
 
-        # --- события движка ---
         def _on_event(self, event: str, payload: dict) -> None:
-            # payload передаём JSON-строкой: у Qt нет QMetaType для dict,
-            # из-за чего invokeMethod падал с RuntimeError.
             import json
-
             try:
                 payload_json = json.dumps(payload, ensure_ascii=False, default=str)
             except Exception:  # noqa: BLE001
@@ -775,70 +706,60 @@ if QT_AVAILABLE:
         @QtCore.Slot(str, str)
         def _handle_event(self, event: str, payload_json: str) -> None:
             import json
-
             try:
                 payload = json.loads(payload_json) if payload_json else {}
             except Exception:  # noqa: BLE001
                 payload = {}
-            if event in {"call.incoming", "call.outgoing", "call.confirmed",
-                         "call.closed", "call.state"}:
-                self._refresh_participants_list()
-                self._rebuild_video_grid()
-                self._attach_video_windows()
-                self.statusBar().showMessage(f"{event}: {payload}", 5000)
-            elif event == "call.rejected":
-                self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
-            elif event == "media.preview":
-                if payload.get("active"):
-                    self.statusBar().showMessage("Превью камеры: вкл", 3000)
-                else:
+            
+            if not self.engine:
+                log.warning("_handle_event: engine is None, event=%s", event)
+                return
+            
+            try:
+                if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
+                    self._refresh_participants_list()
+                    self._rebuild_video_grid()
+                    self.statusBar().showMessage(f"{event}: {payload}", 5000)
+                elif event == "call.rejected":
+                    self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
+                elif event == "media.preview":
+                    if payload.get("active"):
+                        self.statusBar().showMessage("Превью камеры: вкл", 3000)
+                    else:
+                        self.statusBar().showMessage(f"Превью камеры: выкл ({payload.get('error', '')})", 5000)
+                elif event == "media.mic_test":
+                    self.statusBar().showMessage(f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000)
+                elif event == "engine.started":
+                    mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
+                    enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"
                     self.statusBar().showMessage(
-                        f"Превью камеры: выкл ({payload.get('error', '')})", 5000
+                        f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode} {enc}"
                     )
-            elif event == "media.mic_test":
-                self.statusBar().showMessage(
-                    f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000
-                )
-            elif event == "engine.started":
-                mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
-                enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"
-                self.statusBar().showMessage(
-                    f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode} {enc}"
-                )
-            elif event == "media.recording":
-                state = "начата" if payload.get("enabled") else "остановлена"
-                file_path = payload.get("file")
-                self.statusBar().showMessage(f"Запись конференции {state}: {file_path or '—'}", 5000)
-                if payload.get("enabled") and file_path:
-                    self.recording_status.setText(f"⏺ Запись: {file_path}")
-                    self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
-                elif not payload.get("enabled"):
-                    self.recording_status.setText(f"✓ Запись сохранена: {file_path or '—'}")
-                    self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
-            elif event == "media.screen_share":
-                if payload.get("enabled"):
-                    self.statusBar().showMessage("Демонстрация экрана: вкл (виртуальная камера)", 5000)
-                    self.camera_toggle.setChecked(False)
-                else:
-                    self.statusBar().showMessage("Демонстрация экрана: выкл", 5000)
-            elif event == "call.video":
-                self._attach_video_windows()
-            elif event in {"participant.muted", "participant.video_muted"}:
-                self._refresh_tiles()
-                self._refresh_participants_list()
-
-        def _attach_video_windows(self) -> None:
-            """Встроить нативные видеоокна активных вызовов в тайлы."""
-            for pid, tile in self._tiles.items():
-                try:
-                    if self.engine.attach_video_window(pid, tile.video_host):
-                        tile.video_label.hide()
-                except Exception:  # noqa: BLE001
-                    log.debug("attach_video_window для %s не удался", pid)
+                elif event == "media.recording":
+                    state = "начата" if payload.get("enabled") else "остановлена"
+                    file_path = payload.get("file")
+                    self.statusBar().showMessage(f"Запись конференции {state}: {file_path or '—'}", 5000)
+                    if payload.get("enabled") and file_path:
+                        self.recording_status.setText(f"⏺ Запись: {file_path}")
+                        self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
+                    elif not payload.get("enabled"):
+                        self.recording_status.setText(f"✓ Запись сохранена: {file_path or '—'}")
+                        self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
+                elif event == "media.screen_share":
+                    if payload.get("enabled"):
+                        self.statusBar().showMessage("Демонстрация экрана: вкл (виртуальная камера)", 5000)
+                        self.camera_toggle.setChecked(False)
+                    else:
+                        self.statusBar().showMessage("Демонстрация экрана: выкл", 5000)
+                elif event in {"participant.muted", "participant.video_muted"}:
+                    self._refresh_tiles()
+                    self._refresh_participants_list()
+            except Exception as e:
+                log.exception("Ошибка в _handle_event для события %s: %s", event, e)
 
         def _refresh_participants_list(self) -> None:
             self.participants_list.clear()
-            if not self.engine.room:
+            if not self.engine or not self.engine.room:
                 return
             for p in self.engine.room.participants.values():
                 item = QtWidgets.QListWidgetItem(p.label)
@@ -853,14 +774,9 @@ if QT_AVAILABLE:
 
 
 else:  # pragma: no cover
-
     class MainWindow:  # type: ignore[no-redef]
-        """Заглушка, если PySide6 не установлен."""
-
         def __init__(self, *args, **kwargs) -> None:
-            raise RuntimeError(
-                "PySide6 не установлен. Установите: pip install PySide6"
-            )
+            raise RuntimeError("PySide6 не установлен. Установите: pip install PySide6")
 
 
 def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
@@ -869,23 +785,25 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     if not QT_AVAILABLE:
         raise RuntimeError("PySide6 не установлен — GUI недоступен")
 
-    # Перехват SIGABRT для записи crash-дампа
-    def sigabrt_handler(signum, frame):
-        log.critical("SIGABRT получен! Завершение работы Qt.")
-        try:
-            crash_file = os.path.join(os.getcwd(), 'sigabrt_crash.log')
-            with open(crash_file, 'w', encoding='utf-8') as f:
-                f.write(f"SIGABRT at {__import__('datetime').datetime.now().isoformat()}\n")
-                f.write(f"Frame: {frame}\n")
-                traceback.print_stack(frame, file=f)
-        except Exception:
-            pass
-        sys.exit(1)
-    
-    signal.signal(signal.SIGABRT, sigabrt_handler)
+    if sys.platform != 'win32':
+        def sigabrt_handler(signum, frame):
+            log.critical("SIGABRT получен! Завершение работы Qt.")
+            try:
+                crash_file = os.path.join(os.getcwd(), 'sigabrt_crash.log')
+                with open(crash_file, 'w', encoding='utf-8') as f:
+                    f.write(f"SIGABRT at {__import__('datetime').datetime.now().isoformat()}\n")
+                    f.write(f"Frame: {frame}\n")
+                    traceback.print_stack(frame, file=f)
+            except Exception as exc:  # noqa: BLE001 — падение внутри crash-хендлера недопустимо
+                log.error('Не удалось записать sigabrt_crash.log: %s', exc)
+            sys.exit(1)
+        signal.signal(signal.SIGABRT, sigabrt_handler)
 
     log.info("GUI: создание QApplication...")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("MCU Client")
+    app.setOrganizationName("MCU")
+    
     log.info("GUI: создание главного окна...")
     window = MainWindow(config, engine, h323)
     log.info("GUI: показ окна...")

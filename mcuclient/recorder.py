@@ -108,31 +108,45 @@ class ConferenceRecorder:
             if not self._is_recording:
                 return True
 
-            if self._process is not None:
+            process = self._process
+            if process is not None:
                 try:
                     # Отправляем 'q' для корректного завершения FFmpeg
-                    if self._process.stdin is not None:
-                        self._process.stdin.write(b'q\n')
-                        self._process.stdin.flush()
+                    if process.stdin is not None:
+                        process.stdin.write(b'q\n')
+                        process.stdin.flush()
                     else:
-                        self._process.terminate()
-                    self._process.wait(timeout=5)
-                except Exception as exc:
+                        process.terminate()
+                    process.wait(timeout=5)
+                except Exception as exc:  # noqa: BLE001
                     log.warning("Ошибка остановки FFmpeg: %s", exc)
                     try:
-                        self._process.kill()
+                        process.kill()
+                        process.wait(timeout=5)
                     except Exception:  # noqa: BLE001
                         pass
+                finally:
+                    # Закрываем stdin и сбрасываем ссылку, чтобы не держать ресурсы.
+                    try:
+                        if process.stdin is not None:
+                            process.stdin.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._process = None
 
             self._is_recording = False
             log.info("Запись остановлена: %s", self._current_file)
             return True
 
     def toggle_recording(self) -> bool:
-        """Переключить состояние записи."""
-        if self._is_recording:
-            return self.stop_recording()
-        return self.start_recording()
+        """Переключить состояние записи. Никогда не бросает исключение."""
+        try:
+            if self._is_recording:
+                return self.stop_recording()
+            return self.start_recording()
+        except Exception as exc:  # noqa: BLE001
+            log.error("Ошибка переключения записи: %s", exc)
+            return False
 
     def _build_ffmpeg_command(self, output_path: Path) -> List[str]:
         """Построить команду FFmpeg для записи с аппаратным ускорением."""

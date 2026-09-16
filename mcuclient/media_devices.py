@@ -136,3 +136,209 @@ def build_state() -> MediaState:
         len(cameras), len(mics),
     )
     return state
+
+
+class MediaManager:
+    """Обёртка над pjsua2 для перечисления и переключения устройств.
+
+    Изолирует статические хелперы, которые раньше жили прямо в ``SipEngine``.
+    Принимает pjsua2-модуль (может быть ``None``) и эндпоинт, поэтому не
+    импортирует pjsua2 напрямую и легко тестируется подменой.
+    """
+
+    def __init__(self, pj_module, endpoint=None) -> None:
+        self._pj = pj_module
+        self._endpoint = endpoint
+
+    @property
+    def available(self) -> bool:
+        return self._pj is not None and self._endpoint is not None
+
+    def bind(self, endpoint) -> None:
+        self._endpoint = endpoint
+
+    # --- аудио-устройства (pjsua2 audDevManager) ---
+    def aud_mgr(self):  # pragma: no cover
+        if self._endpoint is None:
+            return None
+        attr = getattr(self._endpoint, "audDevManager", None)
+        if attr is None:
+            return None
+        return attr() if callable(attr) else attr
+
+    @staticmethod
+    def dev_int(mgr, prop: str, getter: str, default: int = -1) -> int:  # pragma: no cover
+        try:
+            if hasattr(mgr, prop):
+                return int(getattr(mgr, prop))
+        except Exception:  # noqa: BLE001
+            pass
+        fn = getattr(mgr, getter, None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:  # noqa: BLE001
+                pass
+        return default
+
+    @staticmethod
+    def dev_set(mgr, prop: str, setter: str, value: int) -> bool:  # pragma: no cover
+        try:
+            if hasattr(mgr, prop):
+                setattr(mgr, prop, value)
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        fn = getattr(mgr, setter, None)
+        if callable(fn):
+            try:
+                fn(value)
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    @staticmethod
+    def enum_devices(mgr):  # pragma: no cover
+        if mgr is None:
+            return []
+        try:
+            enum = getattr(mgr, "enumDev2", None)
+            if enum is not None:
+                return list(enum() if callable(enum) else enum)
+            if hasattr(mgr, "getDevCount"):
+                return [mgr.getDevInfo(i) for i in range(int(mgr.getDevCount()))]
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def init_audio_devices(self) -> None:  # pragma: no cover
+        """Выбрать устройства захвата/воспроизведения по умолчанию."""
+        try:
+            mgr = self.aud_mgr()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audDevManager недоступен: %s", exc)
+            return
+        if mgr is None:
+            return
+        devices = self.enum_devices(mgr)
+        if not devices:
+            try:
+                fn = getattr(mgr, "setNullDev", None)
+                if callable(fn):
+                    fn()
+                    log.warning("Аудиоустройства не найдены — включено null-устройство")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось включить null-устройство: %s", exc)
+            return
+        cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
+        play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
+        if play < 0:
+            for i, dev in enumerate(devices):
+                if getattr(dev, "outputCount", 0) > 0:
+                    self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                    break
+        if cap < 0:
+            for i, dev in enumerate(devices):
+                if getattr(dev, "inputCount", 0) > 0:
+                    self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                    break
+        log.info(
+            "Аудиоустройства: capture=%s, playback=%s (всего %d)",
+            self.dev_int(mgr, "captureDev", "getCaptureDev"),
+            self.dev_int(mgr, "playbackDev", "getPlaybackDev"),
+            len(devices),
+        )
+
+    def list_audio_devices(self) -> List[dict]:  # pragma: no cover
+        if not self.available:
+            return []
+        devices: List[dict] = []
+        try:
+            mgr = self.aud_mgr()
+            for i, info in enumerate(self.enum_devices(mgr)):
+                devices.append({
+                    "id": i,
+                    "name": getattr(info, "name", f"dev{i}"),
+                    "driver": getattr(info, "driver", "?"),
+                    "inputs": getattr(info, "inputCount", 0),
+                    "outputs": getattr(info, "outputCount", 0),
+                })
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось перечислить аудиоустройства: %s", exc)
+        return devices
+
+    def set_capture_device(self, dev_id: int) -> bool:  # pragma: no cover
+        if not self.available:
+            return False
+        try:
+            mgr = self.aud_mgr()
+            ok = self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+            if not ok:
+                raise RuntimeError("setCaptureDev недоступен")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось переключить микрофон: %s", exc)
+            return False
+
+    def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
+        if not self.available:
+            return False
+        try:
+            try:
+                self._endpoint.libRegisterThread("main")
+            except Exception:  # noqa: BLE001
+                pass
+            mgr = self.aud_mgr()
+            if dev_id is not None:
+                self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+                self.dev_set(mgr, "playbackDev", "setPlaybackDev", int(dev_id))
+            if self.dev_int(mgr, "captureDev", "getCaptureDev") < 0:
+                for i, info in enumerate(self.enum_devices(mgr)):
+                    if getattr(info, "inputCount", 0) > 0:
+                        self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                        self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                        break
+            return self.dev_int(mgr, "captureDev", "getCaptureDev") >= 0
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось открыть микрофон для монитора: %s", exc)
+            return False
+
+    def read_mic_level(self) -> float:  # pragma: no cover
+        if not self.available:
+            return 0.0
+        try:
+            mgr = self.aud_mgr()
+            media = getattr(mgr, "captureDevMedia", None)
+            if media is None:
+                media = getattr(mgr, "getCaptureDevMedia", None)
+            cap = media() if callable(media) else media
+            return max(0.0, float(cap.getRxLevel()))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    # --- видео-устройства (pjsua2 vidDevManager) ---
+    def list_video_devices(self) -> List[dict]:  # pragma: no cover
+        if not self.available:
+            return []
+        devices: List[dict] = []
+        try:
+            vdm = self._endpoint.vidDevManager()
+            for i in range(vdm.getDevCount()):
+                info = vdm.getDevInfo(i)
+                devices.append({"id": i, "name": info.name, "driver": info.driver})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось перечислить видеоустройства: %s", exc)
+        return devices
+
+    def set_video_device(self, dev_id: int) -> bool:  # pragma: no cover
+        if not self.available:
+            return False
+        try:
+            param = self._pj.VideoSwitchParam()
+            param.target_id = int(dev_id)
+            self._endpoint.vidDevManager().switchDev(dev_id, param)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось переключить камеру: %s", exc)
+            return False

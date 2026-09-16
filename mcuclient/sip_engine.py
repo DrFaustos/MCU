@@ -2,137 +2,52 @@
 
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from enum import Enum
 from typing import Callable, Dict, List, Optional
 
 from .config import Config, compute_auto_grid
 from .log import get_logger
-from .media_devices import MediaState, build_state
+from .media_devices import MediaManager, MediaState, build_state
+from .call_manager import CallManager, normalize_uri
+from .call_registry import CallRegistry
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
 
 log = get_logger("sip")
 
-_pj = None
-try:  # pragma: no cover
-    import pjsua2 as _pj  # type: ignore
-    PJSIP_AVAILABLE = True
-except Exception as _exc:  # noqa: BLE001
-    PJSIP_AVAILABLE = False
-    log.warning("pjsua2 не найден (%s); SIP-движок работает в режиме-заглушке", _exc)
+# --- Именованные константы вместо «магических» чисел -------------------------
+# Базовый приоритет лучшего кодека и шаг понижения для следующих в списке.
+CODEC_BASE_PRIORITY = 250
+CODEC_PRIORITY_STEP = 5
+CODEC_MIN_PRIORITY = 1
 
+# Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
+# _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости.
+from .pjsip_adapter import (  # noqa: F401
+    PJSIP_AVAILABLE,
+    StubEndpoint as _StubEndpoint,
+    pj as _pj,
+)
 
-class CallState(str, Enum):
-    IDLE = "idle"
-    INCOMING = "incoming"
-    RINGING = "ringing"
-    CONNECTING = "connecting"
-    CONFIRMED = "confirmed"
-    DISCONNECTED = "disconnected"
-
-
-@dataclass
-class Participant:
-    id: int
-    remote_uri: str
-    state: CallState = CallState.IDLE
-    is_video: bool = True
-    audio_codec: Optional[str] = None
-    video_codec: Optional[str] = None
-    rx_bitrate_kbps: int = 0
-    tx_bitrate_kbps: int = 0
-    is_muted: bool = False
-    is_video_muted: bool = False
-    is_speaking: bool = False
-    volume_level: int = 0
-    _call: object = None
-
-    @property
-    def label(self) -> str:
-        state = ""
-        if self.state is CallState.CONFIRMED:
-            state = " [connected]"
-        elif self.state is CallState.INCOMING:
-            state = " [входящий]"
-        muted = " 🔇" if self.is_muted else ""
-        video_muted = " 📷✕" if self.is_video_muted else ""
-        return f"{self.remote_uri}{state}{muted}{video_muted}"
-
-
-@dataclass
-class Room:
-    name: str
-    auto_created: bool = True
-    created_at: datetime = field(default_factory=datetime.now)
-    participants: Dict[int, Participant] = field(default_factory=dict)
-
-    def add(self, participant: Participant) -> None:
-        self.participants[participant.id] = participant
-
-    def remove(self, participant_id: int) -> None:
-        self.participants.pop(participant_id, None)
-
-    @property
-    def count(self) -> int:
-        return len(self.participants)
-
-    def active_participants(self) -> List[Participant]:
-        return [p for p in self.participants.values() if p.state is CallState.CONFIRMED]
-
-    def active_speaker(self) -> Optional[Participant]:
-        active = self.active_participants()
-        for p in active:
-            if p.is_speaking:
-                return p
-        return active[0] if active else None
-
-
-EventCallback = Callable[[str, dict], None]
-
-
-class EventBus:
-    def __init__(self) -> None:
-        self._subs: List[EventCallback] = []
-        self._lock = threading.Lock()
-
-    def subscribe(self, cb: EventCallback) -> None:
-        with self._lock:
-            self._subs.append(cb)
-
-    def emit(self, event: str, **payload) -> None:
-        with self._lock:
-            subs = list(self._subs)
-        for cb in subs:
-            try:
-                cb(event, payload)
-            except Exception:  # noqa: BLE001
-                log.exception("Ошибка обработчика события %s", event)
-
-
-class _StubEndpoint:
-    _instance: Optional["_StubEndpoint"] = None
-
-    @classmethod
-    def instance(cls) -> "_StubEndpoint":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def libCreate(self) -> None:  # noqa: N802
-        log.info("[stub] libCreate")
-
-    def libDestroy(self) -> None:  # noqa: N802
-        log.info("[stub] libDestroy")
-
-    def libRegisterThread(self, name: str) -> None:  # noqa: N802
-        pass
+# Доменные модели вынесены в mcuclient/models.py; реэкспорт сохраняет
+# обратную совместимость: from .sip_engine import Participant, CallState.
+from .models import (  # noqa: F401
+    CallState,
+    EventBus,
+    EventCallback,
+    Participant,
+    Room,
+)
 
 
 class SipEngine:
+    """SIP-движок: PJSIP-эндпоинт, комната, вызовы и медиа-состояние.
+
+    Публичный API: :meth:`start`, :meth:`stop`, :meth:`call`, :meth:`accept`,
+    :meth:`hangup`, методы управления медиа/раскладкой/записью. События
+    рассылаются через :attr:`events` (см. README, раздел «Программное
+    использование»).
+    """
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self.events = EventBus()
@@ -141,13 +56,12 @@ class SipEngine:
         self.peer_filter = config.peer_filter
         self._endpoint = None
         self._account = None
-        self._next_call_id = 1
+        self._registry = CallRegistry(None)
+        self._calls = CallManager(self._registry, self.events, _pj)
         self._running = False
-        self._room_lock = threading.Lock()
         self._video_supported = False
         self._video_preview = None
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
-        self._video_windows: Dict[int, object] = {}
         self._CallClass = None  # подкласс pj.Call
 
         self._screen_sharer = ScreenSharer(
@@ -159,6 +73,7 @@ class SipEngine:
 
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
+        self._media = MediaManager(_pj, None)
         self._layout: str = config.default_layout
 
     def start(self) -> None:
@@ -200,6 +115,8 @@ class SipEngine:
                 self._hangup_all()
                 self._endpoint.libDestroy()
         finally:
+            # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
+            self._registry.clear_all_video_windows()
             self._running = False
             self.events.emit("engine.stopped")
             log.info("Движок остановлен")
@@ -221,6 +138,7 @@ class SipEngine:
     def _create_room(self) -> None:
         if self.room is None:
             self.room = Room(name=self.config.room_name, auto_created=True)
+            self._registry.set_room(self.room)
             log.info("Автосоздана комната '%s'", self.room.name)
 
     def _start_pjsip(self) -> None:  # pragma: no cover
@@ -236,6 +154,7 @@ class SipEngine:
         self._configure_transport(ep)
         ep.libStart()
         self._endpoint = ep
+        self._media.bind(ep)
         self._init_audio_devices(ep)
         self._video_supported = self._detect_video_support(ep)
         log.info("PJSIP: видео %s", "поддерживается" if self._video_supported else "НЕ поддерживается")
@@ -268,95 +187,24 @@ class SipEngine:
             raise RuntimeError(f"Неизвестный тип транспорта: {transport}")
         ep.transportCreate(ttype, cfg)
 
-    @staticmethod
-    def _aud_mgr(ep):  # pragma: no cover
-        attr = getattr(ep, "audDevManager", None)
-        if attr is None:
-            return None
-        return attr() if callable(attr) else attr
+    def _aud_mgr(self, ep=None):  # pragma: no cover
+        return self._media.aud_mgr()
 
     @staticmethod
     def _dev_int(mgr, prop: str, getter: str, default: int = -1) -> int:  # pragma: no cover
-        try:
-            if hasattr(mgr, prop):
-                return int(getattr(mgr, prop))
-        except Exception:  # noqa: BLE001
-            pass
-        fn = getattr(mgr, getter, None)
-        if callable(fn):
-            try:
-                return int(fn())
-            except Exception:  # noqa: BLE001
-                pass
-        return default
+        return MediaManager.dev_int(mgr, prop, getter, default)
 
     @staticmethod
     def _dev_set(mgr, prop: str, setter: str, value: int) -> bool:  # pragma: no cover
-        try:
-            if hasattr(mgr, prop):
-                setattr(mgr, prop, value)
-                return True
-        except Exception:  # noqa: BLE001
-            pass
-        fn = getattr(mgr, setter, None)
-        if callable(fn):
-            try:
-                fn(value)
-                return True
-            except Exception:  # noqa: BLE001
-                pass
-        return False
+        return MediaManager.dev_set(mgr, prop, setter, value)
 
     @staticmethod
     def _enum_devices(mgr):  # pragma: no cover
-        if mgr is None:
-            return []
-        try:
-            enum = getattr(mgr, "enumDev2", None)
-            if enum is not None:
-                return list(enum() if callable(enum) else enum)
-            if hasattr(mgr, "getDevCount"):
-                return [mgr.getDevInfo(i) for i in range(int(mgr.getDevCount()))]
-        except Exception:  # noqa: BLE001
-            pass
-        return []
+        return MediaManager.enum_devices(mgr)
 
     def _init_audio_devices(self, ep) -> None:  # pragma: no cover
-        try:
-            mgr = self._aud_mgr(ep)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("audDevManager недоступен: %s", exc)
-            return
-        if mgr is None:
-            return
-        devices = self._enum_devices(mgr)
-        if not devices:
-            try:
-                fn = getattr(mgr, "setNullDev", None)
-                if callable(fn):
-                    fn()
-                    log.warning("Аудиоустройства не найдены — включено null-устройство")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось включить null-устройство: %s", exc)
-            return
-        cap = self._dev_int(mgr, "captureDev", "getCaptureDev")
-        play = self._dev_int(mgr, "playbackDev", "getPlaybackDev")
-        if play < 0:
-            for i, dev in enumerate(devices):
-                if getattr(dev, "outputCount", 0) > 0:
-                    self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
-                    break
-        if cap < 0:
-            for i, dev in enumerate(devices):
-                if getattr(dev, "inputCount", 0) > 0:
-                    self._dev_set(mgr, "captureDev", "setCaptureDev", i)
-                    break
-        log.info(
-            "Аудиоустройства: capture=%s, playback=%s (всего %d)",
-            self._dev_int(mgr, "captureDev", "getCaptureDev"),
-            self._dev_int(mgr, "playbackDev", "getPlaybackDev"),
-            len(devices),
-        )
+        self._media.bind(ep)
+        self._media.init_audio_devices()
 
     def _configure_codecs(self, ep) -> None:  # pragma: no cover
         if not hasattr(ep, "codecEnum2"):
@@ -369,7 +217,7 @@ class SipEngine:
                 prio = 0
                 for rank, name in enumerate(wanted):
                     if name.split("/")[0].lower() in codec_id.lower():
-                        prio = max(1, 250 - rank * 5)
+                        prio = max(CODEC_MIN_PRIORITY, CODEC_BASE_PRIORITY - rank * CODEC_PRIORITY_STEP)
                         break
                 ep.codecSetPriority(codec_id, prio)
         except Exception as exc:  # noqa: BLE001
@@ -432,50 +280,20 @@ class SipEngine:
         self._account.create(acc_cfg)
 
     def _on_call_state(self, call, prm) -> None:  # pragma: no cover
-        try:
-            ci = call.getInfo()
-            call_id = ci.id
-            state_text = ci.stateText
-        except Exception:  # noqa: BLE001
-            return
-        p = self._get_participant(call_id)
-        if p is None:
-            return
-        if state_text == "CONFIRMED":
-            p.state = CallState.CONFIRMED
-        elif state_text == "DISCONNECTED":
-            p.state = CallState.DISCONNECTED
-        log.info("Вызов %s: состояние %s", call_id, state_text)
-        self.events.emit("call.state", id=call_id, state=state_text)
+        self._calls.apply_call_state(call, lambda c: c.getInfo())
 
     def _on_call_media_state(self, prm) -> None:  # pragma: no cover
         try:
             ci = prm.callInfo
         except Exception:  # noqa: BLE001
             return
-        call_id = ci.id
-        for mi in ci.media:
-            try:
-                is_video = (mi.type == _pj.PJMEDIA_TYPE_VIDEO)
-            except Exception:  # noqa: BLE001
-                is_video = False
-            if not is_video:
-                continue
-            status = getattr(mi, "status", None)
-            window = getattr(mi, "videoWindow", None)
-            if status == 1 and window is not None:
-                self._video_windows[call_id] = window
-                log.info("Видеопоток вызова %s подключён", call_id)
-                self.events.emit("call.video", id=call_id, active=True)
-            else:
-                self._video_windows.pop(call_id, None)
-                self.events.emit("call.video", id=call_id, active=False)
+        self._calls.apply_media_state(ci)
 
     def get_video_window(self, participant_id: int):
-        return self._video_windows.get(participant_id)
+        return self._registry.get_video_window(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        window = self._video_windows.get(participant_id)
+        window = self._registry.get_video_window(participant_id)
         if window is None or not PJSIP_AVAILABLE:
             return False
         embedded = False
@@ -495,7 +313,7 @@ class SipEngine:
         return embedded
 
     def show_video_window(self, participant_id: int) -> bool:
-        window = self._video_windows.get(participant_id)
+        window = self._registry.get_video_window(participant_id)
         if window is None or not PJSIP_AVAILABLE:
             return False
         try:  # pragma: no cover
@@ -578,11 +396,9 @@ class SipEngine:
         self._drop_participant(participant_id)
 
     def call(self, uri: str) -> Optional[int]:
-        uri = uri.strip()
+        uri = normalize_uri(uri)
         if not uri:
             return None
-        if not uri.startswith("sip:") and not uri.startswith("sips:"):
-            uri = f"sip:{uri}"
         if not PJSIP_AVAILABLE:
             self.events.emit("call.error", reason="pjsua2 недоступен")
             return None
@@ -634,32 +450,15 @@ class SipEngine:
         return state
 
     def list_video_devices(self) -> List[dict]:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return []
-        devices: List[dict] = []
-        try:  # pragma: no cover
-            vdm = self._endpoint.vidDevManager()
-            for i in range(vdm.getDevCount()):
-                info = vdm.getDevInfo(i)
-                devices.append({"id": i, "name": info.name, "driver": info.driver})
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось перечислить видеоустройства: %s", exc)
-        return devices
+        return self._media.list_video_devices()
 
     def set_video_device(self, dev_id: int) -> bool:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return False
-        try:  # pragma: no cover
-            param = _pj.VideoSwitchParam()
-            param.target_id = int(dev_id)
-            self._endpoint.vidDevManager().switchDev(dev_id, param)
+        if self._media.set_video_device(dev_id):
             self.media_state.camera_id = str(dev_id)
             log.info("Камера переключена на устройство %s", dev_id)
             self.events.emit("media.camera_device", id=dev_id)
             return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось переключить камеру: %s", exc)
-            return False
+        return False
 
     def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
@@ -710,74 +509,21 @@ class SipEngine:
         return self._video_preview is not None
 
     def list_audio_devices(self) -> List[dict]:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return []
-        devices: List[dict] = []
-        try:  # pragma: no cover
-            mgr = self._aud_mgr(self._endpoint)
-            for i, info in enumerate(self._enum_devices(mgr)):
-                devices.append({
-                    "id": i,
-                    "name": getattr(info, "name", f"dev{i}"),
-                    "driver": getattr(info, "driver", "?"),
-                    "inputs": getattr(info, "inputCount", 0),
-                    "outputs": getattr(info, "outputCount", 0),
-                })
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Не удалось перечислить аудиоустройства: %s", exc)
-        return devices
+        return self._media.list_audio_devices()
 
     def set_audio_device(self, dev_id: int) -> bool:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return False
-        try:  # pragma: no cover
-            mgr = self._aud_mgr(self._endpoint)
-            ok = self._dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
-            if not ok:
-                raise RuntimeError("setCaptureDev недоступен")
+        if self._media.set_capture_device(dev_id):
             self.media_state.microphone_id = str(dev_id)
             log.info("Микрофон переключён на устройство %s", dev_id)
             self.events.emit("media.mic_device", id=dev_id)
             return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось переключить микрофон: %s", exc)
-            return False
+        return False
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return False
-        try:  # pragma: no cover
-            try:
-                self._endpoint.libRegisterThread("main")
-            except Exception:  # noqa: BLE001
-                pass
-            mgr = self._aud_mgr(self._endpoint)
-            if dev_id is not None:
-                self._dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
-                self._dev_set(mgr, "playbackDev", "setPlaybackDev", int(dev_id))
-            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
-                for i, info in enumerate(self._enum_devices(mgr)):
-                    if getattr(info, "inputCount", 0) > 0:
-                        self._dev_set(mgr, "captureDev", "setCaptureDev", i)
-                        self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
-                        break
-            return self._dev_int(mgr, "captureDev", "getCaptureDev") >= 0
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось открыть микрофон для монитора: %s", exc)
-            return False
+        return self._media.open_mic_monitor(dev_id)
 
     def read_mic_level(self) -> float:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
-            return 0.0
-        try:  # pragma: no cover
-            mgr = self._aud_mgr(self._endpoint)
-            media = getattr(mgr, "captureDevMedia", None)
-            if media is None:
-                media = getattr(mgr, "getCaptureDevMedia", None)
-            cap = media() if callable(media) else media
-            return max(0.0, float(cap.getRxLevel()))
-        except Exception:  # noqa: BLE001
-            return 0.0
+        return self._media.read_mic_level()
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         if enabled and not self._screen_share_enabled:
@@ -887,24 +633,57 @@ class SipEngine:
         return self._layout
 
     def get_layout_grid(self) -> tuple[int, int]:
-        from .config import LAYOUT_GRID
-        grid = LAYOUT_GRID.get(self._layout, (1, 1))
-        if self._layout == "grid_auto" and self.room:
-            return compute_auto_grid(self.room.count)
-        return grid
+        try:
+            from .config import LAYOUT_GRID, compute_auto_grid
+            layout = getattr(self, '_layout', 'speaker')
+            grid = LAYOUT_GRID.get(layout, (1, 1))
+            if layout == "grid_auto":
+                room = getattr(self, 'room', None)
+                if room is not None:
+                    count = getattr(room, 'count', 1)
+                    return compute_auto_grid(count)
+            return grid
+        except Exception as exc:  # noqa: BLE001 — раскладка всегда должна вернуть сетку
+            log.debug("get_layout_grid: %s", exc)
+            return (1, 1)
 
     def get_visible_participants(self) -> List[Participant]:
-        if not self.room:
+        try:
+            from .config import LAYOUT_CAPACITY
+            room = getattr(self, 'room', None)
+            if not room:
+                return []
+            
+            active = []
+            try:
+                participants = getattr(room, 'participants', {})
+                if isinstance(participants, dict):
+                    active = [p for p in participants.values() if getattr(p, 'state', None) == CallState.CONFIRMED]
+            except Exception as exc:  # noqa: BLE001
+                log.debug("get_visible_participants/active: %s", exc)
+                active = []
+
+            layout = getattr(self, '_layout', 'speaker')
+            if layout == "speaker":
+                speaker = None
+                try:
+                    for p in active:
+                        if getattr(p, 'is_speaking', False):
+                            speaker = p
+                            break
+                    if not speaker and active:
+                        speaker = active[0]
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("get_visible_participants/speaker: %s", exc)
+                return [speaker] if speaker else []
+            
+            capacity = LAYOUT_CAPACITY.get(layout, 0)
+            if capacity == 0:
+                return active
+            return active[:capacity]
+        except Exception as exc:  # noqa: BLE001 — список всегда возвращаем
+            log.debug("get_visible_participants: %s", exc)
             return []
-        from .config import LAYOUT_CAPACITY
-        active = self.room.active_participants()
-        if self._layout == "speaker":
-            speaker = self.room.active_speaker()
-            return [speaker] if speaker else []
-        capacity = LAYOUT_CAPACITY.get(self._layout, 0)
-        if capacity == 0:
-            return active
-        return active[:capacity]
 
     def toggle_recording(self) -> bool:
         if not self.config.features.get("allow_recording", True):
@@ -930,23 +709,14 @@ class SipEngine:
     def _register_participant(
         self, call, remote_uri: str, state: CallState
     ) -> Participant:
-        with self._room_lock:
-            pid = self._next_call_id
-            self._next_call_id += 1
-            participant = Participant(id=pid, remote_uri=remote_uri, state=state, _call=call)
-            if self.room is not None:
-                self.room.add(participant)
-        return participant
+        return self._registry.register(call, remote_uri, state)
 
     def _get_participant(self, participant_id: int) -> Optional[Participant]:
-        if self.room is None:
-            return None
-        return self.room.participants.get(participant_id)
+        return self._registry.get(participant_id)
 
     def _drop_participant(self, participant_id: int) -> None:
-        with self._room_lock:
-            if self.room is not None:
-                self.room.remove(participant_id)
+        """Удаляет участника и связанные с ним видео-окна (без утечек)."""
+        self._registry.drop(participant_id)
         self.events.emit("call.closed", id=participant_id)
 
     @staticmethod
@@ -956,9 +726,19 @@ class SipEngine:
         host = uri
         if "@" in host:
             host = host.rsplit("@", 1)[1]
-        host = host.split(";")[0].split(">")[0]
-        if ":" in host:
-            host = host.split(":", 1)[0]
+        host = host.split(";")[0].split(">")[0].strip()
+        if not host:
+            return None
+        # IPv6 в квадратных скобках: [addr] или [addr]:port
+        if host.startswith("["):
+            end = host.find("]")
+            if end != -1:
+                return host[1:end] or None
+            return host[1:] or None
+        # Без скобок: порт отделяем только если двоеточие одно (IPv4/hostname).
+        # У IPv6-адреса двоеточий несколько — оставляем его целиком.
+        if host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
         return host or None
 
     @property
