@@ -296,6 +296,7 @@ class SipEngine:
         self._configure_transport(ep)
         ep.libStart()
         self._endpoint = ep
+        self._init_audio_devices(ep)
         self._video_supported = self._detect_video_support(ep)
         log.info("PJSIP: видео %s", "поддерживается" if self._video_supported else "НЕ поддерживается")
         self._configure_codecs(ep)
@@ -336,6 +337,128 @@ class SipEngine:
         if ttype is None:
             raise RuntimeError(f"Неизвестный тип транспорта: {transport}")
         ep.transportCreate(ttype, cfg)
+
+    @staticmethod
+    def _aud_mgr(ep):  # pragma: no cover
+        """Получить AudDevManager: в SWIG это метод, в pybind11 — свойство."""
+        attr = getattr(ep, "audDevManager", None)
+        if attr is None:
+            return None
+        return attr() if callable(attr) else attr
+
+    @staticmethod
+    def _dev_int(mgr, prop: str, getter: str, default: int = -1) -> int:  # pragma: no cover
+        """Прочитать целое поле устройства (свойство pybind11 или getter SWIG)."""
+        try:
+            if hasattr(mgr, prop):
+                return int(getattr(mgr, prop))
+        except Exception:  # noqa: BLE001
+            pass
+        fn = getattr(mgr, getter, None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:  # noqa: BLE001
+                pass
+        return default
+
+    @staticmethod
+    def _dev_set(mgr, prop: str, setter: str, value: int) -> bool:  # pragma: no cover
+        """Записать поле устройства (свойство pybind11 или setter SWIG)."""
+        try:
+            if hasattr(mgr, prop):
+                setattr(mgr, prop, value)
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        fn = getattr(mgr, setter, None)
+        if callable(fn):
+            try:
+                fn(value)
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    @staticmethod
+    def _enum_devices(mgr):  # pragma: no cover
+        """Список аудиоустройств (enumDev2 — свойство или метод)."""
+        if mgr is None:
+            return []
+        try:
+            enum = getattr(mgr, "enumDev2", None)
+            if enum is not None:
+                return list(enum() if callable(enum) else enum)
+            if hasattr(mgr, "getDevCount"):
+                return [mgr.getDevInfo(i) for i in range(int(mgr.getDevCount()))]
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def _init_audio_devices(self, ep) -> None:  # pragma: no cover
+        """Выбрать аудиоустройства; при их отсутствии — null-устройство.
+
+        Без выбранного устройства makeCall/answer падают с
+        PJMEDIA_EAUD_NODEFDEV. Если аудиоустройств нет вообще (например,
+        pybind11-сборка без ALSA), включаем null-устройство, чтобы звонки
+        устанавливались (без реального звука).
+        """
+        try:
+            mgr = self._aud_mgr(ep)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audDevManager недоступен: %s", exc)
+            return
+        if mgr is None:
+            return
+
+        # Список устройств (enumDev2 — свойство или метод).
+        devices = []
+        try:
+            enum = getattr(mgr, "enumDev2", None)
+            if enum is not None:
+                devices = list(enum() if callable(enum) else enum)
+            elif hasattr(mgr, "getDevCount"):
+                devices = [mgr.getDevInfo(i) for i in range(int(mgr.getDevCount()))]
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось перечислить аудиоустройства: %s", exc)
+            devices = []
+
+        if not devices:
+            # Нет реальных устройств — включаем null-устройство.
+            try:
+                fn = getattr(mgr, "setNullDev", None)
+                if callable(fn):
+                    fn()
+                    log.warning(
+                        "Аудиоустройства не найдены — включено null-устройство "
+                        "(звонки работают без звука)"
+                    )
+                else:
+                    log.warning("Аудиоустройства не найдены, setNullDev недоступен")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось включить null-устройство: %s", exc)
+            return
+
+        cap = self._dev_int(mgr, "captureDev", "getCaptureDev")
+        play = self._dev_int(mgr, "playbackDev", "getPlaybackDev")
+
+        if play < 0:
+            for i, dev in enumerate(devices):
+                if getattr(dev, "outputCount", 0) > 0:
+                    self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                    break
+        if cap < 0:
+            for i, dev in enumerate(devices):
+                if getattr(dev, "inputCount", 0) > 0:
+                    self._dev_set(mgr, "captureDev", "setCaptureDev", i)
+                    break
+
+        log.info(
+            "Аудиоустройства: capture=%s, playback=%s (всего %d)",
+            self._dev_int(mgr, "captureDev", "getCaptureDev"),
+            self._dev_int(mgr, "playbackDev", "getPlaybackDev"),
+            len(devices),
+        )
 
     def _configure_codecs(self, ep) -> None:  # pragma: no cover
         if not hasattr(ep, "codecEnum2"):
@@ -634,14 +757,14 @@ class SipEngine:
             return []
         devices: List[dict] = []
         try:  # pragma: no cover
-            mgr = self._endpoint.audDevManager()
-            for i, info in enumerate(mgr.enumDev2()):
+            mgr = self._aud_mgr(self._endpoint)
+            for i, info in enumerate(self._enum_devices(mgr)):
                 devices.append({
                     "id": i,
-                    "name": info.name,
-                    "driver": info.driver,
-                    "inputs": info.inputCount,
-                    "outputs": info.outputCount,
+                    "name": getattr(info, "name", f"dev{i}"),
+                    "driver": getattr(info, "driver", "?"),
+                    "inputs": getattr(info, "inputCount", 0),
+                    "outputs": getattr(info, "outputCount", 0),
                 })
         except Exception as exc:  # noqa: BLE001
             log.debug("Не удалось перечислить аудиоустройства: %s", exc)
@@ -652,7 +775,10 @@ class SipEngine:
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return False
         try:  # pragma: no cover
-            self._endpoint.audDevManager().setCaptureDev(dev_id)
+            mgr = self._aud_mgr(self._endpoint)
+            ok = self._dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+            if not ok:
+                raise RuntimeError("setCaptureDev недоступен")
             self.media_state.microphone_id = str(dev_id)
             log.info("Микрофон переключён на устройство %s", dev_id)
             self.events.emit("media.mic_device", id=dev_id)
@@ -681,22 +807,19 @@ class SipEngine:
             except Exception:  # noqa: BLE001 - уже зарегистрирован
                 pass
 
-            mgr = self._endpoint.audDevManager()
+            mgr = self._aud_mgr(self._endpoint)
 
             # Если устройство захвата не выбрано (-1), назначаем первое,
             # у которого есть входы (inputCount > 0).
-            if mgr.getCaptureDev() < 0:
-                chosen = None
-                for i, info in enumerate(mgr.enumDev2()):
+            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
+                for i, info in enumerate(self._enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
-                        chosen = i
+                        self._dev_set(mgr, "captureDev", "setCaptureDev", i)
+                        self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                        log.info("Для теста выбрано аудиоустройство #%d", i)
                         break
-                if chosen is not None:
-                    mgr.setCaptureDev(chosen)
-                    mgr.setPlaybackDev(chosen)
-                    log.info("Для теста выбрано аудиоустройство #%d", chosen)
 
-            if mgr.getCaptureDev() < 0:
+            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
                 return {"ok": False, "error": "не найдено устройство захвата (микрофон)"}
 
             # Только измерение уровня: подключение рекордера к мосту
@@ -733,20 +856,17 @@ class SipEngine:
                 self._endpoint.libRegisterThread("main")
             except Exception:  # noqa: BLE001
                 pass
-            mgr = self._endpoint.audDevManager()
+            mgr = self._aud_mgr(self._endpoint)
             if dev_id is not None:
-                try:
-                    mgr.setCaptureDev(int(dev_id))
-                    mgr.setPlaybackDev(int(dev_id))
-                except Exception:  # noqa: BLE001
-                    pass
-            if mgr.getCaptureDev() < 0:
-                for i, info in enumerate(mgr.enumDev2()):
+                self._dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+                self._dev_set(mgr, "playbackDev", "setPlaybackDev", int(dev_id))
+            if self._dev_int(mgr, "captureDev", "getCaptureDev") < 0:
+                for i, info in enumerate(self._enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
-                        mgr.setCaptureDev(i)
-                        mgr.setPlaybackDev(i)
+                        self._dev_set(mgr, "captureDev", "setCaptureDev", i)
+                        self._dev_set(mgr, "playbackDev", "setPlaybackDev", i)
                         break
-            return mgr.getCaptureDev() >= 0
+            return self._dev_int(mgr, "captureDev", "getCaptureDev") >= 0
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось открыть микрофон для монитора: %s", exc)
             return False
@@ -756,7 +876,11 @@ class SipEngine:
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return 0.0
         try:  # pragma: no cover
-            cap = self._endpoint.audDevManager().getCaptureDevMedia()
+            mgr = self._aud_mgr(self._endpoint)
+            media = getattr(mgr, "captureDevMedia", None)
+            if media is None:
+                media = getattr(mgr, "getCaptureDevMedia", None)
+            cap = media() if callable(media) else media
             return max(0.0, float(cap.getRxLevel()))
         except Exception:  # noqa: BLE001
             return 0.0
