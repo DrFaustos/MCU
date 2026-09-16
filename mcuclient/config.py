@@ -17,8 +17,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "port": 5060,
         "transport": "udp",
         "allowed_peers": [],
-        "require_encryption": False,  # Выключено по умолчанию для работы в закрытом контуре без сертификатов
-        "auto_answer": True,  # авто-приём входящих вызовов (режим MCU, без оператора)
+        "require_encryption": False,
+        "auto_answer": True,
         "codecs": {
             "audio": [
                 "opus/48000/2",
@@ -31,10 +31,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "media": {
-        # enabled — использовать видео В ЗВОНКЕ. По умолчанию False:
-        # видеоканал в pjsua на части сборок приводит к аварийному
-        # завершению. Локальный тест камеры/превью при этом работает.
-        "video": {"enabled": False, "width": 1280, "height": 720,
+        "video": {"enabled": True, "width": 1280, "height": 720,
                   "fps": 30, "bitrate_kbps": 1500},
         "audio": {"bitrate_kbps": 48, "echo_cancel": True, "noise_suppress": True},
         "bandwidth_kbps": 4000,
@@ -44,14 +41,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allow_screen_share": True,
         "allow_recording": True,
         "recording_path": "./recordings",
-        # Виды компоновки видео (layouts) — переключаются из UI
         "layouts": {
-            "available": [
-                "speaker",       # Один спикер (активный занимает весь экран)
-                "gallery_2x2",   # Галерея 2x2
-                "gallery_3x3",   # Галерея 3x3
-                "grid_auto",     # Автоматическая сетка
-            ],
+            "available": ["speaker", "gallery_2x2", "gallery_3x3", "grid_auto"],
             "default": "speaker",
         },
     },
@@ -59,7 +50,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Рекурсивно слить override в копию base."""
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
@@ -71,11 +61,6 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 @dataclass
 class PeerFilter:
-    """Фильтр входящих вызовов по IP/подсетям.
-
-    Пустой список == разрешить всех.
-    """
-
     patterns: List[str] = field(default_factory=list)
 
     def allows(self, ip: Optional[str]) -> bool:
@@ -99,8 +84,6 @@ class PeerFilter:
         return False
 
 
-# --- раскладки видео --------------------------------------------------------
-
 LAYOUT_LABELS: Dict[str, str] = {
     "speaker": "Один спикер",
     "gallery_2x2": "Галерея 2×2",
@@ -108,7 +91,6 @@ LAYOUT_LABELS: Dict[str, str] = {
     "grid_auto": "Авто-сетка",
 }
 
-# Сколько участников помещается в раскладку (0 = без ограничений)
 LAYOUT_CAPACITY: Dict[str, int] = {
     "speaker": 1,
     "gallery_2x2": 4,
@@ -116,17 +98,15 @@ LAYOUT_CAPACITY: Dict[str, int] = {
     "grid_auto": 0,
 }
 
-# Сетка (rows, cols) для каждой раскладки
 LAYOUT_GRID: Dict[str, tuple[int, int]] = {
     "speaker": (1, 1),
     "gallery_2x2": (2, 2),
     "gallery_3x3": (3, 3),
-    "grid_auto": (0, 0),  # вычисляется динамически
+    "grid_auto": (0, 0),
 }
 
 
 def compute_auto_grid(count: int) -> tuple[int, int]:
-    """Вычислить оптимальную сетку для N участников."""
     if count <= 0:
         return (1, 1)
     if count == 1:
@@ -148,12 +128,9 @@ def compute_auto_grid(count: int) -> tuple[int, int]:
 
 @dataclass
 class Config:
-    """Разобранная конфигурация приложения."""
-
     raw: Dict[str, Any]
     path: Optional[Path] = None
 
-    # --- доступные свойства ---
     @property
     def room_name(self) -> str:
         return self.raw["room"]["name"]
@@ -196,8 +173,7 @@ class Config:
 
     @property
     def video_call_enabled(self) -> bool:
-        """Использовать ли видео в звонке (по умолчанию выключено)."""
-        return bool(self.raw["media"]["video"].get("enabled", False))
+        return bool(self.raw["media"]["video"].get("enabled", True))
 
     @property
     def audio(self) -> Dict[str, Any]:
@@ -227,7 +203,6 @@ class Config:
     def default_layout(self) -> str:
         return str(self.features.get("layouts", {}).get("default", "speaker"))
 
-    # --- изменение на лету ---
     def set_video_bitrate(self, kbps: int) -> None:
         self.raw["media"]["video"]["bitrate_kbps"] = max(64, int(kbps))
 
@@ -240,7 +215,6 @@ class Config:
     def set_video_quality(self, width: int, height: int, fps: int) -> None:
         self.raw["media"]["video"].update(width=width, height=height, fps=fps)
 
-    # --- сериализация ---
     def to_dict(self) -> Dict[str, Any]:
         return copy.deepcopy(self.raw)
 
@@ -253,7 +227,6 @@ class Config:
 
 
 def load_config(path: Optional[str] = None) -> Config:
-    """Загрузить конфиг из файла, недостающие ключи — из DEFAULT_CONFIG."""
     if path:
         cfg_path = Path(path)
         if cfg_path.exists():
@@ -264,11 +237,10 @@ def load_config(path: Optional[str] = None) -> Config:
 
 
 def parse_listen(value: str) -> tuple[str, int]:
-    """Разобрать строку вида '0.0.0.0:5060' или 'host' в (host, port)."""
     if ":" in value:
         host, _, port_s = value.rpartition(":")
         try:
             return host or "0.0.0.0", int(port_s)
-        except ValueError as exc:  # pragma: no cover - защитный путь
+        except ValueError as exc:  # pragma: no cover
             raise ValueError(f"Некорректный порт в '{value}'") from exc
     return value, 5060

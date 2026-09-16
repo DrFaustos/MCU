@@ -60,14 +60,22 @@ if QT_AVAILABLE:
             layout.setContentsMargins(4, 4, 4, 4)
             layout.setSpacing(2)
 
-            # Видео-превью
-            self.video_label = QtWidgets.QLabel("Нет видео")
-            self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.video_label.setMinimumSize(160, 120)
-            self.video_label.setStyleSheet(
-                "background:#1a2028; color:#7a8592; border:1px solid #2a3138; border-radius:4px;"
+            # Контейнер для нативного видеоокна pjsua2 + текстовый статус.
+            self.video_host = QtWidgets.QWidget()
+            self.video_host.setMinimumSize(160, 120)
+            self.video_host.setStyleSheet(
+                "background:#1a2028; border:1px solid #2a3138; border-radius:4px;"
             )
-            layout.addWidget(self.video_label, stretch=1)
+            self.video_host.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_NativeWindow, True
+            )
+            self.video_label = QtWidgets.QLabel("Нет видео", self.video_host)
+            self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.video_label.setStyleSheet("background:transparent; color:#7a8592;")
+            host_layout = QtWidgets.QVBoxLayout(self.video_host)
+            host_layout.setContentsMargins(0, 0, 0, 0)
+            host_layout.addWidget(self.video_label)
+            layout.addWidget(self.video_host, stretch=1)
 
             # Имя участника
             self.name_label = QtWidgets.QLabel("—")
@@ -786,9 +794,20 @@ if QT_AVAILABLE:
                     self.camera_toggle.setChecked(False)
                 else:
                     self.statusBar().showMessage("Демонстрация экрана: выкл", 5000)
+            elif event == "call.video":
+                self._attach_video_windows()
             elif event in {"participant.muted", "participant.video_muted"}:
                 self._refresh_tiles()
                 self._refresh_participants_list()
+
+        def _attach_video_windows(self) -> None:
+            """Встроить нативные видеоокна активных вызовов в тайлы."""
+            for pid, tile in self._tiles.items():
+                try:
+                    if self.engine.attach_video_window(pid, tile.video_host):
+                        tile.video_label.hide()
+                except Exception:  # noqa: BLE001
+                    log.debug("attach_video_window для %s не удался", pid)
 
         def _refresh_participants_list(self) -> None:
             self.participants_list.clear()

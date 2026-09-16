@@ -80,3 +80,6 @@ config.json
 # runtime log
 mcu-client.log
 *.log
+
+# generated icon
+packaging/mcu-client.ico

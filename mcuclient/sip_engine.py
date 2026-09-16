@@ -192,6 +192,8 @@ class SipEngine:
         # в pjlib (вызов answer() из callback-потока SWIG-биндинга роняет
         # процесс).
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
+        # Нативные видеоокна вызовов: participant_id -> pj.VideoWindow
+        self._video_windows: Dict[int, object] = {}
 
         # Демонстрация экрана (mss + pyvirtualcam)
         self._screen_sharer = ScreenSharer(
@@ -505,6 +507,9 @@ class SipEngine:
             def onIncomingCall(self, prm) -> None:  # noqa: N802, ANN001
                 self.engine._on_incoming(prm)
 
+            def onCallMediaState(self, prm) -> None:  # noqa: N802, ANN001
+                self.engine._on_call_media_state(prm)
+
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = self._build_id_uri()
 
@@ -519,6 +524,49 @@ class SipEngine:
 
         self._account = _Account(self)
         self._account.create(acc_cfg)
+
+    def _on_call_media_state(self, prm) -> None:  # pragma: no cover
+        """Обработать активацию медиа: подключить видеопоток к окну."""
+        try:
+            ci = prm.callInfo
+        except Exception:  # noqa: BLE001
+            return
+        call_id = ci.id
+        for mi in ci.media:
+            try:
+                is_video = (mi.type == _pj.PJMEDIA_TYPE_VIDEO)
+            except Exception:  # noqa: BLE001
+                is_video = False
+            if not is_video:
+                continue
+            status = getattr(mi, "status", None)
+            window = getattr(mi, "videoWindow", None)
+            if status == 1 and window is not None:
+                self._video_windows[call_id] = window
+                log.info("Видеопоток вызова %s подключён", call_id)
+                self.events.emit("call.video", id=call_id, active=True)
+            else:
+                self._video_windows.pop(call_id, None)
+                self.events.emit("call.video", id=call_id, active=False)
+
+    def get_video_window(self, participant_id: int):
+        """Вернуть нативное VideoWindow участника (или None)."""
+        return self._video_windows.get(participant_id)
+
+    def attach_video_window(self, participant_id: int, widget) -> bool:
+        """Встроить нативное окно видео в Qt-виджет (через winId)."""
+        window = self._video_windows.get(participant_id)
+        if window is None or not PJSIP_AVAILABLE:
+            return False
+        try:  # pragma: no cover
+            handle = _pj.VideoWindowHandle()
+            handle.handle = int(widget.winId())
+            window.setWindow(handle)
+            window.Show(True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Не удалось встроить видеоокно: %s", exc)
+            return False
 
     def _build_id_uri(self) -> str:
         """Собрать валидный SIP URI аккаунта.
