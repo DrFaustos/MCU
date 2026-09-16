@@ -56,27 +56,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+          pip install pjsua2-pybind11
 
-      # Ставим pjsua2 статически, чтобы SIP-стек попал в бинарник
-      # и не зависел от системных libpjsua2*.so на машине пользователя.
-      - name: Install PJSIP (pjsua2, static)
-        env:
-          PJSIP_STATIC: '1'
-          PJSIP_VERSION: '2.16'
-        run: |
-          chmod +x scripts/install_pjsua2.sh
-          sudo -E ./scripts/install_pjsua2.sh "$(which python)"
-          python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
+      # Тот же биндинг, что и на Windows (pybind11-wheel). SWIG-сборка
+      # pjsua2 2.16 на Linux роняла процесс в answer() при входящем вызове.
+      - name: Verify pjsua2 (pybind11)
+        run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
       - name: Build executable
         env:

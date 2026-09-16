@@ -283,8 +283,11 @@ class SipEngine:
         ep = _pj.Endpoint()
         ep_cfg = _pj.EpConfig()
         ep_cfg.logConfig.level = 3
-        ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
-        ep_cfg.medConfig.noVad = False
+        # pybind11-версия pjsua2 может не иметь userAgent/noVad — не критично.
+        if hasattr(ep_cfg.uaConfig, "userAgent"):
+            ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
+        if hasattr(ep_cfg.medConfig, "noVad"):
+            ep_cfg.medConfig.noVad = False
         ep.libCreate()
         ep.libInit(ep_cfg)
         self._configure_transport(ep)
@@ -349,10 +352,14 @@ class SipEngine:
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = self._build_id_uri()
 
-        if self.config.require_encryption:
-            acc_cfg.mediaConfig.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
-        else:
-            acc_cfg.mediaConfig.srtpUse = _pj.PJMEDIA_SRTP_DISABLED
+        # mediaConfig/srtpUse есть только в SWIG-сборке. В pybind11-версии
+        # (pjsua2-pybind11) их нет — шифрование просто не настраиваем.
+        media_cfg = getattr(acc_cfg, "mediaConfig", None)
+        if media_cfg is not None and hasattr(_pj, "PJMEDIA_SRTP_DISABLED"):
+            if self.config.require_encryption:
+                media_cfg.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
+            else:
+                media_cfg.srtpUse = _pj.PJMEDIA_SRTP_DISABLED
 
         self._account = _Account(self)
         self._account.create(acc_cfg)
