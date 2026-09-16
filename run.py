@@ -54,7 +54,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # === ШАГ 0: настройка логирования ДО любых тяжёлых импортов ===
-    # Импортируем только лёгкий модуль логирования (stdlib + pathlib).
     from mcuclient.log import get_logger, log_environment, log_file_path, setup_logging
 
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
@@ -121,7 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         log.info("Шаг 4/6: engine.start()...")
         engine.start()
-        log.info("Шаг 4/6: SIP-движок запущен")
+        # КРИТИЧЕСКИ ВАЖНО: регистрируем главный поток для безопасных вызовов PJSIP.
+        # Без этого авто-ответ или завершение вызова из callback-потока PJSIP
+        # приводит к аварийному завершению процесса (assertion failure в pjlib).
+        engine.register_main_thread()
+        log.info("Шаг 4/6: SIP-движок запущен, главный поток зарегистрирован")
     except Exception:  # noqa: BLE001
         log.critical("Ошибка запуска SIP-движка:", exc_info=True)
         return 3
@@ -140,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log.info("SIP-транспорт слушает %s:%s (%s)",
                  config.sip_listen, config.sip_port, config.sip_transport)
-        if not engine._video_supported:
+        if not getattr(engine, '_video_supported', False):
             log.warning("PJSIP собран без видео — видеозвонки недоступны (только аудио).")
 
     # --- Команды камеры (список/тест) ---
@@ -161,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Headless-режим. Нажмите Ctrl+C для выхода.")
         try:
             import time
-
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
@@ -209,7 +211,6 @@ def _run_camera_commands(engine, args, log) -> int:
             log.error("Не удалось запустить превью камеры.")
             return 1
         import time
-
         try:
             time.sleep(max(1, args.preview_seconds))
         except KeyboardInterrupt:
