@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       build_linux:
-        description: 'Собирать Linux (PJSIP из исходников + AppImage) — долго'
+        description: 'Собирать Linux-бинарник (PJSIP из исходников) — долго'
         type: boolean
         default: true
 
@@ -45,7 +45,7 @@ jobs:
           path: |
             dist/MCU-Client.exe
 
-  # Linux/AppImage: собирается по тегу, а также вручную (workflow_dispatch).
+  # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
     if: ${{ github.event_name == 'push' || inputs.build_linux }}
     runs-on: ubuntu-latest
@@ -59,7 +59,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fuse libfuse2 file desktop-file-utils
+          sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
@@ -67,7 +67,7 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # Ставим pjsua2 статически, чтобы SIP-стек попал в AppImage
+      # Ставим pjsua2 статически, чтобы SIP-стек попал в бинарник
       # и не зависел от системных libpjsua2*.so на машине пользователя.
       - name: Install PJSIP (pjsua2, static)
         env:
@@ -78,11 +78,11 @@ jobs:
           sudo -E ./scripts/install_pjsua2.sh "$(which python)"
           python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable + AppImage
+      - name: Build executable
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --appimage
+        run: python build.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -90,7 +90,6 @@ jobs:
           name: MCU-Client-Linux
           path: |
             dist/MCU-Client
-            dist/MCU-Client-x86_64.AppImage
 
   release:
     needs: [build-windows, build-linux]
