@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Dict, Optional
 
@@ -819,6 +820,21 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     log.info("GUI: проверка PySide6 (QT_AVAILABLE=%s)", QT_AVAILABLE)
     if not QT_AVAILABLE:
         raise RuntimeError("PySide6 не установлен — GUI недоступен")
+
+    # === ИСПРАВЛЕНИЕ ДЛЯ PYINSTALLER + LINUX ===
+    # PyInstaller в режиме --onefile распаковывает файлы во временную директорию.
+    # Qt на Linux часто пытается использовать Wayland по умолчанию, но в упаковке
+    # отсутствуют нужные библиотеки Wayland, что вызывает мгновенный Abort.
+    # Принудительно переключаем на XCB (X11) и указываем путь к плагинам Qt.
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
+        os.environ['QT_QPA_PLATFORM'] = 'xcb'
+        if hasattr(sys, '_MEIPASS'):
+            plugin_path = os.path.join(sys._MEIPASS, 'PySide6', 'Qt', 'plugins')
+            if os.path.isdir(plugin_path):
+                os.environ['QT_PLUGIN_PATH'] = plugin_path
+                os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(plugin_path, 'platforms')
+                log.info("GUI: настроены переменные Qt для PyInstaller (XCB)")
+
     log.info("GUI: создание QApplication...")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     log.info("GUI: создание главного окна...")
