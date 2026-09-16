@@ -1,5 +1,9 @@
 # MCU Client — кроссплатформенный ВКС-клиент (SIP / H.323)
 
+![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
+![development: active](https://img.shields.io/badge/development-active-blue)
+![releases: unstable](https://img.shields.io/badge/releases-unstable-red)
+
 Клиентское приложение для видеоконференцсвязи, реализующее функции MCU
 (Multipoint Control Unit) — проведение многосторонних ВКС-сессий с
 аппаратными и программными терминалами по протоколам SIP и H.323.
