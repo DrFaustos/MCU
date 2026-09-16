@@ -108,12 +108,15 @@ jobs:
           name: MCU-Client-Windows
           path: release-files/
 
+      # Скачиваем Linux-артефакты только если Linux реально собирался
+      # (тот же condition, что у build-linux). Иначе шаг пропускается без
+      # предупреждения «Artifact not found».
       - name: Download Linux artifacts (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
         uses: actions/download-artifact@v4
         with:
           name: MCU-Client-Linux
           path: release-files/
-        continue-on-error: true
 
       - name: List release files
         run: ls -la release-files/
