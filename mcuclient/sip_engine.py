@@ -179,6 +179,9 @@ class SipEngine:
         self._account = None
         self._next_call_id = 1
         self._running = False
+        # Защита комнаты: callback-поток PJSIP пишет участников,
+        # а поток Qt читает их одновременно.
+        self._room_lock = threading.Lock()
         # Поддерживает ли собранный PJSIP видео. Если нет — нельзя выставлять
         # videoCount=1: pjsua падает с ассертом call->opt.vid_cnt == 0.
         self._video_supported = False
@@ -368,6 +371,26 @@ class SipEngine:
                 return "127.0.0.1"
 
     # --- входящие/исходящие ---
+    def _deferred_answer(self, participant_id: int) -> None:
+        """Ответить на вызов из отдельного потока, зарегистрированного в pjlib.
+
+        Вызов accept() из callback-потока PJSIP и последующие медиа-операции
+        (setHold, vidSetStream) приводят к abort в pjmedia. Поэтому отвечаем
+        в собственном потоке и регистрируем его в pjlib.
+        """
+        def _worker() -> None:
+            try:
+                if self._endpoint is not None:
+                    try:
+                        self._endpoint.libRegisterThread("auto-answer")
+                    except Exception:  # noqa: BLE001 - уже зарегистрирован
+                        pass
+                self.accept(participant_id)
+            except Exception:  # noqa: BLE001
+                log.exception("Авто-ответ не удался")
+
+        threading.Thread(target=_worker, name="auto-answer", daemon=True).start()
+
     def _on_incoming(self, prm) -> None:  # pragma: no cover
         call = _pj.Call(self._account, prm.callId)
         info = call.getInfo()
@@ -385,7 +408,10 @@ class SipEngine:
         # сторона получит 487 Request Terminated и не дозвонится.
         if self.config.auto_answer:
             log.info("Авто-ответ на вызов от %s", remote_uri)
-            self.accept(participant.id)
+            # ВАЖНО: accept() нельзя вызывать из callback-потока PJSIP —
+            # медиа-операции (setHold/vidSetStream) из незарегистрированного
+            # потока роняют процесс ассертом pjmedia. Уходим в свой поток.
+            self._deferred_answer(participant.id)
 
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
@@ -395,7 +421,6 @@ class SipEngine:
             prm.opt.videoCount = 1 if self._video_supported else 0
             p._call.answer(prm)  # pragma: no cover
             p.state = CallState.CONFIRMED
-            self._apply_media_state(p)
             log.info("Вызов принят: %s", p.remote_uri)
             self.events.emit("call.confirmed", id=p.id)
 
@@ -842,11 +867,12 @@ class SipEngine:
     def _register_participant(
         self, call, remote_uri: str, state: CallState
     ) -> Participant:
-        pid = self._next_call_id
-        self._next_call_id += 1
-        participant = Participant(id=pid, remote_uri=remote_uri, state=state, _call=call)
-        if self.room is not None:
-            self.room.add(participant)
+        with self._room_lock:
+            pid = self._next_call_id
+            self._next_call_id += 1
+            participant = Participant(id=pid, remote_uri=remote_uri, state=state, _call=call)
+            if self.room is not None:
+                self.room.add(participant)
         return participant
 
     def _get_participant(self, participant_id: int) -> Optional[Participant]:
@@ -855,8 +881,9 @@ class SipEngine:
         return self.room.participants.get(participant_id)
 
     def _drop_participant(self, participant_id: int) -> None:
-        if self.room is not None:
-            self.room.remove(participant_id)
+        with self._room_lock:
+            if self.room is not None:
+                self.room.remove(participant_id)
         self.events.emit("call.closed", id=participant_id)
 
     @staticmethod
