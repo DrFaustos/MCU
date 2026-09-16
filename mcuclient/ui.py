@@ -190,10 +190,7 @@ if QT_AVAILABLE:
 
         def _build_ui(self) -> None:
             root = QtWidgets.QVBoxLayout(self)
-            self.info = QtWidgets.QLabel(
-                "Говорите в микрофон — столбики должны двигаться. "
-                "Закройте окно, чтобы остановить тест."
-            )
+            self.info = QtWidgets.QLabel("Проверка звука")
             self.info.setWordWrap(True)
             root.addWidget(self.info)
 

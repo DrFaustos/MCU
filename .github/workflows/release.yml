@@ -9,7 +9,7 @@ on:
       build_linux:
         description: 'Собирать Linux (PJSIP из исходников + AppImage) — долго'
         type: boolean
-        default: false
+        default: true
 
 jobs:
   build-windows:
@@ -32,11 +32,11 @@ jobs:
       - name: Verify pjsua2 (required for SIP)
         run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable (+ debug console build)
+      - name: Build executable
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --console
+        run: python build.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -44,14 +44,10 @@ jobs:
           name: MCU-Client-Windows
           path: |
             dist/MCU-Client.exe
-            dist/MCU-Client-console.exe
 
-  # Linux/AppImage собирается ТОЛЬКО по ручному запуску (workflow_dispatch)
-  # с включённой галочкой build_linux. Это сильно ускоряет обычную сборку
-  # по тегу, пока идёт отладка Windows. Вернуть в тег можно в любой момент,
-  # убрав условие `if` ниже.
+  # Linux/AppImage: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
+    if: ${{ github.event_name == 'push' || inputs.build_linux }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -97,8 +93,7 @@ jobs:
             dist/MCU-Client-x86_64.AppImage
 
   release:
-    # Зависим только от Windows: Linux теперь опционален.
-    needs: [build-windows]
+    needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -108,12 +103,7 @@ jobs:
           name: MCU-Client-Windows
           path: release-files/
 
-      # Скачиваем Linux-артефакты только если Linux реально собирался
-      # (тот же condition, что у build-linux). Иначе шаг пропускается без
-      # предупреждения «Artifact not found».
-      - name: Download Linux artifacts (optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: MCU-Client-Linux
           path: release-files/
@@ -124,8 +114,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # Звёздочка берёт все файлы, которые реально скачались:
-          # Windows всегда, Linux/AppImage — только если собирались.
           files: release-files/*
           generate_release_notes: true
         env:
