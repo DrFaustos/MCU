@@ -259,6 +259,9 @@ if QT_AVAILABLE:
     class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
         """Главное окно ВКС-клиента."""
 
+        # Переносит ответ на входящий вызов в главный поток Qt (см. ниже).
+        _answer_requested = QtCore.Signal(int)
+
         QUALITY_PRESETS = {
             "360p": (640, 360, 30),
             "720p": (1280, 720, 30),
@@ -275,6 +278,12 @@ if QT_AVAILABLE:
             self.resize(1280, 800)
             self._build_ui()
             self.engine.events.subscribe(self._on_event)
+
+            # Авто-ответ должен выполняться в главном потоке Qt: answer()
+            # из callback-потока SWIG-биндинга pjsua2 роняет процесс.
+            self._answer_requested.connect(self._on_answer_requested)
+            self.engine.register_main_thread()
+            self.engine.set_answer_dispatch(self._request_answer)
 
         # --- построение интерфейса ---
         def _build_ui(self) -> None:
@@ -614,6 +623,18 @@ if QT_AVAILABLE:
                 self.engine.stop_local_preview()
                 self.preview_btn.setText("▶ Тест камеры")
                 self.device_status.setText("Превью камеры остановлено")
+
+        def _request_answer(self, participant_id: int) -> None:
+            """Вызвано из callback-потока PJSIP: планируем ответ в Qt-потоке."""
+            self._answer_requested.emit(int(participant_id))
+
+        @QtCore.Slot(int)
+        def _on_answer_requested(self, participant_id: int) -> None:
+            """Ответ на вызов выполняется в главном потоке (безопасно)."""
+            try:
+                self.engine.accept(participant_id)
+            except Exception:  # noqa: BLE001
+                log.exception("Авто-ответ не удался")
 
         def _on_mic_monitor(self) -> None:
             """Открыть окно с живым эквалайзером микрофона."""

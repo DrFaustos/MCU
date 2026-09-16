@@ -187,6 +187,11 @@ class SipEngine:
         self._video_supported = False
         # Активное локальное превью камеры (тест до звонка)
         self._video_preview = None
+        # Отложенный ответ на входящий вызов: GUI выставляет сюда функцию,
+        # которая вызовет accept() в главном потоке, зарегистрированном
+        # в pjlib (вызов answer() из callback-потока SWIG-биндинга роняет
+        # процесс).
+        self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
 
         # Демонстрация экрана (mss + pyvirtualcam)
         self._screen_sharer = ScreenSharer(
@@ -248,6 +253,24 @@ class SipEngine:
             log.info("Движок остановлен")
 
     # --- комната ---
+    def register_main_thread(self) -> None:
+        """Зарегистрировать текущий (главный) поток в pjlib.
+
+        Вызовы pjsua2 из главного потока (например, answer()) должны идти
+        из потока, известного pjlib, иначе возможен abort.
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return
+        try:  # pragma: no cover
+            self._endpoint.libRegisterThread("main")
+            log.info("Главный поток зарегистрирован в pjlib")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("libRegisterThread(main): %s", exc)
+
+    def set_answer_dispatch(self, dispatch) -> None:
+        """Задать функцию, вызывающую accept() в главном потоке."""
+        self._answer_dispatch = dispatch
+
     def _create_room(self) -> None:
         if self.room is None:
             self.room = Room(name=self.config.room_name, auto_created=True)
@@ -388,15 +411,20 @@ class SipEngine:
         # сторона получит 487 Request Terminated и не дозвонится.
         if self.config.auto_answer:
             log.info("Авто-ответ на вызов от %s", remote_uri)
-            # Ответ выполняем прямо здесь, в callback-потоке PJSIP: answer()
-            # в этом потоке безопасен, а перенос его в отдельный Python-поток
-            # приводит к abort в pjsua (создание медиа-канала).
-            # Медиа-операции (setHold/vidSetStream) из accept() убраны, чтобы
-            # не трогать медиа-мост из callback.
-            try:
-                self.accept(participant.id)
-            except Exception:  # noqa: BLE001
-                log.exception("Авто-ответ не удался")
+            # answer() нельзя вызывать из callback-потока SWIG-биндинга —
+            # создание медиа-канала роняет процесс. Если GUI задал dispatch,
+            # отвечаем в главном потоке (зарегистрированном в pjlib).
+            # Иначе (headless) — отвечаем здесь.
+            if self._answer_dispatch is not None:
+                try:
+                    self._answer_dispatch(participant.id)
+                except Exception:  # noqa: BLE001
+                    log.exception("Не удалось запланировать авто-ответ")
+            else:
+                try:
+                    self.accept(participant.id)
+                except Exception:  # noqa: BLE001
+                    log.exception("Авто-ответ не удался")
 
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
