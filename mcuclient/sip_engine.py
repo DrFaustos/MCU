@@ -261,6 +261,9 @@ class SipEngine:
         """
         if not (PJSIP_AVAILABLE and self._endpoint is not None):
             return
+        if not hasattr(self._endpoint, "libRegisterThread"):
+            log.debug("libRegisterThread недоступен в этом биндинге pjsua2")
+            return
         try:  # pragma: no cover
             self._endpoint.libRegisterThread("main")
             log.info("Главный поток зарегистрирован в pjlib")
@@ -298,18 +301,46 @@ class SipEngine:
         self._configure_codecs(ep)
         self._start_account(ep)
 
+    @staticmethod
+    def _transport_type(name: str):  # pragma: no cover
+        """Константа типа транспорта для SWIG- и pybind11-биндингов.
+
+        SWIG:    pjsua2.PJSIP_TRANSPORT_UDP
+        pybind11: pjsua2.TransportType.UDP
+        """
+        legacy_map = {
+            "udp": "PJSIP_TRANSPORT_UDP",
+            "tcp": "PJSIP_TRANSPORT_TCP",
+            "tls": "PJSIP_TRANSPORT_TLS",
+        }
+        legacy_name = legacy_map.get(name)
+        
+        # Пробуем получить константу напрямую (безопасно через getattr с default)
+        if legacy_name:
+            ttype = getattr(_pj, legacy_name, None)
+            if ttype is not None:
+                return ttype
+                
+        # Пробуем pybind11 Enum (TransportType.UDP)
+        if hasattr(_pj, "TransportType"):
+            tt = _pj.TransportType
+            return getattr(tt, name.upper(), None)
+            
+        return None
+
     def _configure_transport(self, ep) -> None:  # pragma: no cover
         transport = self.config.sip_transport
         cfg = _pj.TransportConfig()
         cfg.port = self.config.sip_port
-        if transport == "tcp":
-            ep.transportCreate(_pj.PJSIP_TRANSPORT_TCP, cfg)
-        elif transport == "tls":
-            ep.transportCreate(_pj.PJSIP_TRANSPORT_TLS, cfg)
-        else:
-            ep.transportCreate(_pj.PJSIP_TRANSPORT_UDP, cfg)
+        ttype = self._transport_type(transport)
+        if ttype is None:
+            raise RuntimeError(f"Неизвестный тип транспорта: {transport}")
+        ep.transportCreate(ttype, cfg)
 
     def _configure_codecs(self, ep) -> None:  # pragma: no cover
+        if not hasattr(ep, "codecEnum2"):
+            log.info("Настройка кодеков недоступна в этом биндинге pjsua2")
+            return
         wanted = self.config.audio_codecs + self.config.video_codecs
         try:
             for i, codec in enumerate(ep.codecEnum2()):
@@ -326,6 +357,8 @@ class SipEngine:
     @staticmethod
     def _detect_video_support(ep) -> bool:  # pragma: no cover
         """Есть ли в собранном PJSIP видео (устройства или видеокодеки)."""
+        if not hasattr(ep, "vidDevManager"):
+            return False
         try:
             if ep.vidDevManager().getDevCount() > 0:
                 return True
