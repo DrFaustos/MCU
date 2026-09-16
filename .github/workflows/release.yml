@@ -118,5 +118,8 @@ jobs:
         with:
           files: release-files/*
           generate_release_notes: true
+          # Проект в активной разработке (pre-alpha): все релизы помечаются
+          # как предварительные. Убрать строку, когда появится стабильный релиз.
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
