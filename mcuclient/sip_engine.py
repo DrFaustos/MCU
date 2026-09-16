@@ -637,6 +637,48 @@ class SipEngine:
             log.warning("Тест микрофона не удался: %s", exc)
             return {"ok": False, "error": str(exc) or exc.__class__.__name__}
 
+    # --- монитор уровня микрофона (для окна-эквалайзера) ---
+    def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
+        """Подготовить микрофон к живому мониторингу уровня.
+
+        Возвращает True, если устройство захвата выбрано и готово к чтению
+        уровня (см. read_mic_level).
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return False
+        try:  # pragma: no cover
+            try:
+                self._endpoint.libRegisterThread("main")
+            except Exception:  # noqa: BLE001
+                pass
+            mgr = self._endpoint.audDevManager()
+            if dev_id is not None:
+                try:
+                    mgr.setCaptureDev(int(dev_id))
+                    mgr.setPlaybackDev(int(dev_id))
+                except Exception:  # noqa: BLE001
+                    pass
+            if mgr.getCaptureDev() < 0:
+                for i, info in enumerate(mgr.enumDev2()):
+                    if getattr(info, "inputCount", 0) > 0:
+                        mgr.setCaptureDev(i)
+                        mgr.setPlaybackDev(i)
+                        break
+            return mgr.getCaptureDev() >= 0
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось открыть микрофон для монитора: %s", exc)
+            return False
+
+    def read_mic_level(self) -> float:
+        """Текущий уровень сигнала микрофона (0.0..1.0) или 0.0."""
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return 0.0
+        try:  # pragma: no cover
+            cap = self._endpoint.audDevManager().getCaptureDevMedia()
+            return max(0.0, float(cap.getRxLevel()))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         """Включить/выключить демонстрацию экрана.
 

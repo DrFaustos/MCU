@@ -167,6 +167,97 @@ if QT_AVAILABLE:
             if self.participant_id is not None:
                 self.hangup_clicked.emit(self.participant_id)
 
+    # --- окно монитора микрофона (живой эквалайзер) ---
+    class MicMonitorWindow(QtWidgets.QDialog):
+        """Окно с живым уровнем микрофона: полоса + история (эквалайзер)."""
+
+        BARS = 32
+
+        def __init__(self, engine: SipEngine, dev_id: Optional[int] = None,
+                     parent: Optional[QtWidgets.QWidget] = None) -> None:
+            super().__init__(parent)
+            self.engine = engine
+            self._levels = [0.0] * self.BARS
+            self._peak = 0.0
+            self.setWindowTitle("Тест микрофона — уровень сигнала")
+            self.resize(560, 260)
+            self._build_ui()
+            self._opened = engine.open_mic_monitor(dev_id)
+            self._timer = QtCore.QTimer(self)
+            self._timer.setInterval(50)  # 20 кадров/сек
+            self._timer.timeout.connect(self._tick)
+            self._timer.start()
+
+        def _build_ui(self) -> None:
+            root = QtWidgets.QVBoxLayout(self)
+            self.info = QtWidgets.QLabel(
+                "Говорите в микрофон — столбики должны двигаться. "
+                "Закройте окно, чтобы остановить тест."
+            )
+            self.info.setWordWrap(True)
+            root.addWidget(self.info)
+
+            # Гистограмма-эквалайзер (рисуем сами)
+            self.bars = _LevelBars(self.BARS)
+            root.addWidget(self.bars, stretch=1)
+
+            # Текущий уровень + пик
+            self.level_bar = QtWidgets.QProgressBar()
+            self.level_bar.setRange(0, 100)
+            self.level_bar.setFormat("уровень: %p%")
+            root.addWidget(self.level_bar)
+
+            self.peak_label = QtWidgets.QLabel("пик: 0.000")
+            root.addWidget(self.peak_label)
+
+            close_btn = QtWidgets.QPushButton("Закрыть")
+            close_btn.clicked.connect(self.close)
+            root.addWidget(close_btn)
+
+        def _tick(self) -> None:
+            level = self.engine.read_mic_level() if self._opened else 0.0
+            # сглаживание, чтобы столбики не дёргались
+            self._levels.append(level)
+            self._levels.pop(0)
+            self._peak = max(self._peak * 0.98, level)
+            self.bars.set_levels(self._levels)
+            self.level_bar.setValue(int(min(100, level * 100)))
+            self.peak_label.setText(f"пик: {self._peak:.3f}")
+
+        def closeEvent(self, event) -> None:  # noqa: N802
+            self._timer.stop()
+            self._opened = False
+            super().closeEvent(event)
+
+    class _LevelBars(QtWidgets.QWidget):
+        """Простой виджет-эквалайзер: N столбиков по истории уровня."""
+
+        def __init__(self, count: int, parent: Optional[QtWidgets.QWidget] = None) -> None:
+            super().__init__(parent)
+            self._count = count
+            self._levels = [0.0] * count
+            self.setMinimumHeight(120)
+            self.setStyleSheet("background:#0a0e12; border:1px solid #2a3138; border-radius:4px;")
+
+        def set_levels(self, levels) -> None:
+            self._levels = list(levels)
+            self.update()
+
+        def paintEvent(self, event) -> None:  # noqa: N802
+            from PySide6 import QtGui as _QtGui
+            painter = _QtGui.QPainter(self)
+            w = self.width()
+            h = self.height()
+            n = max(1, self._count)
+            gap = 2
+            bw = max(2, (w - gap * (n + 1)) // n)
+            for i, lvl in enumerate(self._levels):
+                bh = int(max(0.0, min(1.0, lvl)) * (h - 8))
+                x = gap + i * (bw + gap)
+                color = _QtGui.QColor(46, 160, 67) if lvl < 0.7 else _QtGui.QColor(210, 60, 60)
+                painter.fillRect(x, h - 4 - bh, bw, bh, color)
+            painter.end()
+
     # --- главное окно ---
     class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
         """Главное окно ВКС-клиента."""
@@ -309,22 +400,17 @@ if QT_AVAILABLE:
             self.mic_combo.currentIndexChanged.connect(self._on_mic_selected)
             dlayout.addWidget(self.mic_combo, 4, 1)
 
-            self.mic_test_btn = QtWidgets.QPushButton("🎙 Тест микрофона (3 сек)")
-            self.mic_test_btn.setToolTip("Записать 3 секунды и показать уровень сигнала")
-            self.mic_test_btn.clicked.connect(self._on_mic_test)
+            self.mic_test_btn = QtWidgets.QPushButton("🎙 Открыть монитор микрофона")
+            self.mic_test_btn.setToolTip(
+                "Открыть окно с живым эквалайзером: видно, когда вы говорите"
+            )
+            self.mic_test_btn.clicked.connect(self._on_mic_monitor)
             dlayout.addWidget(self.mic_test_btn, 5, 0, 1, 2)
-
-            self.mic_level = QtWidgets.QProgressBar()
-            self.mic_level.setRange(0, 100)
-            self.mic_level.setValue(0)
-            self.mic_level.setTextVisible(True)
-            self.mic_level.setFormat("уровень: %p%")
-            dlayout.addWidget(self.mic_level, 6, 0, 1, 2)
 
             self.device_status = QtWidgets.QLabel("")
             self.device_status.setStyleSheet("color:#7a8592; font-size:11px;")
             self.device_status.setWordWrap(True)
-            dlayout.addWidget(self.device_status, 7, 0, 1, 2)
+            dlayout.addWidget(self.device_status, 6, 0, 1, 2)
 
             right.addWidget(devices)
 
@@ -532,28 +618,14 @@ if QT_AVAILABLE:
                 self.preview_btn.setText("▶ Тест камеры")
                 self.device_status.setText("Превью камеры остановлено")
 
-        def _on_mic_test(self) -> None:
-            self.mic_test_btn.setEnabled(False)
-            self.device_status.setText("Идёт тест микрофона (3 сек)...")
-            QtWidgets.QApplication.processEvents()
-            try:
-                result = self.engine.test_microphone(3)
-            finally:
-                self.mic_test_btn.setEnabled(True)
-            if result.get("ok"):
-                level = float(result.get("level", 0.0))
-                # уровень pjsua ~0..1 -> проценты
-                self.mic_level.setValue(int(min(100, max(0, level * 100))))
-                self.device_status.setText(
-                    f"Микрофон работает. Уровень сигнала: {level:.3f}. "
-                    f"Запись: {result.get('file', '—')}"
-                )
-                self.statusBar().showMessage("Тест микрофона завершён", 5000)
-            else:
-                self.mic_level.setValue(0)
-                self.device_status.setText(
-                    f"Тест микрофона не удался: {result.get('error', 'ошибка')}"
-                )
+        def _on_mic_monitor(self) -> None:
+            """Открыть окно с живым эквалайзером микрофона."""
+            dev_id = self.mic_combo.currentData()
+            if dev_id is not None and dev_id < 0:
+                dev_id = None
+            self._mic_window = MicMonitorWindow(self.engine, dev_id, self)
+            self._mic_window.show()
+            self.device_status.setText("Окно монитора микрофона открыто")
 
         def _on_screen_toggle(self, checked: bool) -> None:
             success = self.engine.set_screen_share_enabled(checked)
