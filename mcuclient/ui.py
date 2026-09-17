@@ -134,12 +134,17 @@ if QT_AVAILABLE:
         def set_participant(self, p: Optional[Participant]) -> None:
             if p is None:
                 self.participant_id = None
-                self.video_label.setText("Пусто")
+                if not self._native_attached:
+                    self.video_label.setText("Пусто")
                 self.name_label.setText("—")
                 self.mute_audio_btn.setChecked(False)
                 self.mute_video_btn.setChecked(False)
                 self.setEnabled(False)
                 return
+
+            # Тайл переиспользуется под другого участника — сбросим состояние видео.
+            if self.participant_id != p.id:
+                self.detach_native_video()
 
             self.participant_id = p.id
             self.setEnabled(True)
@@ -299,6 +304,9 @@ if QT_AVAILABLE:
             self.engine = engine
             self.h323 = h323
             self._tiles: Dict[int, ParticipantTile] = {}
+            # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
+            # время обработки событий вызова приводил к access violation на Windows).
+            self._tile_pool: list = []
             self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
             self.resize(1280, 800)
             self._build_ui()
@@ -482,72 +490,77 @@ if QT_AVAILABLE:
             self._update_buttons()
             self._rebuild_video_grid()
 
-        def _rebuild_video_grid(self) -> None:
-            """Перестроить сетку видео в соответствии с текущей раскладкой."""
-            try:
-                if not self.engine or not hasattr(self.engine, 'room') or self.engine.room is None:
-                    while self.video_grid_layout.count():
-                        item = self.video_grid_layout.takeAt(0)
-                        if item.widget():
-                            w = item.widget()
-                            w.setParent(None)
-                            w.deleteLater()
-                    self._tiles.clear()
-                    empty = ParticipantTile()
-                    empty.set_participant(None)
-                    self.video_grid_layout.addWidget(empty, 0, 0)
-                    return
+        def _ensure_tile_pool(self, count: int) -> None:
+            """Довести пул тайлов до нужного размера (создание без удаления)."""
+            while len(self._tile_pool) < count:
+                tile = ParticipantTile(self.video_grid)
+                tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
+                tile.mute_video_clicked.connect(self._on_tile_mute_video)
+                tile.hangup_clicked.connect(self._on_tile_hangup)
+                self._tile_pool.append(tile)
 
-                # Безопасная очистка старых тайлов
+        def _rebuild_video_grid(self) -> None:
+            """Перестроить сетку видео, переиспользуя уже созданные тайлы.
+
+            Виджеты НЕ удаляются (deleteLater): на Windows удаление нативных
+            окон Qt прямо во время обработки события вызова приводило к
+            access violation. Вместо этого тайлы берём из пула и переиспользуем.
+            """
+            try:
+                # Убираем все элементы из раскладки, но оставляем виджеты живыми.
                 while self.video_grid_layout.count():
-                    item = self.video_grid_layout.takeAt(0)
-                    if item.widget():
-                        w = item.widget()
-                        w.setParent(None)
-                        w.deleteLater()
+                    self.video_grid_layout.takeAt(0)
                 self._tiles.clear()
 
                 rows, cols = 1, 1
-                try:
-                    rows, cols = self.engine.get_layout_grid()
-                except Exception as e:
-                    log.warning("Ошибка get_layout_grid: %s", e)
-
                 visible = []
-                try:
-                    visible = self.engine.get_visible_participants()
-                except Exception as e:
-                    log.warning("Ошибка get_visible_participants: %s", e)
+                if self.engine and getattr(self.engine, "room", None) is not None:
+                    try:
+                        rows, cols = self.engine.get_layout_grid()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Ошибка get_layout_grid: %s", e)
+                    try:
+                        visible = self.engine.get_visible_participants()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Ошибка get_visible_participants: %s", e)
 
+                rows = max(1, int(rows))
+                cols = max(1, int(cols))
+
+                # Формируем список ячеек: участники + пустые.
+                cells = []
                 if not visible:
-                    empty = ParticipantTile()
-                    empty.set_participant(None)
-                    self.video_grid_layout.addWidget(empty, 0, 0)
-                    return
+                    cells = [None]
+                    rows, cols = 1, 1
+                else:
+                    for idx, p in enumerate(visible):
+                        if idx // cols >= rows:
+                            break
+                        cells.append(p)
+                    while len(cells) < rows * cols:
+                        cells.append(None)
 
-                for idx, p in enumerate(visible):
-                    row = idx // cols
-                    col = idx % cols
-                    if row >= rows:
-                        break
-                    tile = ParticipantTile()
-                    tile.set_participant(p)
-                    tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
-                    tile.mute_video_clicked.connect(self._on_tile_mute_video)
-                    tile.hangup_clicked.connect(self._on_tile_hangup)
-                    self._tiles[p.id] = tile
+                self._ensure_tile_pool(len(cells))
+
+                for i, p in enumerate(cells):
+                    tile = self._tile_pool[i]
+                    row = i // cols
+                    col = i % cols
+                    if p is not None:
+                        tile.set_participant(p)
+                        self._tiles[p.id] = tile
+                    else:
+                        tile.set_participant(None)
+                    tile.show()
                     self.video_grid_layout.addWidget(tile, row, col)
 
-                for idx in range(len(visible), rows * cols):
-                    row = idx // cols
-                    col = idx % cols
-                    empty = ParticipantTile()
-                    empty.set_participant(None)
-                    self.video_grid_layout.addWidget(empty, row, col)
+                # Лишние тайлы из пула прячем (не удаляем).
+                for i in range(len(cells), len(self._tile_pool)):
+                    self._tile_pool[i].hide()
 
                 # Видео-окна могли появиться до перестроения — подключим сразу.
                 QtCore.QTimer.singleShot(50, self._attach_available_video)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 log.exception("Критическая ошибка в _rebuild_video_grid: %s", e)
 
         def _attach_available_video(self) -> None:
