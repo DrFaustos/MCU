@@ -70,6 +70,9 @@ class SipEngine:
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
         # libDestroy(), и pjsua2 упадёт с assertion (pjsua_call_set_user_data).
         self._live_calls: Dict[int, object] = {}
+        # Реестр ТОЛЬКО собственных media-портов движка (см. docs/STOP_CONTRACT.md).
+        # stop() отключает лишь их и не трогает чужие (внешние player/recorder).
+        self._media_ports: list = []
 
         self._screen_sharer = ScreenSharer(
             fps=config.video.get("fps", 15),
@@ -131,6 +134,7 @@ class SipEngine:
                 self.stop_local_preview()
             if self._screen_sharer.is_running:
                 self._screen_sharer.stop()
+            self._detach_own_media()
             if PJSIP_AVAILABLE and self._endpoint is not None:
                 self._hangup_all()
                 # Дать pjsua2 обработать BYE и снять вызовы до разрушения lib.
@@ -482,6 +486,32 @@ class SipEngine:
                 log.debug("Ошибка завершения вызова (уже завершён)")
         self._drop_participant(participant_id)
 
+    def register_media_port(self, port: object) -> None:
+        """Зарегистрировать собственный media-порт для отключения в stop()."""
+        if port is not None and port not in self._media_ports:
+            self._media_ports.append(port)
+
+    def unregister_media_port(self, port: object) -> None:
+        try:
+            self._media_ports.remove(port)
+        except ValueError:
+            pass
+
+    def _detach_own_media(self) -> None:
+        """Отключить только собственные зарегистрированные media-порты.
+
+        Чужие порты (созданные вне SipEngine) не трогаются — это их
+        ответственность (docs/STOP_CONTRACT.md).
+        """
+        for port in list(self._media_ports):
+            try:
+                stop = getattr(port, "stop_recording", None)
+                if callable(stop):
+                    stop()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("detach own media: %s", exc)
+        self._media_ports.clear()
+
     def _hangup_all(self) -> None:  # pragma: no cover
         if not self.room:
             return
@@ -798,6 +828,8 @@ class SipEngine:
         if p is None or p._call is None:
             return False
         ok = self._audio_recorder.start_recording(p._call)
+        if ok:
+            self.register_media_port(self._audio_recorder)
         self.events.emit(
             "media.recording.audio",
             enabled=self._audio_recorder.is_recording,
@@ -808,6 +840,7 @@ class SipEngine:
     def stop_audio_recording(self) -> bool:
         f = self._audio_recorder.current_file
         ok = self._audio_recorder.stop_recording()
+        self.unregister_media_port(self._audio_recorder)
         # W3: payload симметричен start — всегда есть enabled и file.
         self.events.emit(
             "media.recording.audio",
