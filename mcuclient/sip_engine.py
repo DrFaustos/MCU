@@ -135,8 +135,10 @@ class SipEngine:
                 self._hangup_all()
                 # Дать pjsua2 обработать BYE и снять вызовы до разрушения lib.
                 time.sleep(0.3)
-                self._live_calls.clear()
                 self._endpoint.libDestroy()
+                # Ссылки на Call освобождаем ТОЛЬКО после libDestroy, иначе
+                # GC соберёт их раньше и pjsua2 упадёт (pjsua_call_set_user_data).
+                self._live_calls.clear()
         finally:
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
             self._registry.clear_all_video_windows()

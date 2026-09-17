@@ -1,0 +1,11 @@
+{
+  "_comment": "Пороги R3-верификатора (внешний эталон тона -> звонок -> WAV).",
+  "rms_min": 1000,
+  "peak_min": 3000,
+  "max_silence_ratio": 0.5,
+  "duration_tolerance_s": 0.5,
+  "expected_sample_rate": 16000,
+  "expected_channels": 1,
+  "rms_ratio_min": 0.4,
+  "_rms_ratio_comment": "RMS записи / RMS эталона: допускаем просадку кодека, но не тишину"
+}
