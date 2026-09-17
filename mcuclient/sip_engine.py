@@ -13,6 +13,7 @@ from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
 from .call_manager import CallManager, normalize_uri
 from .audio_recorder import AudioRecorder
 from .call_registry import CallRegistry
+from .chat import ChatHistory, normalize_message
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
 
@@ -96,6 +97,7 @@ class SipEngine:
         )
         self._abr_enabled = True
         self._layout: str = config.default_layout
+        self._chat = ChatHistory()
 
     def start(self) -> None:
         if self._running:
@@ -302,6 +304,12 @@ class SipEngine:
 
             def onCallState(self, prm) -> None:  # noqa: N802
                 engine._on_call_state(self, prm)
+
+            def onInstantMessage(self, prm) -> None:  # noqa: N802
+                engine._on_instant_message(self, prm)
+
+            def onInstantMessageStatus(self, prm) -> None:  # noqa: N802
+                engine._on_instant_message_status(self, prm)
 
         self._CallClass = _Call
 
@@ -852,6 +860,56 @@ class SipEngine:
     @property
     def is_audio_recording(self) -> bool:
         return self._audio_recorder.is_recording
+
+    # --- текстовый чат (SIP MESSAGE, RFC 3428) ---
+    @property
+    def chat_history(self):
+        return self._chat.messages
+
+    def send_message(self, participant_id: int, text: str) -> bool:
+        """Отправить текстовое сообщение в активный вызов."""
+        content = normalize_message(text)
+        if content is None:
+            return False
+        if not PJSIP_AVAILABLE:
+            self.events.emit("chat.error", reason="pjsua2 недоступен")
+            return False
+        p = self._get_participant(participant_id)
+        if p is None or p._call is None:
+            return False
+        try:  # pragma: no cover
+            prm = _pj.SendInstantMessageParam()
+            prm.content = content
+            prm.contentType = "text/plain"
+            p._call.sendInstantMessage(prm)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось отправить сообщение: %s", exc)
+            self.events.emit("chat.error", reason=str(exc))
+            return False
+        msg = self._chat.add_outgoing(content)
+        self.events.emit("chat.message", **msg.as_dict())
+        return True
+
+    def _on_instant_message(self, call, prm) -> None:  # pragma: no cover
+        """Входящее SIP MESSAGE."""
+        try:
+            content = prm.rdata.wholeMsg or getattr(prm, "msg", "")
+            sender = getattr(prm, "fromUri", "peer")
+        except Exception:  # noqa: BLE001
+            content, sender = "", "peer"
+        msg = self._chat.add_incoming(sender, content)
+        self.events.emit("chat.message", **msg.as_dict())
+
+    def _on_instant_message_status(self, call, prm) -> None:  # pragma: no cover
+        """Статус доставки исходящего сообщения."""
+        try:
+            code = getattr(prm, "code", 0)
+            reason = getattr(prm, "reason", "")
+        except Exception:  # noqa: BLE001
+            code, reason = 0, ""
+        status = "delivered" if 200 <= int(code) < 300 else "failed"
+        self._chat.mark_last_outgoing(status)
+        self.events.emit("chat.status", status=status, code=code, reason=reason)
 
     def _register_participant(
         self, call, remote_uri: str, state: CallState
