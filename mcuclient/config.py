@@ -47,6 +47,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allowed_peers": [],
         "require_encryption": False,
         "auto_answer": True,
+        # NAT traversal: STUN-сервер и включение ICE (PJSIP).
+        "stun": {"server": "", "enable_ice": True},
         "codecs": {
             "audio": [
                 "opus/48000/2",
@@ -136,6 +138,16 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         )
     _check_bool("sip.require_encryption", sip.get("require_encryption"))
     _check_bool("sip.auto_answer", sip.get("auto_answer"))
+    stun = sip.get("stun")
+    if not isinstance(stun, dict):
+        raise ConfigError("sip.stun должен быть объектом")
+    server = stun.get("server", "")
+    if not isinstance(server, str):
+        raise ConfigError("sip.stun.server: ожидалась строка")
+    if server and ":" not in server.split("//")[-1]:
+        raise ConfigError("sip.stun.server: укажите хост:порт, например stun.l.google.com:19302")
+    if not isinstance(stun.get("enable_ice", True), bool):
+        raise ConfigError("sip.stun.enable_ice: ожидалось true/false")
     _check_str_list("sip.allowed_peers", sip.get("allowed_peers"))
     for pattern in sip.get("allowed_peers", []):
         try:
@@ -299,6 +311,14 @@ class Config:
     @property
     def video_codecs(self) -> List[str]:
         return list(self.raw["sip"]["codecs"]["video"])
+
+    @property
+    def stun_server(self) -> str:
+        return str(self.raw["sip"].get("stun", {}).get("server", ""))
+
+    @property
+    def ice_enabled(self) -> bool:
+        return bool(self.raw["sip"].get("stun", {}).get("enable_ice", True))
 
     @property
     def peer_filter(self) -> PeerFilter:

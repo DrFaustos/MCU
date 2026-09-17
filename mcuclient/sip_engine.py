@@ -7,6 +7,7 @@ from typing import Callable, Dict, List, Optional
 from .config import Config, compute_auto_grid
 from .log import get_logger
 from .media_devices import MediaManager, MediaState, build_state
+from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
 from .call_manager import CallManager, normalize_uri
 from .call_registry import CallRegistry
 from .recorder import ConferenceRecorder
@@ -74,6 +75,16 @@ class SipEngine:
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
         self._media = MediaManager(_pj, None)
+        video_cfg = config.video
+        self._abr = AdaptiveBitrateController(
+            AbrConfig(
+                min_kbps=max(64, int(video_cfg.get("bitrate_kbps", 1500) // 4)),
+                max_kbps=max(512, int(config.bandwidth_kbps)),
+                start_kbps=int(video_cfg.get("bitrate_kbps", 1500)),
+            ),
+            current_kbps=int(video_cfg.get("bitrate_kbps", 1500)),
+        )
+        self._abr_enabled = True
         self._layout: str = config.default_layout
 
     def start(self) -> None:
@@ -149,6 +160,7 @@ class SipEngine:
             ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
         if hasattr(ep_cfg.medConfig, "noVad"):
             ep_cfg.medConfig.noVad = False
+        self._configure_nat(ep_cfg)
         ep.libCreate()
         ep.libInit(ep_cfg)
         self._configure_transport(ep)
@@ -160,6 +172,20 @@ class SipEngine:
         log.info("PJSIP: видео %s", "поддерживается" if self._video_supported else "НЕ поддерживается")
         self._configure_codecs(ep)
         self._start_account(ep)
+
+    def _configure_nat(self, ep_cfg) -> None:  # pragma: no cover
+        """Настраивает STUN и ICE в uaConfig для работы через NAT."""
+        ua = getattr(ep_cfg, "uaConfig", None)
+        if ua is None:
+            return
+        server = self.config.stun_server
+        if server and hasattr(ua, "stunServer"):
+            ua.stunServer = server
+            log.info("STUN-сервер: %s", server)
+        ice = self.config.ice_enabled
+        if hasattr(ua, "enableIce"):
+            ua.enableIce = bool(ice)
+            log.info("ICE: %s", "вкл" if ice else "выкл")
 
     @staticmethod
     def _transport_type(name: str):  # pragma: no cover
@@ -571,6 +597,7 @@ class SipEngine:
 
     def set_video_bitrate(self, kbps: int) -> None:
         self.config.set_video_bitrate(kbps)
+        self._abr.note_applied(int(kbps))
         self.events.emit("media.bitrate.video", kbps=int(kbps))
 
     def set_audio_bitrate(self, kbps: int) -> None:
@@ -580,6 +607,38 @@ class SipEngine:
     def set_bandwidth(self, kbps: int) -> None:
         self.config.set_bandwidth(kbps)
         self.events.emit("media.bandwidth", kbps=int(kbps))
+
+    @property
+    def abr_enabled(self) -> bool:
+        return self._abr_enabled
+
+    def set_abr_enabled(self, enabled: bool) -> bool:
+        self._abr_enabled = bool(enabled)
+        self.events.emit("media.abr", enabled=self._abr_enabled)
+        return self._abr_enabled
+
+    @property
+    def target_video_bitrate_kbps(self) -> int:
+        return self._abr.target_kbps
+
+    def report_rtcp_metrics(self, loss_fraction: float, jitter_ms: float) -> int:
+        """Скормить RTCP-метрики; при изменении применяет новый битрейт.
+
+        Возвращает актуальный целевой битрейт (кбит/с).
+        """
+        if not self._abr_enabled:
+            return self._abr.target_kbps
+        decision = self._abr.update(loss_fraction, jitter_ms)
+        if decision.changed:
+            self.config.set_video_bitrate(decision.kbps)
+            self.events.emit(
+                "media.bitrate.video",
+                kbps=decision.kbps,
+                adaptive=True,
+                direction=decision.direction,
+                reason=decision.reason,
+            )
+        return self._abr.target_kbps
 
     def mute_participant(self, participant_id: int, muted: bool) -> bool:
         p = self._get_participant(participant_id)

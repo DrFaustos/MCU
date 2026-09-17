@@ -63,6 +63,7 @@ module = [
     "mcuclient.call_manager",
     "mcuclient.pjsip_adapter",
     "mcuclient.config",
+    "mcuclient.adaptive_bitrate",
 ]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

@@ -9,6 +9,11 @@
     "transport": "udp",
     "allowed_peers": [],
     "require_encryption": false,
+    "auto_answer": true,
+    "stun": {
+      "server": "",
+      "enable_ice": true
+    },
     "codecs": {
       "audio": [
         "opus/48000/2",
@@ -26,6 +31,7 @@
   },
   "media": {
     "video": {
+      "enabled": true,
       "width": 1280,
       "height": 720,
       "fps": 30,

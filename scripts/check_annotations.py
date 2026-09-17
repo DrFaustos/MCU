@@ -21,6 +21,7 @@ STRICT_MODULES = (
     "mcuclient/call_manager.py",
     "mcuclient/config.py",
     "mcuclient/pjsip_adapter.py",
+    "mcuclient/adaptive_bitrate.py",
 )
 
 
