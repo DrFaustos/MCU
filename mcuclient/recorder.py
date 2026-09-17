@@ -41,9 +41,21 @@ def _detect_hw_encoder() -> str:
         if result.returncode == 0:
             output = result.stdout.lower()
             for encoder, name in encoders_to_try:
-                if encoder in output:
+                if encoder not in output:
+                    continue
+                # Наличие кодера в списке не значит, что он РАБОТАЕТ:
+                # без GPU/драйвера nvenc/qsv/amf падают при инициализации.
+                # Пробуем реально закодировать 1 кадр; при ошибке — дальше.
+                probe = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+                     "-frames:v", "1", "-c:v", encoder, "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                if probe.returncode == 0:
                     log.info("Обнаружен аппаратный кодер: %s (%s)", encoder, name)
                     return encoder
+                log.info("Кодер %s есть, но не работает — пропускаем", encoder)
     except Exception as exc:
         log.warning("Не удалось проверить кодеры FFmpeg: %s", exc)
 
@@ -111,13 +123,18 @@ class ConferenceRecorder:
             process = self._process
             if process is not None:
                 try:
-                    # Отправляем 'q' для корректного завершения FFmpeg
+                    # Пробуем корректно завершить FFmpeg (q), затем terminate/kill.
                     if process.stdin is not None:
-                        process.stdin.write(b'q\n')
-                        process.stdin.flush()
-                    else:
+                        try:
+                            process.stdin.write(b'q')
+                            process.stdin.flush()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    try:
+                        process.wait(timeout=3)
+                    except Exception:  # noqa: BLE001
                         process.terminate()
-                    process.wait(timeout=5)
+                        process.wait(timeout=3)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Ошибка остановки FFmpeg: %s", exc)
                     try:
@@ -154,8 +171,16 @@ class ConferenceRecorder:
 
         cmd = ["ffmpeg", "-y"]  # -y = перезаписывать без запроса
 
-        # Видео источник
-        if sys_platform == "Windows":
+        # Тестовый источник без дисплея/камеры (headless-проверка записи).
+        # Управляется переменной MCU_RECORD_SOURCE=lavfi.
+        import os
+        if os.environ.get("MCU_RECORD_SOURCE") == "lavfi":
+            cmd.extend([
+                "-re",  # писать в реальном времени (не быстрее)
+                "-f", "lavfi", "-i",
+                f"testsrc=size=640x480:rate={self.fps}:duration=3600",
+            ])
+        elif sys_platform == "Windows":
             cmd.extend([
                 "-f", "gdigrab",
                 "-framerate", str(self.fps),
