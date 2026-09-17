@@ -268,6 +268,27 @@ class SipEngine:
                 ep.codecSetPriority(codec_id, prio)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось настроить кодеки: %s", exc)
+        # Видео-кодеки настраиваются отдельным API (videoCodecEnum2).
+        self._configure_video_codecs(ep)
+
+    def _configure_video_codecs(self, ep) -> None:  # pragma: no cover
+        """Выставить приоритеты видео-кодеков (H264/VP8/H263)."""
+        if not hasattr(ep, "videoCodecEnum2"):
+            log.info("Видео-кодеки недоступны в этом биндинге pjsua2")
+            return
+        wanted = self.config.video_codecs
+        try:
+            for codec in ep.videoCodecEnum2():
+                codec_id = f"{codec.codecId}"
+                prio = 0
+                for rank, name in enumerate(wanted):
+                    if name.split("/")[0].lower() in codec_id.lower():
+                        prio = max(CODEC_MIN_PRIORITY, CODEC_BASE_PRIORITY - rank * CODEC_PRIORITY_STEP)
+                        break
+                ep.videoCodecSetPriority(codec_id, prio)
+                log.info("Видео-кодек %s: приоритет %d", codec_id, prio)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось настроить видео-кодеки: %s", exc)
 
     @staticmethod
     def _detect_video_support(ep) -> bool:  # pragma: no cover
