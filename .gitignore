@@ -95,3 +95,5 @@ uac_echo_*.log
 # Исключение: testbed-lib — это исходники, а не build-артефакт
 !scripts/testbed/lib/
 !scripts/testbed/lib/**
+__pycache__/
+!scripts/testbed/lib/*.py
