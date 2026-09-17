@@ -285,11 +285,11 @@ class Config:
 
     @property
     def room_name(self) -> str:
-        return self.raw["room"]["name"]
+        return str(self.raw["room"]["name"])
 
     @property
     def sip_listen(self) -> str:
-        return self.raw["sip"]["listen"]
+        return str(self.raw["sip"]["listen"])
 
     @property
     def sip_port(self) -> int:
@@ -333,7 +333,7 @@ class Config:
 
     @property
     def video(self) -> Dict[str, Any]:
-        return self.raw["media"]["video"]
+        return dict(self.raw["media"]["video"])
 
     @property
     def video_call_enabled(self) -> bool:
@@ -341,7 +341,7 @@ class Config:
 
     @property
     def audio(self) -> Dict[str, Any]:
-        return self.raw["media"]["audio"]
+        return dict(self.raw["media"]["audio"])
 
     @property
     def bandwidth_kbps(self) -> int:
@@ -357,7 +357,7 @@ class Config:
 
     @property
     def features(self) -> Dict[str, Any]:
-        return self.raw.get("features", DEFAULT_CONFIG["features"])
+        return dict(self.raw.get("features", DEFAULT_CONFIG["features"]))
 
     @property
     def recording_path(self) -> str:

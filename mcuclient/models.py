@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .log import get_logger
 
@@ -103,7 +103,7 @@ class EventBus:
         with self._lock:
             self._subs.append(cb)
 
-    def emit(self, event: str, **payload) -> None:
+    def emit(self, event: str, **payload: Any) -> None:
         with self._lock:
             subs = list(self._subs)
         for cb in subs:

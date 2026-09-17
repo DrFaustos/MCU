@@ -47,6 +47,6 @@ class StubEndpoint:
 
 def create_endpoint() -> Any:
     """Возвращает pjsua2.Endpoint либо StubEndpoint (если pjsua2 нет)."""
-    if PJSIP_AVAILABLE:
+    if PJSIP_AVAILABLE and pj is not None:
         return pj.Endpoint()  # pragma: no cover
     return StubEndpoint.instance()
