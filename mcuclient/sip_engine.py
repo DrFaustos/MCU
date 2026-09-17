@@ -322,6 +322,15 @@ class SipEngine:
 
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = self._build_id_uri()
+        # Видео: авто-передача/приём, если видео включено в конфиге.
+        vcfg = getattr(acc_cfg, "videoConfig", None)
+        if vcfg is not None:
+            try:
+                vcfg.autoTransmitOutgoing = bool(self.config.video_call_enabled)
+                vcfg.autoShowIncoming = True
+                log.info("Видео-аккаунт: autoTransmit=%s", vcfg.autoTransmitOutgoing)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("videoConfig недоступен: %s", exc)
         media_cfg = getattr(acc_cfg, "mediaConfig", None)
         if media_cfg is not None and hasattr(_pj, "PJMEDIA_SRTP_DISABLED"):
             if self.config.require_encryption:
