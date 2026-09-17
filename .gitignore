@@ -91,3 +91,7 @@ packaging/mcu-client.ico
 uac_echo_*.log
 .testbed/
 /tmp/mcu-asterisk/
+
+# Исключение: testbed-lib — это исходники, а не build-артефакт
+!scripts/testbed/lib/
+!scripts/testbed/lib/**
