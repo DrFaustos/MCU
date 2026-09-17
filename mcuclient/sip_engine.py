@@ -11,6 +11,7 @@ from .log import get_logger
 from .media_devices import MediaManager, MediaState, build_state
 from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
 from .call_manager import CallManager, normalize_uri
+from .audio_recorder import AudioRecorder
 from .call_registry import CallRegistry
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
@@ -79,6 +80,7 @@ class SipEngine:
 
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
+        self._audio_recorder = AudioRecorder(output_dir=rec_dir, pj_module=_pj)
         self._media = MediaManager(_pj, None, null_audio=config.null_audio)
         video_cfg = config.video
         self._abr = AdaptiveBitrateController(
@@ -785,6 +787,28 @@ class SipEngine:
     def recording_file(self) -> Optional[str]:
         f = self._recorder.current_file
         return str(f) if f else None
+
+    def start_audio_recording(self, participant_id: int) -> bool:
+        """Записать аудио конкретного вызова в WAV (через pjsua2)."""
+        p = self._get_participant(participant_id)
+        if p is None or p._call is None:
+            return False
+        ok = self._audio_recorder.start_recording(p._call)
+        self.events.emit(
+            "media.recording.audio",
+            enabled=self._audio_recorder.is_recording,
+            file=str(self._audio_recorder.current_file) if self._audio_recorder.current_file else None,
+        )
+        return ok
+
+    def stop_audio_recording(self) -> bool:
+        ok = self._audio_recorder.stop_recording()
+        self.events.emit("media.recording.audio", enabled=False)
+        return ok
+
+    @property
+    def is_audio_recording(self) -> bool:
+        return self._audio_recorder.is_recording
 
     def _register_participant(
         self, call, remote_uri: str, state: CallState
