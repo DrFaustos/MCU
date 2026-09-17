@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -402,10 +403,21 @@ class SipEngine:
                 except Exception:  # noqa: BLE001
                     log.exception("Не удалось запланировать авто-ответ")
             else:
-                try:
-                    self.accept(participant.id)
-                except Exception:  # noqa: BLE001
-                    log.exception("Авто-ответ не удался")
+                # ВАЖНО: не вызываем answer() прямо из колбэка pjsua2 —
+                # это приводит к grp_lock assertion. Откладываем в поток.
+                def _deferred_accept(pid: int = participant.id) -> None:
+                    time.sleep(0.05)
+                    try:
+                        # pjsua2 требует регистрации потока в pjlib.
+                        if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
+                            self._endpoint.libRegisterThread("auto-answer")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        self.accept(pid)
+                    except Exception:  # noqa: BLE001
+                        log.exception("Авто-ответ не удался")
+                threading.Thread(target=_deferred_accept, daemon=True).start()
 
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
