@@ -313,7 +313,7 @@ if QT_AVAILABLE:
             self.engine.events.subscribe(self._on_event)
 
             self._answer_requested.connect(self._on_answer_requested)
-            self.engine.register_main_thread()
+            # register_main_thread() уже вызван в run.py до создания GUI.
             self.engine.set_answer_dispatch(self._request_answer)
 
             # Периодически пытаемся подключить появившиеся видео-окна PJSIP
@@ -321,7 +321,8 @@ if QT_AVAILABLE:
             self._video_poll = QtCore.QTimer(self)
             self._video_poll.setInterval(500)
             self._video_poll.timeout.connect(self._attach_available_video)
-            self._video_poll.start()
+            if getattr(self.engine, "_video_supported", False):
+                self._video_poll.start()
 
         def _build_ui(self) -> None:
             central = QtWidgets.QWidget()
@@ -565,6 +566,8 @@ if QT_AVAILABLE:
 
         def _attach_available_video(self) -> None:
             """Подключить готовые видео-окна PJSIP к тайлам участников."""
+            if not getattr(self.engine, "_video_supported", False):
+                return
             if not self.engine or not self.engine.room:
                 return
             for pid, tile in list(self._tiles.items()):

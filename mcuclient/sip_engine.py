@@ -345,7 +345,7 @@ class SipEngine:
         acc_cfg.idUri = self._build_id_uri()
         # Видео: авто-передача/приём, если видео включено в конфиге.
         vcfg = getattr(acc_cfg, "videoConfig", None)
-        if vcfg is not None:
+        if vcfg is not None and self._video_supported:
             try:
                 vcfg.autoTransmitOutgoing = bool(self.config.video_call_enabled)
                 vcfg.autoShowIncoming = True
@@ -362,9 +362,16 @@ class SipEngine:
         self._account.create(acc_cfg)
 
     def _on_call_state(self, call, prm) -> None:  # pragma: no cover
-        self._calls.apply_call_state(call, lambda c: c.getInfo())
+        try:
+            self._calls.apply_call_state(call, lambda c: c.getInfo())
+        except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
+            log.exception("Ошибка обработки состояния вызова")
 
     def _on_call_media_state(self, prm) -> None:  # pragma: no cover
+        # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
+        # нативному access violation (Python-исключение его не ловит).
+        if not self._video_supported:
+            return
         try:
             ci = prm.callInfo
         except Exception:  # noqa: BLE001
@@ -431,6 +438,12 @@ class SipEngine:
                 return "127.0.0.1"
 
     def _on_incoming(self, prm) -> None:  # pragma: no cover
+        try:
+            self._on_incoming_impl(prm)
+        except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
+            log.exception("Ошибка обработки входящего вызова")
+
+    def _on_incoming_impl(self, prm) -> None:  # pragma: no cover
         call = self._CallClass(self._account, prm.callId)
         info = call.getInfo()
         remote_uri = info.remoteUri
