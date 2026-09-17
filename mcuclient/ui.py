@@ -64,6 +64,7 @@ if QT_AVAILABLE:
         def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
             super().__init__(parent)
             self.participant_id: Optional[int] = None
+            self._native_attached = False
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -71,13 +72,21 @@ if QT_AVAILABLE:
             layout.setContentsMargins(4, 4, 4, 4)
             layout.setSpacing(2)
 
+            # holder — стабильный нативный контейнер, в который PJSIP встраивает
+            # своё видео-окно (см. SipEngine.attach_video_window).
+            self.video_holder = QtWidgets.QWidget()
+            self.video_holder.setMinimumSize(160, 120)
+            self.video_holder.setStyleSheet(
+                "background:#1a2028; border:1px solid #2a3138; border-radius:4px;"
+            )
+            holder_layout = QtWidgets.QVBoxLayout(self.video_holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+
             self.video_label = QtWidgets.QLabel("Нет видео")
             self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.video_label.setMinimumSize(160, 120)
-            self.video_label.setStyleSheet(
-                "background:#1a2028; color:#7a8592; border:1px solid #2a3138; border-radius:4px;"
-            )
-            layout.addWidget(self.video_label, stretch=1)
+            self.video_label.setStyleSheet("background:transparent; color:#7a8592;")
+            holder_layout.addWidget(self.video_label, stretch=1)
+            layout.addWidget(self.video_holder, stretch=1)
 
             self.name_label = QtWidgets.QLabel("—")
             self.name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -142,21 +151,46 @@ if QT_AVAILABLE:
                 name = name.split("@")[0]
             self.name_label.setText(name)
 
-            if p.is_video_muted:
-                self.video_label.setText("📷✕ Видео выкл")
-            elif p.state is CallState.INCOMING:
-                self.video_label.setText("📞 Входящий")
-            elif p.state is CallState.CONNECTING:
-                self.video_label.setText("📡 Соединение...")
-            elif p.state is CallState.CONFIRMED:
-                self.video_label.setText(f"🎥 {p.video_codec or 'video'}")
-            else:
-                self.video_label.setText("⏸ Неактивен")
+            if not self._native_attached:
+                if p.is_video_muted:
+                    self.video_label.setText("📷✕ Видео выкл")
+                elif p.state is CallState.INCOMING:
+                    self.video_label.setText("📞 Входящий")
+                elif p.state is CallState.CONNECTING:
+                    self.video_label.setText("📡 Соединение...")
+                elif p.state is CallState.CONFIRMED:
+                    self.video_label.setText(f"🎥 {p.video_codec or 'video'}")
+                else:
+                    self.video_label.setText("⏸ Неактивен")
 
             self.mute_audio_btn.setChecked(p.is_muted)
             self.mute_audio_btn.setText("🔇" if p.is_muted else "🔊")
             self.mute_video_btn.setChecked(p.is_video_muted)
             self.mute_video_btn.setText("📷✕" if p.is_video_muted else "📹")
+
+        def attach_native_video(self, engine: SipEngine, participant_id: int) -> bool:
+            """Встроить нативное видео-окно PJSIP в этот тайл.
+
+            Возвращает True, если окно удалось показать (встроенно или
+            отдельным окном-фолбэком). Само встраивание делает SipEngine.
+            """
+            if self._native_attached:
+                return True
+            if engine.get_video_window(participant_id) is None:
+                return False
+            embedded = engine.attach_video_window(participant_id, self.video_holder)
+            if embedded:
+                self._native_attached = True
+                self.video_label.hide()
+                return True
+            # Встраивание не удалось (Wayland/чужой toolkit) — показываем
+            # видео отдельным нативным окном, но не считаем тайл «готовым».
+            return engine.show_video_window(participant_id)
+
+        def detach_native_video(self) -> None:
+            self._native_attached = False
+            if not self.video_label.isVisible():
+                self.video_label.show()
 
         def _on_mute_audio(self) -> None:
             if self.participant_id is not None:
@@ -273,6 +307,13 @@ if QT_AVAILABLE:
             self._answer_requested.connect(self._on_answer_requested)
             self.engine.register_main_thread()
             self.engine.set_answer_dispatch(self._request_answer)
+
+            # Периодически пытаемся подключить появившиеся видео-окна PJSIP
+            # к тайлам: окно готово не мгновенно после onCallMediaState.
+            self._video_poll = QtCore.QTimer(self)
+            self._video_poll.setInterval(500)
+            self._video_poll.timeout.connect(self._attach_available_video)
+            self._video_poll.start()
 
         def _build_ui(self) -> None:
             central = QtWidgets.QWidget()
@@ -503,8 +544,24 @@ if QT_AVAILABLE:
                     empty = ParticipantTile()
                     empty.set_participant(None)
                     self.video_grid_layout.addWidget(empty, row, col)
+
+                # Видео-окна могли появиться до перестроения — подключим сразу.
+                QtCore.QTimer.singleShot(50, self._attach_available_video)
             except Exception as e:
                 log.exception("Критическая ошибка в _rebuild_video_grid: %s", e)
+
+        def _attach_available_video(self) -> None:
+            """Подключить готовые видео-окна PJSIP к тайлам участников."""
+            if not self.engine or not self.engine.room:
+                return
+            for pid, tile in list(self._tiles.items()):
+                try:
+                    if self.engine.get_video_window(pid) is None:
+                        continue
+                    if tile.attach_native_video(self.engine, pid):
+                        self.statusBar().showMessage("Видео подключено", 2000)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("attach video %s: %s", pid, exc)
 
         def _refresh_tiles(self) -> None:
             if not self.engine or not self.engine.room:
@@ -720,6 +777,12 @@ if QT_AVAILABLE:
                     self._refresh_participants_list()
                     self._rebuild_video_grid()
                     self.statusBar().showMessage(f"{event}: {payload}", 5000)
+                elif event == "call.video":
+                    # Появился/пропал видеопоток — перестроим сетку и подключим окно.
+                    self._refresh_participants_list()
+                    if payload.get("active"):
+                        self._rebuild_video_grid()
+                    QtCore.QTimer.singleShot(50, self._attach_available_video)
                 elif event == "call.rejected":
                     self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
                 elif event == "media.preview":
@@ -768,6 +831,10 @@ if QT_AVAILABLE:
             self._update_buttons()
 
         def closeEvent(self, event) -> None:  # noqa: N802
+            try:
+                self._video_poll.stop()
+            except Exception:  # noqa: BLE001
+                pass
             self.engine.stop()
             self.h323.stop()
             super().closeEvent(event)
