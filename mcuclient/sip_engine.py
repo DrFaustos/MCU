@@ -125,6 +125,8 @@ class SipEngine:
         try:
             if self._recorder.is_recording:
                 self._recorder.stop_recording()
+            if self._audio_recorder.is_recording:
+                self._audio_recorder.stop_recording()
             if self._video_preview is not None:
                 self.stop_local_preview()
             if self._screen_sharer.is_running:
@@ -802,8 +804,14 @@ class SipEngine:
         return ok
 
     def stop_audio_recording(self) -> bool:
+        f = self._audio_recorder.current_file
         ok = self._audio_recorder.stop_recording()
-        self.events.emit("media.recording.audio", enabled=False)
+        # W3: payload симметричен start — всегда есть enabled и file.
+        self.events.emit(
+            "media.recording.audio",
+            enabled=self._audio_recorder.is_recording,
+            file=str(f) if f else None,
+        )
         return ok
 
     @property
