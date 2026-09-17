@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="uac-echo">
+  <!-- INVITE на echo-номер -->
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-1;rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=1
+      To: echo <sip:600@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP4 [local_ip]
+      s=-
+      c=IN IP4 [local_ip]
+      t=0 0
+      m=audio 16002 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+  <recv response="100" optional="true"/>
+  <recv response="200" rtd="true"/>
+
+  <!-- ACK -->
+  <send>
+    <![CDATA[
+      ACK sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-1;rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=1
+      To: echo <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Держим диалог 2 секунды: канал Up в Echo(), затем сами завершаем -->
+  <pause milliseconds="2000"/>
+  <send retrans="500">
+    <![CDATA[
+      BYE sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-2;rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=1
+      To: echo <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200"/>
+</scenario>

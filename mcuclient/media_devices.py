@@ -243,6 +243,21 @@ class MediaManager:
                 if getattr(dev, "inputCount", 0) > 0:
                     self.dev_set(mgr, "captureDev", "setCaptureDev", i)
                     break
+        # В headless/контейнерных окружениях устройства могут присутствовать
+        # в списке, но быть нерабочими (драйвер не открывается). Тогда
+        # makeCall() падает с PJMEDIA_EAUD_SYSERR. Включаем null-устройство,
+        # чтобы звонок устанавливался без локального аудио.
+        cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
+        play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
+        if cap < 0 or play < 0:
+            try:
+                mgr.setNullDev()
+                log.warning(
+                    "Аудиоустройства недоступны (capture=%s, playback=%s) — включено null-устройство",
+                    cap, play,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось включить null-устройство: %s", exc)
         log.info(
             "Аудиоустройства: capture=%s, playback=%s (всего %d)",
             self.dev_int(mgr, "captureDev", "getCaptureDev"),

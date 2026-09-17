@@ -86,3 +86,8 @@ packaging/mcu-client.ico
 
 # GitHub token (локально, не коммитить)
 .gh_token
+
+# Локальный SIP-стенд: артефакты прогонов
+uac_echo_*.log
+.testbed/
+/tmp/mcu-asterisk/
