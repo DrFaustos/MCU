@@ -41,6 +41,19 @@ class CallRegistry:
             return None
         return self.room.participants.get(participant_id)
 
+    def find_by_call(self, call: Any, pj_call_id: Optional[int] = None) -> Optional[Participant]:
+        """Находит участника по объекту вызова pjsua2 или по его id.
+
+        Нужно потому, что ``CallInfo.id`` (id pjsua2) не совпадает с нашим
+        ``Participant.id``.
+        """
+        if self.room is None:
+            return None
+        for p in self.room.participants.values():
+            if p._call is call:
+                return p
+        return None
+
     def drop(self, participant_id: int) -> None:
         with self._lock:
             if self.room is not None:

@@ -146,9 +146,10 @@ class MediaManager:
     импортирует pjsua2 напрямую и легко тестируется подменой.
     """
 
-    def __init__(self, pj_module, endpoint=None) -> None:
+    def __init__(self, pj_module, endpoint=None, null_audio: bool = False) -> None:
         self._pj = pj_module
         self._endpoint = endpoint
+        self._null_audio = bool(null_audio)
 
     @property
     def available(self) -> bool:
@@ -221,6 +222,15 @@ class MediaManager:
             return
         if mgr is None:
             return
+        if self._null_audio:
+            try:
+                fn = getattr(mgr, "setNullDev", None)
+                if callable(fn):
+                    fn()
+                    log.info("null_audio=on: включено null-аудиоустройство")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Не удалось включить null-аудиоустройство: %s", exc)
         devices = self.enum_devices(mgr)
         if not devices:
             try:

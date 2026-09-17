@@ -76,9 +76,10 @@ def test_apply_call_state_updates_participant():
     seen = []
     events.subscribe(lambda e, p: seen.append((e, p)))
     mgr = CallManager(reg, events, _Pj())
-    part = reg.register(None, "sip:a", CallState.IDLE)
+    call = object()
+    part = reg.register(call, "sip:a", CallState.IDLE)
 
-    mgr.apply_call_state(object(), lambda _c: _CallInfo(part.id, "CONFIRMED"))
+    mgr.apply_call_state(call, lambda _c: _CallInfo(part.id, "CONFIRMED"))
     assert part.state is CallState.CONFIRMED
     assert ("call.state", {"id": part.id, "state": "CONFIRMED"}) in seen
 

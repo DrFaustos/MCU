@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Dict, List, Optional
 
 from .config import Config, compute_auto_grid
@@ -64,6 +65,9 @@ class SipEngine:
         self._video_preview = None
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
         self._CallClass = None  # подкласс pj.Call
+        # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
+        # libDestroy(), и pjsua2 упадёт с assertion (pjsua_call_set_user_data).
+        self._live_calls: Dict[int, object] = {}
 
         self._screen_sharer = ScreenSharer(
             fps=config.video.get("fps", 15),
@@ -74,7 +78,7 @@ class SipEngine:
 
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
-        self._media = MediaManager(_pj, None)
+        self._media = MediaManager(_pj, None, null_audio=config.null_audio)
         video_cfg = config.video
         self._abr = AdaptiveBitrateController(
             AbrConfig(
@@ -124,6 +128,9 @@ class SipEngine:
                 self._screen_sharer.stop()
             if PJSIP_AVAILABLE and self._endpoint is not None:
                 self._hangup_all()
+                # Дать pjsua2 обработать BYE и снять вызовы до разрушения lib.
+                time.sleep(0.3)
+                self._live_calls.clear()
                 self._endpoint.libDestroy()
         finally:
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
@@ -385,6 +392,7 @@ class SipEngine:
             self.events.emit("call.rejected", remote=remote_uri, reason="ip not allowed")
             return
         participant = self._register_participant(call, remote_uri, state=CallState.INCOMING)
+        self._live_calls[participant.id] = call
         self.events.emit("call.incoming", id=participant.id, remote=remote_uri)
         if self.config.auto_answer:
             log.info("Авто-ответ на вызов от %s", remote_uri)
@@ -437,6 +445,7 @@ class SipEngine:
             )
             call.makeCall(uri, prm)
             participant = self._register_participant(call, uri, state=CallState.CONNECTING)
+            self._live_calls[participant.id] = call
             self.events.emit("call.outgoing", id=participant.id, remote=uri)
             return participant.id
         except Exception as exc:  # noqa: BLE001
@@ -776,6 +785,7 @@ class SipEngine:
     def _drop_participant(self, participant_id: int) -> None:
         """Удаляет участника и связанные с ним видео-окна (без утечек)."""
         self._registry.drop(participant_id)
+        self._live_calls.pop(participant_id, None)
         self.events.emit("call.closed", id=participant_id)
 
     @staticmethod

@@ -97,13 +97,14 @@ class CallManager:
         """Обновляет состояние участника по событию onCallState."""
         try:
             ci = get_info(call)
-            call_id = ci.id
+            pj_call_id = ci.id
             state_text = ci.stateText
         except Exception:  # noqa: BLE001
             return
-        p = self._registry.get(call_id)
+        p = self._registry.find_by_call(call, pj_call_id)
         if p is None:
             return
+        call_id = p.id
         new_state = state_from_text(state_text)
         if new_state is not None:
             p.state = new_state

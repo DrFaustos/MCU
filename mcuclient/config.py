@@ -47,6 +47,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allowed_peers": [],
         "require_encryption": False,
         "auto_answer": True,
+        # Headless/сервер: использовать null-аудиоустройство PJSIP (нет реального звука).
+        "null_audio": False,
         # NAT traversal: STUN-сервер и включение ICE (PJSIP).
         "stun": {"server": "", "enable_ice": True},
         "codecs": {
@@ -138,6 +140,7 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         )
     _check_bool("sip.require_encryption", sip.get("require_encryption"))
     _check_bool("sip.auto_answer", sip.get("auto_answer"))
+    _check_bool("sip.null_audio", sip.get("null_audio"))
     stun = sip.get("stun")
     if not isinstance(stun, dict):
         raise ConfigError("sip.stun должен быть объектом")
@@ -299,6 +302,10 @@ class Config:
     @property
     def require_encryption(self) -> bool:
         return bool(self.raw["sip"].get("require_encryption", False))
+
+    @property
+    def null_audio(self) -> bool:
+        return bool(self.raw["sip"].get("null_audio", False))
 
     @property
     def auto_answer(self) -> bool:
