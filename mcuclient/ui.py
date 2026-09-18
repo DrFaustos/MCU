@@ -798,6 +798,7 @@ if QT_AVAILABLE:
                 pass
 
         def _handle_event(self, event: str, payload: dict) -> None:
+            log.info("GUI-событие: %s | %s", event, payload)
             if not self.engine:
                 log.warning("_handle_event: engine is None, event=%s", event)
                 return
