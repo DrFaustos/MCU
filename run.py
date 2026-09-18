@@ -89,6 +89,20 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001
         log.exception("Не удалось собрать информацию об окружении")
 
+    # === ШАГ 0.5: на Windows Qt нужно загрузить ДО pjsua2 ===
+    # pybind11-биндинг pjsua2, загруженный раньше Qt, конфликтует с Qt
+    # (нативный access violation в цикле событий). Поэтому в GUI-режиме
+    # сначала импортируем PySide6 и создаём QApplication, и только затем
+    # инициализируем pjsua2.
+    _early_app = None
+    if not args.headless:
+        try:
+            from PySide6 import QtWidgets as _QtW
+            _early_app = _QtW.QApplication.instance() or _QtW.QApplication(sys.argv)
+            log.info("PySide6/QApplication созданы заранее (до pjsua2)")
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось создать QApplication заранее")
+
     # === ШАГ 1: тяжёлые импорты (pjsua2, PySide6 и т.п.) ===
     try:
         log.info("Импорт mcuclient.config...")
