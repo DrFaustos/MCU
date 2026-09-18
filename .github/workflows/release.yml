@@ -41,6 +41,13 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python build.py --console
 
+      # .cmd-обёртка: запускает консольную сборку, сохраняет ВЕСЬ вывод
+      # (stdout+stderr, включая нативные сообщения) в out.txt и НЕ закрывает
+      # окно (pause) — иначе при падении консоль мгновенно исчезает.
+      - name: Copy console wrapper
+        shell: cmd
+        run: copy packaging\run-console.cmd dist\run-console.cmd
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -48,6 +55,7 @@ jobs:
           path: |
             dist/MCU-Client.exe
             dist/MCU-Client-console.exe
+            dist/run-console.cmd
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
