@@ -97,3 +97,6 @@ uac_echo_*.log
 !scripts/testbed/lib/**
 __pycache__/
 !scripts/testbed/lib/*.py
+
+# Локальное venv для сборки (PyInstaller + зависимости)
+.build-venv/
