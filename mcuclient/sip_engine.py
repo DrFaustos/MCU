@@ -44,6 +44,23 @@ from .models import (  # noqa: F401
 )
 
 
+def _pj_error_reason(exc: BaseException) -> str:
+    """Извлечь читаемую причину из pjsua2.Error (str() у него пустой)."""
+    try:
+        info = exc.info()  # pjsua2.Error.info() -> ErrorInfo
+        reason = getattr(info, "reason", "")
+        status = getattr(info, "status", None)
+        src = getattr(info, "srcFile", "")
+        line = getattr(info, "srcLine", "")
+        parts = [p for p in (reason, f"status={status}" if status else "",
+                             f"{src}:{line}" if src else "") if p]
+        if parts:
+            return " | ".join(parts)
+    except Exception:  # noqa: BLE001
+        pass
+    return str(exc) or exc.__class__.__name__
+
+
 class SipEngine:
     """SIP-движок: PJSIP-эндпоинт, комната, вызовы и медиа-состояние.
 
@@ -531,8 +548,10 @@ class SipEngine:
             self.events.emit("call.outgoing", id=participant.id, remote=uri)
             return participant.id
         except Exception as exc:  # noqa: BLE001
-            log.exception("Ошибка исходящего вызова")
-            self.events.emit("call.error", reason=str(exc))
+            reason = _pj_error_reason(exc)
+            log.error("Ошибка исходящего вызова %s: %s", uri, reason)
+            log.exception("Трассировка исходящего вызова")
+            self.events.emit("call.error", reason=reason)
             return None
 
     def hangup(self, participant_id: int) -> None:
