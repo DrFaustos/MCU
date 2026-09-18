@@ -32,11 +32,14 @@ jobs:
       - name: Verify pjsua2 (required for SIP)
         run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable
+      # --console собирает ДВА файла: MCU-Client.exe (windowed) и
+      # MCU-Client-console.exe (с консолью) — консольный нужен для
+      # диагностики нативного падения, которое в windowed-сборке не видно.
+      - name: Build executable (windowed + console)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py
+        run: python build.py --console
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -44,6 +47,7 @@ jobs:
           name: MCU-Client-Windows
           path: |
             dist/MCU-Client.exe
+            dist/MCU-Client-console.exe
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:

@@ -26,7 +26,7 @@ import traceback
 # дескрипторы 1/2 невалидны. Нативные библиотеки (pjsua2, Qt, FFmpeg) пишут
 # именно в fd 1/2 из своих потоков — запись в невалидный дескриптор даёт
 # access violation. Перенаправляем И Python-объекты, И сами fd на os.devnull.
-if sys.stdout is None or sys.stderr is None or getattr(sys, "frozen", False):
+if sys.stdout is None or sys.stderr is None:
     _devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
     if sys.stdout is None:
         sys.stdout = _devnull
