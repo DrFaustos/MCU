@@ -17,8 +17,20 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import traceback
+
+# === ВАЖНО (Windows --windowed) ===
+# В GUI-сборке без консоли sys.stdout/sys.stderr могут быть None.
+# Любая запись в них (в т.ч. нативная — pjsua2, Qt) из рабочих потоков
+# приводит к access violation. Подменяем на os.devnull до тяжёлых импортов.
+if sys.stdout is None or sys.stderr is None:
+    _devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stdout is None:
+        sys.stdout = _devnull
+    if sys.stderr is None:
+        sys.stderr = _devnull
 
 
 def build_parser() -> argparse.ArgumentParser:

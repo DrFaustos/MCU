@@ -175,7 +175,16 @@ class SipEngine:
     def _start_pjsip(self) -> None:  # pragma: no cover
         ep = _pj.Endpoint()
         ep_cfg = _pj.EpConfig()
-        ep_cfg.logConfig.level = 3
+        # ВАЖНО (Windows): в сборке --windowed нет консоли, и нативное
+        # логирование pjsua2 (запись в C-stdout из рабочих потоков) приводит
+        # к access violation. Отключаем его полностью — свои логи пишем через
+        # Python logging в файл.
+        try:
+            ep_cfg.logConfig.level = 0
+            if hasattr(ep_cfg.logConfig, "consoleLevel"):
+                ep_cfg.logConfig.consoleLevel = 0
+        except Exception:  # noqa: BLE001
+            pass
         if hasattr(ep_cfg.uaConfig, "userAgent"):
             ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
         if hasattr(ep_cfg.medConfig, "noVad"):
