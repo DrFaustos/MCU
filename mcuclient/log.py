@@ -80,7 +80,7 @@ def _pick_log_path() -> Path:
     return _log_path
 
 
-def _make_file_handler() -> logging.Handler | None:
+def _make_file_handler() -> logging.FileHandler | None:
     try:
         path = _pick_log_path()
         handler = _FlushingFileHandler(path, encoding="utf-8")
@@ -95,7 +95,7 @@ def _make_file_handler() -> logging.Handler | None:
         return None
 
 
-def _enable_faulthandler(handler: logging.Handler | None) -> None:
+def _enable_faulthandler(handler: logging.FileHandler | None) -> None:
     """Писать трассировку при фатальных сигналах в тот же лог-файл.
 
     faulthandler переживает segfault/abort в нативном коде (pjsua, Qt),
@@ -107,11 +107,13 @@ def _enable_faulthandler(handler: logging.Handler | None) -> None:
     if _log_fd is not None:
         return
     try:
-        if handler is not None and getattr(handler, "stream", None) is not None:
-            # Дублируем fd файла handler'а, чтобы faulthandler писал в тот же файл.
-            _log_fd = os.dup(handler.stream.fileno())
-            faulthandler.enable(file=_log_fd, all_threads=True)
-            return
+        if handler is not None:
+            stream = handler.stream
+            if stream is not None:
+                # Дублируем fd файла handler'а, чтобы faulthandler писал в тот же файл.
+                _log_fd = os.dup(stream.fileno())
+                faulthandler.enable(file=_log_fd, all_threads=True)
+                return
     except Exception:  # noqa: BLE001
         pass
     # Запасной путь: собственный дескриптор (или stderr, если файла нет).
