@@ -125,6 +125,14 @@ jobs:
       - name: List release files
         run: ls -la release-files/
 
+      # Если релиз по этому тегу уже существует (напр. тег переставлен),
+      # удаляем его — иначе softprops/action-gh-release падает с
+      # "already_exists: tag_name" на финализации.
+      - name: Delete existing release for tag (if any)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete "$GITHUB_REF_NAME" --yes --cleanup-tag=false || true
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
