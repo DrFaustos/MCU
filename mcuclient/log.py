@@ -12,19 +12,26 @@
 * ``sys.excepthook`` — ловит необработанные Python-исключения;
 * ``threading.excepthook`` — ловит исключения в фоновых потоках;
 * сброс буфера (flush) после каждой записи, чтобы лог не терялся при падении.
+
+ВАЖНО: faulthandler пишет в ТОТ ЖЕ файловый дескриптор, что и основной
+``logging.FileHandler`` (а не открывает второй). Два независимых дескриптора
+на один файл на Windows приводят к конфликту записи из нативных потоков
+(pjsua2/Qt) и сами могут вызывать access violation.
 """
 
 from __future__ import annotations
 
 import faulthandler
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
 
 _CONFIGURED = False
 LOG_FILENAME = "mcu-client.log"
-_fault_log_handle = None  # держим открытым, чтобы faulthandler писал в файл
+_log_fd = None          # dup файлового дескриптора для faulthandler
+_log_path: Path | None = None
 
 
 class _FlushingFileHandler(logging.FileHandler):
@@ -44,7 +51,7 @@ class _FlushingFileHandler(logging.FileHandler):
 def _app_dir() -> Path:
     """Каталог, рядом с которым лежит приложение.
 
-    * PyInstaller (onefile) — папка с .exe (sys.executable);
+    * PyInstaller (onefile/onedir) — папка с .exe (sys.executable);
     * обычный запуск — папка запуска (cwd).
     """
     if getattr(sys, "frozen", False):
@@ -54,6 +61,9 @@ def _app_dir() -> Path:
 
 def _pick_log_path() -> Path:
     """Выбрать путь для лог-файла, начиная с папки приложения."""
+    global _log_path
+    if _log_path is not None:
+        return _log_path
     candidates = [_app_dir()]
     candidates.append(Path.home() / ".mcu-client")
     for base in candidates:
@@ -62,10 +72,12 @@ def _pick_log_path() -> Path:
             probe = base / LOG_FILENAME
             with open(probe, "a", encoding="utf-8"):
                 pass
+            _log_path = probe
             return probe
         except OSError:
             continue
-    return Path(LOG_FILENAME)
+    _log_path = Path(LOG_FILENAME)
+    return _log_path
 
 
 def _make_file_handler() -> logging.Handler | None:
@@ -83,19 +95,30 @@ def _make_file_handler() -> logging.Handler | None:
         return None
 
 
-def _enable_faulthandler() -> None:
-    """Писать трассировку при фатальных сигналах прямо в лог-файл.
+def _enable_faulthandler(handler: logging.Handler | None) -> None:
+    """Писать трассировку при фатальных сигналах в тот же лог-файл.
 
     faulthandler переживает segfault/abort в нативном коде (pjsua, Qt),
-    где обычный Python-обработчик исключений бессилен.
+    где обычный Python-обработчик исключений бессилен. Пишем в уже открытый
+    файловый дескриптор основного handler'а (dup), чтобы не открывать второй
+    дескриптор на тот же файл — иначе на Windows возможен конфликт записи.
     """
-    global _fault_log_handle
-    if _fault_log_handle is not None:
+    global _log_fd
+    if _log_fd is not None:
         return
     try:
+        if handler is not None and getattr(handler, "stream", None) is not None:
+            # Дублируем fd файла handler'а, чтобы faulthandler писал в тот же файл.
+            _log_fd = os.dup(handler.stream.fileno())
+            faulthandler.enable(file=_log_fd, all_threads=True)
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    # Запасной путь: собственный дескриптор (или stderr, если файла нет).
+    try:
         path = _pick_log_path()
-        _fault_log_handle = open(path, "a", encoding="utf-8")  # noqa: SIM115
-        faulthandler.enable(file=_fault_log_handle, all_threads=True)
+        _log_fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        faulthandler.enable(file=_log_fd, all_threads=True)
     except Exception:  # noqa: BLE001
         try:
             faulthandler.enable(all_threads=True)
@@ -148,7 +171,7 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
             root.addHandler(file_handler)
 
         _install_excepthooks()
-        _enable_faulthandler()
+        _enable_faulthandler(file_handler)
         _CONFIGURED = True
 
     return logging.getLogger("mcuclient")
@@ -168,11 +191,13 @@ def log_environment() -> None:
     import platform
 
     log = logging.getLogger("mcuclient.env")
+    log.info("PID: %d", os.getpid())
     log.info("ОС: %s %s (%s)", platform.system(), platform.release(), platform.machine())
     log.info("Python: %s", sys.version.replace("\n", " "))
     log.info("Исполняемый файл: %s", sys.executable)
     log.info("Frozen (PyInstaller): %s", getattr(sys, "frozen", False))
     log.info("Текущая папка: %s", Path.cwd())
+    log.info("Лог-файл: %s", _pick_log_path())
     for mod in ("PySide6", "pjsua2", "numpy", "cv2", "mss", "pyvirtualcam"):
         try:
             m = __import__(mod)

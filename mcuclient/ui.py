@@ -819,7 +819,12 @@ if QT_AVAILABLE:
             try:
                 if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
                     self._refresh_participants_list()
-                    self._rebuild_video_grid()
+                    # ВАЖНО (Windows): _rebuild_video_grid делает takeAt/addWidget
+                    # нативных видео-виджетов PJSIP. Синхронный вызов прямо в
+                    # обработчике события (особенно call.outgoing) приводил к
+                    # access violation в app.exec(). Откладываем перестройку
+                    # до следующей итерации цикла событий Qt.
+                    QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
                     self.statusBar().showMessage(f"{event}: {payload}", 5000)
                 elif event == "call.state":
                     # Смена состояния вызова (CONNECTING/CONFIRMED/DISCONNECTED).
@@ -827,7 +832,10 @@ if QT_AVAILABLE:
                     state = payload.get("state", "")
                     self._refresh_participants_list()
                     if state.upper().startswith("CONFIRMED"):
-                        self._rebuild_video_grid()
+                        # См. комментарий выше: перестройку сетки откладываем,
+                        # чтобы не трогать нативные виджеты во время обработки
+                        # события (access violation на Windows).
+                        QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
                     self.statusBar().showMessage(f"Вызов {pid}: {state}", 5000)
                 elif event == "call.error":
                     # Явная ошибка исходящего вызова (например, неверный URI).
@@ -838,7 +846,7 @@ if QT_AVAILABLE:
                     # Появился/пропал видеопоток — перестроим сетку и подключим окно.
                     self._refresh_participants_list()
                     if payload.get("active"):
-                        self._rebuild_video_grid()
+                        QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
                     QtCore.QTimer.singleShot(50, self._attach_available_video)
                 elif event == "call.rejected":
                     self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)

@@ -279,4 +279,28 @@ def _run_camera_commands(engine, args, log) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Финальный маркер: если процесс убит нативно (access violation / abort),
+    # эта строка НЕ появится в логе — по её отсутствию видно аварийное
+    # завершение. Если завершился штатно — виден код выхода и uptime.
+    import time as _time
+
+    _start = _time.time()
+    _exit_code = 0
+    try:
+        _exit_code = main()
+    except KeyboardInterrupt:
+        _exit_code = 130
+    except SystemExit as _se:  # argparse / явный sys.exit внутри
+        _exit_code = int(_se.code or 0)
+    except BaseException:  # noqa: BLE001 — последний рубеж
+        logging.getLogger("mcuclient.main").critical(
+            "Необработанное исключение на верхнем уровне", exc_info=True
+        )
+        _exit_code = 1
+    finally:
+        logging.getLogger("mcuclient.main").info(
+            "MCU Client: процесс завершается, код=%s, uptime=%.1f c",
+            _exit_code, _time.time() - _start,
+        )
+        logging.shutdown()
+    sys.exit(_exit_code)

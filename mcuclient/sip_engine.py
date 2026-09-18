@@ -25,6 +25,21 @@ CODEC_BASE_PRIORITY = 250
 CODEC_PRIORITY_STEP = 5
 CODEC_MIN_PRIORITY = 1
 
+# Коды аудио-ошибок PJMEDIA, при которых имеет смысл перейти на null-аудио.
+# PJMEDIA_EAUD_SYSERR=420002, PJMEDIA_EAUD_INVOP=420003,
+# PJMEDIA_EAUD_NODEV=420004, PJMEDIA_EAUD_INVMISC=420005.
+PJMEDIA_EAUD_CODES = frozenset({420002, 420003, 420004, 420005})
+# Текстовые маркеры аудио-ошибок (когда числовой код недоступен).
+PJMEDIA_EAUD_MARKERS = (
+    "PJMEDIA_EAUD_SYSERR",
+    "PJMEDIA_EAUD_NODEV",
+    "PJMEDIA_EAUD_INVOP",
+    "PJMEDIA_EAUD_INVMISC",
+    "EAUD_SYSERR",
+    "audio driver",
+    "audio device",
+)
+
 # Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
 # _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости.
 from .pjsip_adapter import (  # noqa: F401
@@ -44,31 +59,106 @@ from .models import (  # noqa: F401
 )
 
 
+def _iter_error_ints(exc: BaseException):
+    """Перебрать целочисленные коды, которые несёт исключение.
+
+    Работает и с pybind11-обёрткой (``info().status``), и со SWIG-обёрткой
+    (``pj::Error *``), где код лежит в ``args`` или в атрибуте ``status``.
+    """
+    seen = set()
+
+    def _one(value):
+        try:
+            code = int(value)
+        except (TypeError, ValueError):
+            return
+        if code not in seen:
+            seen.add(code)
+            yield code
+
+    for attr in ("status", "code", "errno"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            yield from _one(value)
+
+    for arg in getattr(exc, "args", ()) or ():
+        yield from _one(arg)
+
+    info_attr = getattr(exc, "info", None)
+    info = None
+    if info_attr is not None:
+        try:
+            info = info_attr() if callable(info_attr) else info_attr
+        except Exception:  # noqa: BLE001
+            info = None
+    if info is not None:
+        for attr in ("status", "code"):
+            value = getattr(info, attr, None)
+            if value is not None:
+                yield from _one(value)
+
+
+def _is_audio_device_error(exc: BaseException, reason: str = "") -> bool:
+    """Является ли ошибка проблемой аудиоустройства (нужен null-audio).
+
+    Распознаём двумя путями:
+
+    * по числовому коду ``status``/``args`` (надёжно и на SWIG, где текст
+      ошибки недоступен);
+    * по тексту причины (pybind11-сборки, где ``info().reason`` заполнен).
+    """
+    text = (reason or "").lower()
+    if any(marker.lower() in text for marker in PJMEDIA_EAUD_MARKERS):
+        return True
+    if "status=42000" in text or "420002" in text:
+        return True
+    return any(code in PJMEDIA_EAUD_CODES for code in _iter_error_ints(exc))
+
+
 def _pj_error_reason(exc: BaseException) -> str:
-    """Извлечь читаемую причину из pjsua2.Error (str() у него пустой)."""
-    try:
-        if hasattr(exc, "info"):
-            info = exc.info()
-            reason = getattr(info, "reason", "")
-            status = getattr(info, "status", None)
-            src = getattr(info, "srcFile", "")
-            line = getattr(info, "srcLine", "")
-            parts = [p for p in (reason, f"status={status}" if status else "",
-                                 f"{src}:{line}" if src else "") if p]
-            if parts:
-                return " | ".join(parts)
-    except Exception:  # noqa: BLE001
-        pass
-    
-    # Fallback: пробуем извлечь атрибуты исключения
-    try:
-        attrs = ", ".join(f"{k}={v}" for k, v in vars(exc).items() if not k.startswith("_"))
-        if attrs:
-            return f"{exc.__class__.__name__}({attrs})"
-    except Exception:
-        pass
-        
-    return str(exc) or exc.__class__.__name__
+    """Извлечь читаемую причину из pjsua2.Error.
+
+    У pjsua2 бывает два вида биндинга:
+
+    * pybind11 — есть метод ``info()`` с полями ``reason``/``status``;
+    * SWIG (Linux-сборки) — ``str(exc)`` даёт ``Error(this=<Swig Object...>)``,
+      причина как текст недоступна, но числовой код лежит в ``args``/``status``.
+    """
+    parts: List[str] = []
+
+    info_attr = getattr(exc, "info", None)
+    info = None
+    if info_attr is not None:
+        try:
+            info = info_attr() if callable(info_attr) else info_attr
+        except Exception:  # noqa: BLE001
+            info = None
+
+    if info is not None:
+        reason = getattr(info, "reason", "") or ""
+        status = getattr(info, "status", None)
+        src = getattr(info, "srcFile", "") or ""
+        line = getattr(info, "srcLine", "") or ""
+        if reason:
+            parts.append(str(reason))
+        if status:
+            parts.append(f"status={status}")
+        if src:
+            parts.append(f"{src}:{line}")
+
+    if not parts:
+        codes = list(_iter_error_ints(exc))
+        if codes:
+            parts.append("status=" + "/".join(str(c) for c in codes))
+
+    if not parts:
+        text = str(exc).strip()
+        if text and "Swig Object" not in text:
+            parts.append(text)
+        else:
+            parts.append(exc.__class__.__name__)
+
+    return " | ".join(parts) or exc.__class__.__name__
 
 
 class SipEngine:
@@ -570,7 +660,7 @@ class SipEngine:
             except Exception as exc:  # noqa: BLE001
                 reason = _pj_error_reason(exc)
                 # Если ошибка аудиоустройства и мы ещё не пробовали null-аудио, пробуем снова
-                if not use_null_audio and ("EAUD_SYSERR" in reason or "PJMEDIA_EAUD_SYSERR" in reason or "audio driver" in reason.lower() or "status=420002" in reason):
+                if not use_null_audio and _is_audio_device_error(exc, reason):
                     log.warning("Ошибка аудио при вызове, пробуем null-аудио: %s", reason)
                     return _try_make_call(use_null_audio=True)
                 
