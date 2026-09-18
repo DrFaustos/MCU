@@ -47,17 +47,27 @@ from .models import (  # noqa: F401
 def _pj_error_reason(exc: BaseException) -> str:
     """Извлечь читаемую причину из pjsua2.Error (str() у него пустой)."""
     try:
-        info = exc.info()  # pjsua2.Error.info() -> ErrorInfo
-        reason = getattr(info, "reason", "")
-        status = getattr(info, "status", None)
-        src = getattr(info, "srcFile", "")
-        line = getattr(info, "srcLine", "")
-        parts = [p for p in (reason, f"status={status}" if status else "",
-                             f"{src}:{line}" if src else "") if p]
-        if parts:
-            return " | ".join(parts)
+        if hasattr(exc, "info"):
+            info = exc.info()
+            reason = getattr(info, "reason", "")
+            status = getattr(info, "status", None)
+            src = getattr(info, "srcFile", "")
+            line = getattr(info, "srcLine", "")
+            parts = [p for p in (reason, f"status={status}" if status else "",
+                                 f"{src}:{line}" if src else "") if p]
+            if parts:
+                return " | ".join(parts)
     except Exception:  # noqa: BLE001
         pass
+    
+    # Fallback: пробуем извлечь атрибуты исключения
+    try:
+        attrs = ", ".join(f"{k}={v}" for k, v in vars(exc).items() if not k.startswith("_"))
+        if attrs:
+            return f"{exc.__class__.__name__}({attrs})"
+    except Exception:
+        pass
+        
     return str(exc) or exc.__class__.__name__
 
 
@@ -67,8 +77,7 @@ class SipEngine:
     Публичный API: :meth:`start`, :meth:`stop`, :meth:`call`, :meth:`accept`,
     :meth:`hangup`, методы управления медиа/раскладкой/записью. События
     рассылаются через :attr:`events` (см. README, раздел «Программное
-    использование»).
-    """
+    использование»)."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -535,24 +544,42 @@ class SipEngine:
         if not PJSIP_AVAILABLE:
             self.events.emit("call.error", reason="pjsua2 недоступен")
             return None
-        try:  # pragma: no cover
-            call = self._CallClass(self._account)
-            prm = _pj.CallOpParam(True)
-            prm.opt.audioCount = 1
-            prm.opt.videoCount = (
-                1 if (self._video_supported and self.config.video_call_enabled) else 0
-            )
-            call.makeCall(uri, prm)
-            participant = self._register_participant(call, uri, state=CallState.CONNECTING)
-            self._live_calls[participant.id] = call
-            self.events.emit("call.outgoing", id=participant.id, remote=uri)
-            return participant.id
-        except Exception as exc:  # noqa: BLE001
-            reason = _pj_error_reason(exc)
-            log.error("Ошибка исходящего вызова %s: %s", uri, reason)
-            log.exception("Трассировка исходящего вызова")
-            self.events.emit("call.error", reason=reason)
-            return None
+        
+        def _try_make_call(use_null_audio: bool = False) -> Optional[int]:
+            if use_null_audio and self._media.available:
+                try:
+                    mgr = self._media.aud_mgr()
+                    if mgr and hasattr(mgr, "setNullDev"):
+                        mgr.setNullDev()
+                        log.info("makeCall: переключено на null-аудио из-за ошибки устройства")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Не удалось включить null-аудио: %s", exc)
+
+            try:  # pragma: no cover
+                call = self._CallClass(self._account)
+                prm = _pj.CallOpParam(True)
+                prm.opt.audioCount = 1
+                prm.opt.videoCount = (
+                    1 if (self._video_supported and self.config.video_call_enabled) else 0
+                )
+                call.makeCall(uri, prm)
+                participant = self._register_participant(call, uri, state=CallState.CONNECTING)
+                self._live_calls[participant.id] = call
+                self.events.emit("call.outgoing", id=participant.id, remote=uri)
+                return participant.id
+            except Exception as exc:  # noqa: BLE001
+                reason = _pj_error_reason(exc)
+                # Если ошибка аудиоустройства и мы ещё не пробовали null-аудио, пробуем снова
+                if not use_null_audio and ("EAUD_SYSERR" in reason or "PJMEDIA_EAUD_SYSERR" in reason or "audio driver" in reason.lower() or "status=420002" in reason):
+                    log.warning("Ошибка аудио при вызове, пробуем null-аудио: %s", reason)
+                    return _try_make_call(use_null_audio=True)
+                
+                log.error("Ошибка исходящего вызова %s: %s", uri, reason)
+                log.exception("Трассировка исходящего вызова")
+                self.events.emit("call.error", reason=reason)
+                return None
+
+        return _try_make_call(use_null_audio=False)
 
     def hangup(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
