@@ -750,11 +750,18 @@ if QT_AVAILABLE:
         def _on_call(self) -> None:
             uri = self.uri_edit.text().strip()
             if not uri:
+                self.statusBar().showMessage("Введите SIP/H.323 URI или IP-адрес", 5000)
                 return
+            log.info("Исходящий вызов: %s", uri)
             if uri.lower().startswith("h323:"):
                 self.h323.call(uri.split(":", 1)[1])
                 return
-            self.engine.call(uri)
+            pid = self.engine.call(uri)
+            if pid is None:
+                self.statusBar().showMessage("Не удалось начать вызов (см. лог)", 8000)
+            else:
+                self.statusBar().showMessage(f"Вызов {pid} инициирован -> {uri}", 5000)
+                self._refresh_participants_list()
 
         def _on_accept(self) -> None:
             pid = self._current_id()
@@ -800,6 +807,19 @@ if QT_AVAILABLE:
                     self._refresh_participants_list()
                     self._rebuild_video_grid()
                     self.statusBar().showMessage(f"{event}: {payload}", 5000)
+                elif event == "call.state":
+                    # Смена состояния вызова (CONNECTING/CONFIRMED/DISCONNECTED).
+                    pid = payload.get("id")
+                    state = payload.get("state", "")
+                    self._refresh_participants_list()
+                    if state.upper().startswith("CONFIRMED"):
+                        self._rebuild_video_grid()
+                    self.statusBar().showMessage(f"Вызов {pid}: {state}", 5000)
+                elif event == "call.error":
+                    # Явная ошибка исходящего вызова (например, неверный URI).
+                    self.statusBar().showMessage(
+                        f"Ошибка вызова: {payload.get('reason', 'неизвестно')}", 10000
+                    )
                 elif event == "call.video":
                     # Появился/пропал видеопоток — перестроим сетку и подключим окно.
                     self._refresh_participants_list()
