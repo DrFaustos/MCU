@@ -306,6 +306,11 @@ if QT_AVAILABLE:
             # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
             # время обработки событий вызова приводил к access violation на Windows).
             self._tile_pool: list = []
+            # Сигнатура последней отрисованной сетки: (ids, rows, cols).
+            # Нужна, чтобы не перестраивать раскладку (takeAt/addWidget), когда
+            # состав не изменился: на Windows повторный addWidget уже вставленного
+            # виджета вызывает access violation.
+            self._grid_signature = None
             self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
             self.resize(1280, 800)
             self._build_ui()
@@ -516,11 +521,6 @@ if QT_AVAILABLE:
             access violation. Вместо этого тайлы берём из пула и переиспользуем.
             """
             try:
-                # Убираем все элементы из раскладки, но оставляем виджеты живыми.
-                while self.video_grid_layout.count():
-                    self.video_grid_layout.takeAt(0)
-                self._tiles.clear()
-
                 rows, cols = 1, 1
                 visible = []
                 if self.engine and getattr(self.engine, "room", None) is not None:
@@ -535,6 +535,19 @@ if QT_AVAILABLE:
 
                 rows = max(1, int(rows))
                 cols = max(1, int(cols))
+
+                # Сигнатура: если состав и сетка не изменились — не трогаем
+                # layout вообще (иначе повторный addWidget роняет Qt на Windows).
+                signature = (tuple(getattr(p, "id", None) for p in visible), rows, cols)
+                if signature == self._grid_signature and self.video_grid_layout.count() > 0:
+                    QtCore.QTimer.singleShot(50, self._attach_available_video)
+                    return
+                self._grid_signature = signature
+
+                # Убираем все элементы из раскладки, но оставляем виджеты живыми.
+                while self.video_grid_layout.count():
+                    self.video_grid_layout.takeAt(0)
+                self._tiles.clear()
 
                 # Формируем список ячеек: участники + пустые.
                 cells = []
