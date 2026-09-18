@@ -22,15 +22,22 @@ import sys
 import traceback
 
 # === ВАЖНО (Windows --windowed) ===
-# В GUI-сборке без консоли sys.stdout/sys.stderr могут быть None.
-# Любая запись в них (в т.ч. нативная — pjsua2, Qt) из рабочих потоков
-# приводит к access violation. Подменяем на os.devnull до тяжёлых импортов.
-if sys.stdout is None or sys.stderr is None:
+# В GUI-сборке без консоли sys.stdout/sys.stderr могут быть None, а C-уровневые
+# дескрипторы 1/2 невалидны. Нативные библиотеки (pjsua2, Qt, FFmpeg) пишут
+# именно в fd 1/2 из своих потоков — запись в невалидный дескриптор даёт
+# access violation. Перенаправляем И Python-объекты, И сами fd на os.devnull.
+if sys.stdout is None or sys.stderr is None or getattr(sys, "frozen", False):
     _devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
     if sys.stdout is None:
         sys.stdout = _devnull
     if sys.stderr is None:
         sys.stderr = _devnull
+    try:
+        _null_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(_null_fd, 1)
+        os.dup2(_null_fd, 2)
+    except Exception:  # noqa: BLE001 — не критично, если не удалось
+        pass
 
 
 def build_parser() -> argparse.ArgumentParser:

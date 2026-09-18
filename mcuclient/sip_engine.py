@@ -447,28 +447,14 @@ class SipEngine:
                 return "127.0.0.1"
 
     def _on_incoming(self, prm) -> None:  # pragma: no cover
-        # ВАЖНО (Windows): не трогаем pjsua2-объекты (Call, getInfo) прямо в
-        # колбэке onIncomingCall — на Windows-сборке pjsua2 это приводит к
-        # нативному access violation ещё до записи в лог. Из колбэка только
-        # запоминаем callId и делегируем всю работу в отдельный поток,
-        # зарегистрированный в pjlib.
+        # onIncomingCall вызывается в потоке pjsua2. getInfo()/создание Call
+        # нужно делать СИНХРОННО здесь — это канонический паттерн pjsua2
+        # (делегирование в другой поток приводило к pjsua2.Error, т.к. к
+        # моменту запуска потока состояние вызова уже менялось).
+        # Нельзя только вызывать answer()/Qt напрямую — авто-ответ уходит
+        # в отдельный поток ниже.
         try:
-            call_id = int(prm.callId)
-        except Exception:  # noqa: BLE001
-            log.exception("onIncomingCall: не удалось получить callId")
-            return
-        threading.Thread(
-            target=self._process_incoming, args=(call_id,), daemon=True
-        ).start()
-
-    def _process_incoming(self, call_id: int) -> None:  # pragma: no cover
-        try:
-            if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
-                try:
-                    self._endpoint.libRegisterThread("incoming")
-                except Exception:  # noqa: BLE001
-                    pass
-            call = self._CallClass(self._account, call_id)
+            call = self._CallClass(self._account, prm.callId)
             info = call.getInfo()
             remote_uri = info.remoteUri
             remote_ip = self._extract_ip(remote_uri)
@@ -488,11 +474,18 @@ class SipEngine:
                     except Exception:  # noqa: BLE001
                         log.exception("Не удалось запланировать авто-ответ")
                 else:
-                    time.sleep(0.05)
-                    try:
-                        self.accept(participant.id)
-                    except Exception:  # noqa: BLE001
-                        log.exception("Авто-ответ не удался")
+                    def _deferred_accept(pid: int = participant.id) -> None:
+                        time.sleep(0.05)
+                        try:
+                            if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
+                                self._endpoint.libRegisterThread("auto-answer")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            self.accept(pid)
+                        except Exception:  # noqa: BLE001
+                            log.exception("Авто-ответ не удался")
+                    threading.Thread(target=_deferred_accept, daemon=True).start()
         except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
             log.exception("Ошибка обработки входящего вызова")
 
