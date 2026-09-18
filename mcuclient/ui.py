@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import signal
+import queue
 import traceback
 from typing import Dict, Optional
 
@@ -290,8 +291,6 @@ if QT_AVAILABLE:
             painter.end()
 
     class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
-        _answer_requested = QtCore.Signal(int)
-
         QUALITY_PRESETS = {
             "360p": (640, 360, 30),
             "720p": (1280, 720, 30),
@@ -310,11 +309,20 @@ if QT_AVAILABLE:
             self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
             self.resize(1280, 800)
             self._build_ui()
+            # Потокобезопасная очередь событий: колбэки pjsua2 приходят из
+            # чужих потоков, и любые Qt-вызовы оттуда (invokeMethod, emit
+            # signal) на Windows приводят к access violation. Поэтому события
+            # только складываются в очередь, а обрабатываются в главном потоке
+            # Qt по таймеру.
+            self._event_queue: "queue.Queue" = queue.Queue()
             self.engine.events.subscribe(self._on_event)
 
-            self._answer_requested.connect(self._on_answer_requested)
-            # register_main_thread() уже вызван в run.py до создания GUI.
             self.engine.set_answer_dispatch(self._request_answer)
+
+            self._event_poll = QtCore.QTimer(self)
+            self._event_poll.setInterval(50)
+            self._event_poll.timeout.connect(self._drain_events)
+            self._event_poll.start()
 
             # Периодически пытаемся подключить появившиеся видео-окна PJSIP
             # к тайлам: окно готово не мгновенно после onCallMediaState.
@@ -679,14 +687,26 @@ if QT_AVAILABLE:
                 self.device_status.setText("Превью камеры остановлено")
 
         def _request_answer(self, participant_id: int) -> None:
-            self._answer_requested.emit(int(participant_id))
+            # Вызывается из потока pjsua2 — только в очередь, без Qt.
+            self._event_queue.put(("__answer__", int(participant_id)))
 
-        @QtCore.Slot(int)
-        def _on_answer_requested(self, participant_id: int) -> None:
-            try:
-                self.engine.accept(participant_id)
-            except Exception:  # noqa: BLE001
-                log.exception("Авто-ответ не удался")
+        def _drain_events(self) -> None:
+            """Обработать накопленные события в главном потоке Qt."""
+            while True:
+                try:
+                    event, payload = self._event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if event == "__answer__":
+                    try:
+                        self.engine.accept(int(payload))
+                    except Exception:  # noqa: BLE001
+                        log.exception("Авто-ответ не удался")
+                    continue
+                try:
+                    self._handle_event(event, payload)
+                except Exception:  # noqa: BLE001
+                    log.exception("Ошибка обработки события %s", event)
 
         def _on_mic_monitor(self) -> None:
             dev_id = self.mic_combo.currentData()
@@ -764,26 +784,13 @@ if QT_AVAILABLE:
             self.hangup_btn.setEnabled(bool(p and p.state is not CallState.DISCONNECTED))
 
         def _on_event(self, event: str, payload: dict) -> None:
-            import json
+            # Вызывается из потоков pjsua2 — только в очередь, без Qt.
             try:
-                payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+                self._event_queue.put((event, dict(payload)))
             except Exception:  # noqa: BLE001
-                payload_json = "{}"
-            QtCore.QMetaObject.invokeMethod(
-                self, "_handle_event",
-                QtCore.Qt.ConnectionType.QueuedConnection,
-                QtCore.Q_ARG(str, event),
-                QtCore.Q_ARG(str, payload_json),
-            )
+                pass
 
-        @QtCore.Slot(str, str)
-        def _handle_event(self, event: str, payload_json: str) -> None:
-            import json
-            try:
-                payload = json.loads(payload_json) if payload_json else {}
-            except Exception:  # noqa: BLE001
-                payload = {}
-            
+        def _handle_event(self, event: str, payload: dict) -> None:
             if not self.engine:
                 log.warning("_handle_event: engine is None, event=%s", event)
                 return
@@ -849,6 +856,10 @@ if QT_AVAILABLE:
         def closeEvent(self, event) -> None:  # noqa: N802
             try:
                 self._video_poll.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._event_poll.stop()
             except Exception:  # noqa: BLE001
                 pass
             self.engine.stop()
