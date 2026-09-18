@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--headless", action="store_true", help="без GUI")
+    p.add_argument("--call", help="headless: позвонить на SIP URI/IP и выйти (тест исходящего вызова)")
+    p.add_argument("--call-wait", type=int, default=30,
+                   help="headless: сколько секунд ждать вызова (по умолчанию 30)")
 
     # --- камера / видео ---
     p.add_argument("--list-video-devices", action="store_true",
@@ -180,6 +183,25 @@ def main(argv: list[str] | None = None) -> int:
             log.exception("Ошибка запуска H.323")
 
     if args.headless:
+        if args.call:
+            import time
+            log.info("Headless-исходящий вызов: %s", args.call)
+            pid = engine.call(args.call)
+            log.info("Вызов инициирован: pid=%s", pid)
+            deadline = time.time() + max(1, args.call_wait)
+            while time.time() < deadline:
+                time.sleep(0.5)
+                p = engine.room.participants.get(pid) if (pid and engine.room) else None
+                if p is not None:
+                    log.info("Состояние вызова %s: %s", pid, p.state)
+                    if getattr(p.state, "value", "") == "disconnected":
+                        break
+            try:
+                h323.stop()
+                engine.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            return 0
         log.info("Headless-режим. Нажмите Ctrl+C для выхода.")
         try:
             import time
