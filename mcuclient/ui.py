@@ -311,6 +311,10 @@ if QT_AVAILABLE:
             # состав не изменился: на Windows повторный addWidget уже вставленного
             # виджета вызывает access violation.
             self._grid_signature = None
+            # Флаг: перестройка грида уже запланирована (дебаунс). Не даём
+            # событиям вызова запланировать её многократно за одну итерацию —
+            # повторные takeAt/addWidget на Windows роняют Qt.
+            self._grid_rebuild_pending = False
             self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
             self.resize(1280, 800)
             self._build_ui()
@@ -513,6 +517,24 @@ if QT_AVAILABLE:
                 tile.hangup_clicked.connect(self._on_tile_hangup)
                 self._tile_pool.append(tile)
 
+        def _schedule_grid_rebuild(self, delay_ms: int = 50) -> None:
+            """Запланировать перестройку грида один раз (дебаунс).
+
+            Критично для Windows: перестройка (takeAt/addWidget) должна идти
+            ОТДЕЛЬНОЙ итерацией цикла событий Qt, а не в хвосте обработчика
+            call.outgoing. Ненулевая задержка гарантирует отдельный проход
+            цикла. Повторные запросы схлопываются в один.
+            """
+            if self._grid_rebuild_pending:
+                return
+            self._grid_rebuild_pending = True
+
+            def _run() -> None:
+                self._grid_rebuild_pending = False
+                self._rebuild_video_grid()
+
+            QtCore.QTimer.singleShot(int(delay_ms), _run)
+
         def _rebuild_video_grid(self) -> None:
             """Перестроить сетку видео, переиспользуя уже созданные тайлы.
 
@@ -521,6 +543,7 @@ if QT_AVAILABLE:
             access violation. Вместо этого тайлы берём из пула и переиспользуем.
             """
             try:
+                log.info("_rebuild_video_grid: старт (video_supported=%s)", getattr(self.engine, "_video_supported", False))
                 rows, cols = 1, 1
                 visible = []
                 if self.engine and getattr(self.engine, "room", None) is not None:
@@ -611,7 +634,7 @@ if QT_AVAILABLE:
             layout_key = self.layout_combo.itemData(index)
             if layout_key:
                 self.engine.set_layout(layout_key)
-                self._rebuild_video_grid()
+                self._schedule_grid_rebuild()
 
         def _on_tile_mute_audio(self, pid: int, muted: bool) -> None:
             self.engine.mute_participant(pid, muted)
@@ -824,7 +847,7 @@ if QT_AVAILABLE:
                     # обработчике события (особенно call.outgoing) приводил к
                     # access violation в app.exec(). Откладываем перестройку
                     # до следующей итерации цикла событий Qt.
-                    QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
+                    self._schedule_grid_rebuild()
                     self.statusBar().showMessage(f"{event}: {payload}", 5000)
                 elif event == "call.state":
                     # Смена состояния вызова (CONNECTING/CONFIRMED/DISCONNECTED).
@@ -835,7 +858,7 @@ if QT_AVAILABLE:
                         # См. комментарий выше: перестройку сетки откладываем,
                         # чтобы не трогать нативные виджеты во время обработки
                         # события (access violation на Windows).
-                        QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
+                        self._schedule_grid_rebuild()
                     self.statusBar().showMessage(f"Вызов {pid}: {state}", 5000)
                 elif event == "call.error":
                     # Явная ошибка исходящего вызова (например, неверный URI).
@@ -846,7 +869,7 @@ if QT_AVAILABLE:
                     # Появился/пропал видеопоток — перестроим сетку и подключим окно.
                     self._refresh_participants_list()
                     if payload.get("active"):
-                        QtCore.QTimer.singleShot(0, self._rebuild_video_grid)
+                        self._schedule_grid_rebuild()
                     QtCore.QTimer.singleShot(50, self._attach_available_video)
                 elif event == "call.rejected":
                     self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
