@@ -24,13 +24,13 @@ import queue
 import traceback
 from typing import Dict, Optional
 
-# === КРИТИЧЕСКИ ВАЖНО: переменные Qt должны быть установлены ДО импорта PySide6 ===
+# === ВАЖНО ===
+# Выбор QT_QPA_PLATFORM (Wayland -> XWayland/xcb) делает run.py ДО создания
+# QApplication через mcuclient.qt_platform. Здесь мы только дополняем
+# переменные окружения для собранного PyInstaller-бинарника (пути к плагинам).
 if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
-    os.environ['QT_QPA_PLATFORM'] = 'xcb'
-    os.environ['QT_QPA_PLATFORMTHEME'] = ''
-    os.environ['QT_FORCE_STDERR_LOGGING'] = '1'
-    os.environ['QT_LOGGING_RULES'] = 'qt.*=true'
-    os.environ['QT_DEBUG_PLUGINS'] = '0'
+    os.environ.setdefault('QT_FORCE_STDERR_LOGGING', '1')
+    os.environ.setdefault('QT_DEBUG_PLUGINS', '0')
     if hasattr(sys, '_MEIPASS'):
         plugin_path = os.path.join(sys._MEIPASS, 'PySide6', 'Qt', 'plugins')
         if os.path.isdir(plugin_path):

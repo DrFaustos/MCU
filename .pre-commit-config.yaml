@@ -1,0 +1,21 @@
+# Pre-commit: быстрые проверки ДО коммита. Ставится: pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        args: [--fix]
+        types_or: [python]
+      - id: ruff-format
+        name: ruff (format)
+        types_or: [python]
+
+  - repo: local
+    hooks:
+      - id: mcu-tests
+        name: MCU unit tests (tests/_runner.py)
+        entry: python3 tests/_runner.py
+        language: system
+        pass_filenames: false
+        always_run: true

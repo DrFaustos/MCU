@@ -5,6 +5,7 @@
     python run.py --listen 0.0.0.0:5060 --display-name "MCU Room"
     python run.py --config config.json --h323 --h323-port 1720
     python run.py --headless          # без GUI (серверный режим)
+    python run.py --doctor            # диагностика окружения
     python run.py --list-video-devices
     python run.py --test-camera 0 --headless   # тест камеры до звонка
     python run.py --no-camera --no-mic         # старт с выключенными устройствами
@@ -52,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--headless", action="store_true", help="без GUI")
+    p.add_argument("--doctor", action="store_true",
+                   help="диагностика окружения (pjsua2, порт, устройства, графика) и выход")
     p.add_argument("--call", help="headless: позвонить на SIP URI/IP и выйти (тест исходящего вызова)")
     p.add_argument("--call-wait", type=int, default=30,
                    help="headless: сколько секунд ждать вызова (по умолчанию 30)")
@@ -65,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="выбрать камеру по ID для звонка")
     p.add_argument("--no-camera", action="store_true", help="старт с выключенной камерой")
     p.add_argument("--no-mic", action="store_true", help="старт с выключенным микрофоном")
+    p.add_argument("--null-audio", action="store_true",
+                   help="использовать null-аудиоустройство PJSIP (headless/CI)")
+    p.add_argument("--auto-answer", dest="auto_answer", action="store_true", default=None,
+                   help="автоматически принимать входящие вызовы")
+    p.add_argument("--no-auto-answer", dest="auto_answer", action="store_false",
+                   help="не принимать входящие автоматически")
     p.add_argument("--preview-seconds", type=int, default=5,
                    help="длительность теста камеры, сек (по умолчанию 5)")
 
@@ -89,6 +98,40 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001
         log.exception("Не удалось собрать информацию об окружении")
 
+    # === ШАГ 0.1: выбор Qt platform plugin ДО создания QApplication ===
+    # На Wayland pjsua2 не может рендерить видео (нужен XID/HWND), поэтому
+    # уходим на XWayland (xcb). Переменную нужно выставить до QApplication.
+    if not args.headless:
+        from mcuclient import qt_platform
+        report = qt_platform.choose_qt_platform()
+        log.info(
+            "Графика: сессия=%s, QT_QPA_PLATFORM=%s (режим %s)",
+            report["session"], report["platform"] or "(по умолчанию Qt)", report["mode"],
+        )
+        if report.get("warning"):
+            log.warning("%s", report["warning"])
+
+    # === ШАГ 0.2: команда --doctor (не требует GUI) ===
+    if args.doctor:
+        try:
+            from mcuclient.config import load_config
+            from mcuclient.doctor import run_doctor
+
+            config = None
+            try:
+                config = load_config(args.config)
+                if args.listen:
+                    from mcuclient.config import parse_listen
+                    host, port = parse_listen(args.listen)
+                    config.raw["sip"]["listen"] = host
+                    config.raw["sip"]["port"] = port
+            except Exception:  # noqa: BLE001
+                log.exception("Конфигурация не загрузилась, проверяю значения по умолчанию")
+            return run_doctor(config)
+        except Exception:  # noqa: BLE001
+            log.critical("Диагностика не удалась:", exc_info=True)
+            return 3
+
     # === ШАГ 0.5: на Windows Qt нужно загрузить ДО pjsua2 ===
     # pybind11-биндинг pjsua2, загруженный раньше Qt, конфликтует с Qt
     # (нативный access violation в цикле событий). Поэтому в GUI-режиме
@@ -112,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Импорт mcuclient.sip_engine (включает pjsua2)...")
         from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine
         log.info("Импорт завершён. PJSIP_AVAILABLE=%s", PJSIP_AVAILABLE)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.critical("КРИТИЧЕСКАЯ ОШИБКА на этапе импорта:", exc_info=True)
         log.critical("Трассировка:\n%s", traceback.format_exc())
         return 3
@@ -132,6 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["room"]["name"] = args.display_name
     if args.transport:
         config.raw["sip"]["transport"] = args.transport
+    if args.null_audio:
+        config.raw["sip"]["null_audio"] = True
+    if args.auto_answer is not None:
+        config.raw["sip"]["auto_answer"] = bool(args.auto_answer)
     if args.h323:
         config.raw["h323"]["enabled"] = True
     if args.h323_port:
@@ -278,10 +325,17 @@ def _run_camera_commands(engine, args, log) -> int:
     return -1
 
 
-if __name__ == "__main__":
-    # Финальный маркер: если процесс убит нативно (access violation / abort),
-    # эта строка НЕ появится в логе — по её отсутствию видно аварийное
-    # завершение. Если завершился штатно — виден код выхода и uptime.
+def _run_cli() -> int:
+    """Обвязка вокруг main() с финальным маркером в логе.
+
+    ВАЖНО: не вызываем ``sys.exit()`` после ``logging.shutdown()``. Раньше
+    здесь стоял ``sys.exit(_exit_code)`` — на Linux это приводило к нативному
+    ``Fatal Python error: Aborted`` уже ПОСЛЕ штатной остановки движка:
+    интерпретатор разрушал pjsua2/Qt/FFmpeg, и одна из нативных библиотек
+    делала abort. Возвращаем код из ``_run_cli`` и завершаем процесс через
+    ``raise SystemExit(code)`` в ``__main__`` — до разрушения нативных
+    модулей, в предсказуемой точке.
+    """
     import time as _time
 
     _start = _time.time()
@@ -297,10 +351,23 @@ if __name__ == "__main__":
             "Необработанное исключение на верхнем уровне", exc_info=True
         )
         _exit_code = 1
-    finally:
-        logging.getLogger("mcuclient.main").info(
-            "MCU Client: процесс завершается, код=%s, uptime=%.1f c",
-            _exit_code, _time.time() - _start,
-        )
+    logging.getLogger("mcuclient.main").info(
+        "MCU Client: процесс завершается, код=%s, uptime=%.1f c",
+        _exit_code, _time.time() - _start,
+    )
+    return _exit_code
+
+
+if __name__ == "__main__":
+    # Логирование уже настроено внутри main(); здесь только аккуратный выход.
+    _code = _run_cli()
+    # flush + shutdown ПОСЛЕ возврата из main, но ДО выхода из интерпретатора.
+    try:
         logging.shutdown()
-    sys.exit(_exit_code)
+    except Exception:  # noqa: BLE001
+        pass
+    # os._exit завершает процесс без разрушения нативных модулей (pjsua2/Qt),
+    # которое и давало Fatal Python error: Aborted на Linux.
+    sys.stdout.flush() if sys.stdout is not None else None
+    sys.stderr.flush() if sys.stderr is not None else None
+    os._exit(_code)

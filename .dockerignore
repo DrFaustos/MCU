@@ -1,0 +1,16 @@
+# Контекст сборки образов mcu-dev: исключаем всё тяжёлое и локальное.
+.build-venv/
+build/
+dist/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+recordings/
+*.log
+*.AppImage
+.gh_token
+.git/
+.github/
+config.json
+packaging/mcu-client.ico
