@@ -69,8 +69,7 @@ XWayland (`QT_QPA_PLATFORM=xcb`). Это делается автоматичес
 
 ## 7. Pre-commit
 
-`.pre-commit-config.yaml` запускает ruff (lint+format) и быстрые тесты на
-изменённых файлах:
+`.pre-commit-config.yaml` запускает ruff (lint+format) и быстрые тесты:
 
  
 
@@ -82,8 +81,8 @@ XWayland (`QT_QPA_PLATFORM=xcb`). Это делается автоматичес
 | `--headless`          | без GUI                                      |
 | `--call URI`          | headless: позвонить и выйти                  |
 | `--call-wait N`       | сколько секунд ждать вызова                  |
-| `--null-audio`        | null-аудиоустройство PJSIP (без реального звука) |
-| `--auto-answer`       | автоматически принимать входящие             |
+| `--null-audio`        | null-аудиоустройство PJSIP (нет звука)       |
+| `--auto-answer` / `--no-auto-answer` | авто-ответ на входящие        |
 | `--list-video-devices`| список камер                                 |
 | `--test-camera ID`    | превью камеры N секунд                       |
-| `--no-camera`/`--no-mic` | старт с выключенными устройствами         |
+| `--no-camera/--no-mic`| старт с выключенными устройствами            |
