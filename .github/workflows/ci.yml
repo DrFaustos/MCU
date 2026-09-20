@@ -79,5 +79,14 @@ jobs:
 
       - name: Python syntax check (entrypoints + new modules)
         run: |
-          python -m py_compile run.py mcuclient/qt_platform.py mcuclient/doctor.py
+          python -m py_compile run.py mcuclient/qt_platform.py mcuclient/doctor.py \
+              mcuclient/rtcp_metrics.py \
+              scripts/testbed/two_instance_video_call.py
+          echo "OK"
+
+      - name: Testbed configs consistency (H.323 route, video stand)
+        run: |
+          test -f scripts/testbed/run_two_instance_video_test.sh || { echo "нет видео-стенда"; exit 1; }
+          test -f scripts/testbed/two_instance_video_call.py || { echo "нет видео-раннера"; exit 1; }
+          grep -q "exten => 700" scripts/testbed/asterisk/extensions.conf || { echo "нет маршрута 700 (H.323->SIP)"; exit 1; }
           echo "OK"
