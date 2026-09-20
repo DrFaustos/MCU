@@ -195,6 +195,7 @@ class SipEngine:
         self._running = False
         self._video_supported = False
         self._video_preview = None
+        self._capture_bindings: list = []
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
         self._CallClass = None  # подкласс pj.Call
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
@@ -285,6 +286,7 @@ class SipEngine:
                 _CALL_KEEPALIVE.extend(self._live_calls.values())
                 self._live_calls.clear()
         finally:
+            self._unbind_capture()
             self._stop_rtcp_poller()
             self._stop_device_watcher()
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
@@ -378,6 +380,13 @@ class SipEngine:
         transport = self.config.sip_transport
         cfg = _pj.TransportConfig()
         cfg.port = self.config.sip_port
+        # Привязка к конкретному адресу из sip.listen. Без этого pjsua2
+        # биндится на 0.0.0.0 и игнорирует заданный интерфейс (в закрытом
+        # контуре это нежелательно, а в тестах мешает изоляции инстансов).
+        listen = (self.config.sip_listen or "").strip()
+        if listen and listen not in ("0.0.0.0", "::", "*"):
+            if hasattr(cfg, "boundAddress"):
+                cfg.boundAddress = listen
         ttype = self._transport_type(transport)
         if ttype is None:
             raise RuntimeError(f"Неизвестный тип транспорта: {transport}")
@@ -471,7 +480,7 @@ class SipEngine:
                     super().__init__(account)
 
             def onCallMediaState(self, prm) -> None:  # noqa: N802
-                engine._on_call_media_state(prm)
+                engine._on_call_media_state(self, prm)
 
             def onCallState(self, prm) -> None:  # noqa: N802
                 engine._on_call_state(self, prm)
@@ -499,7 +508,16 @@ class SipEngine:
             try:
                 vcfg.autoTransmitOutgoing = bool(self.config.video_call_enabled)
                 vcfg.autoShowIncoming = True
-                log.info("Видео-аккаунт: autoTransmit=%s", vcfg.autoTransmitOutgoing)
+                # Выбранное устройство захвата для ВСЕХ звонков аккаунта.
+                # Это правильная точка выбора источника: PJSIP иначе открывает
+                # дефолтный dev 0 (реальную камеру) ещё до vidSetStream.
+                if hasattr(vcfg, "defaultCaptureDevice"):
+                    vcfg.defaultCaptureDevice = self._selected_capture_device()
+                log.info(
+                    "Видео-аккаунт: autoTransmit=%s, captureDev=%s",
+                    vcfg.autoTransmitOutgoing,
+                    getattr(vcfg, "defaultCaptureDevice", "?"),
+                )
             except Exception as exc:  # noqa: BLE001
                 log.debug("videoConfig недоступен: %s", exc)
         media_cfg = getattr(acc_cfg, "mediaConfig", None)
@@ -508,6 +526,7 @@ class SipEngine:
                 media_cfg.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
             else:
                 media_cfg.srtpUse = _pj.PJMEDIA_SRTP_DISABLED
+        self._acc_cfg = acc_cfg
         self._account = _Account()
         self._account.create(acc_cfg)
 
@@ -517,16 +536,45 @@ class SipEngine:
         except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
             log.exception("Ошибка обработки состояния вызова")
 
-    def _on_call_media_state(self, prm) -> None:  # pragma: no cover
+    def _on_call_media_state(self, call, prm) -> None:  # pragma: no cover
+        """Обработка onCallMediaState.
+
+        В pjsua2 у OnCallMediaStateParam НЕТ поля callInfo — информация о
+        медиа берётся у самого вызова через call.getInfo(). Раньше здесь
+        читалось prm.callInfo, из-за чего колбэк всегда падал и видео-поток
+        НИКОГДА не детектился (тайлы пустые, call.video не приходил).
+        """
         # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
         # нативному access violation (Python-исключение его не ловит).
         if not self._video_supported:
             return
         try:
-            ci = prm.callInfo
-        except Exception:  # noqa: BLE001
+            ci = call.getInfo()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("_on_call_media_state: getInfo не удался: %s", exc)
             return
+        try:
+            self._calls.apply_media_state(ci)
+        except Exception:  # noqa: BLE001
+            log.debug("apply_media_state: ошибка", exc_info=True)
+        # Как только у вызова поднялся видеопоток — подключаем выбранную
+        # камеру к его кодирующему порту.
+        dev = self.media_state.camera_id
+        if dev is not None:
+            try:
+                self._bind_capture_to_calls(int(dev))
+            except Exception:  # noqa: BLE001
+                log.debug("bind capture on media state failed", exc_info=True)
         self._calls.apply_media_state(ci)
+        # Как только у вызова поднялся видеопоток — подключаем выбранную
+        # камеру к его кодирующему порту (иначе PJSIP берёт устройство по
+        # умолчанию, dev 0, и Colorbar/SDL не используются).
+        dev = self.media_state.camera_id
+        if dev is not None:
+            try:
+                self._bind_capture_to_calls(int(dev))
+            except Exception:  # noqa: BLE001
+                log.debug("bind capture on media state failed", exc_info=True)
 
     def get_video_window(self, participant_id: int):
         return self._registry.get_video_window(participant_id)
@@ -756,13 +804,102 @@ class SipEngine:
     def list_video_devices(self) -> List[dict]:
         return self._media.list_video_devices()
 
+    def _selected_capture_device(self) -> int:
+        """id видеоустройства захвата из состояния/конфига (0 по умолчанию)."""
+        raw = self.media_state.camera_id
+        if raw is None:
+            raw = self.config.video.get("device_id")
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def apply_video_device(self, dev_id: int) -> bool:
+        """Сменить capture-устройство аккаунта на лету (для новых звонков).
+
+        AccountInfo не отдаёт videoConfig, поэтому храним исходный AccountConfig
+        и вызываем account.modify() с обновлённым defaultCaptureDevice.
+        """
+        if not (PJSIP_AVAILABLE and self._account is not None):
+            return False
+        acfg = getattr(self, "_acc_cfg", None)
+        vcfg = getattr(acfg, "videoConfig", None) if acfg is not None else None
+        if vcfg is None or not hasattr(vcfg, "defaultCaptureDevice"):
+            return False
+        try:  # pragma: no cover
+            vcfg.defaultCaptureDevice = int(dev_id)
+            if hasattr(self._account, "modify"):
+                self._account.modify(acfg)
+            log.info("Аккаунту назначено видео-устройство %s", dev_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("apply_video_device: %s", exc)
+        return False
+
     def set_video_device(self, dev_id: int) -> bool:
         if self._media.set_video_device(dev_id):
             self.media_state.camera_id = str(dev_id)
             log.info("Камера переключена на устройство %s", dev_id)
+            # 1) для будущих звонков — на аккаунте;
+            self.apply_video_device(int(dev_id))
+            # 2) для уже активных — через vidSetStream(CHANGE_CAP_DEV).
+            self._bind_capture_to_calls(int(dev_id))
             self.events.emit("media.camera_device", id=dev_id)
             return True
         return False
+
+    def _bind_capture_to_calls(self, dev_id: int) -> int:
+        """Задать capture-устройство для активных звонков.
+
+        Правильный API pjsua2 — ``Call.vidSetStream`` с операцией
+        ``PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV`` и ``param.capDev = dev_id``.
+        Именно это переключает источник видео у вызова; ``switchDev`` для
+        capture-устройств не работает (нет CAP_SWITCH), а ``VideoPreview``
+        без смены cap-dev оставляет дефолтный dev 0 (реальную камеру).
+
+        Возвращает число вызовов, которым устройство назначено.
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return 0
+        if not getattr(self, "_video_supported", False):
+            return 0
+        op = getattr(_pj, "PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV", None)
+        bound = 0
+        for pid, call in list(self._live_calls.items()):
+            try:  # pragma: no cover
+                idx = call.vidGetStreamIdx() if hasattr(call, "vidGetStreamIdx") else 0
+                if idx is None or idx < 0:
+                    continue
+                if op is not None and hasattr(call, "vidSetStream"):
+                    prm = _pj.CallVidSetStreamParam()
+                    prm.medIdx = int(idx)
+                    prm.capDev = int(dev_id)
+                    call.vidSetStream(op, prm)
+                    bound += 1
+                    log.info("Вызову %s назначено видео-устройство %s", pid, dev_id)
+                    continue
+                # Фолбэк: подключить видео-медиа устройства к энкодеру.
+                enc = call.getEncodingVideoMedia(idx)
+                if enc is None:
+                    continue
+                preview = _pj.VideoPreview(int(dev_id))
+                media = preview.getVideoMedia()
+                media.startTransmit(enc)
+                self._capture_bindings.append((preview, media))
+                bound += 1
+                log.info("Видео-устройство %s подключено к вызову %s (fallback)", dev_id, pid)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Не удалось назначить камеру вызову %s: %s", pid, exc)
+        return bound
+
+    def _unbind_capture(self) -> None:
+        """Отключить ранее подключённые capture-устройства."""
+        for _preview, media in list(self._capture_bindings):
+            try:  # pragma: no cover
+                media.stopTransmit(media)
+            except Exception:  # noqa: BLE001
+                pass
+        self._capture_bindings.clear()
 
     def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
         if not (PJSIP_AVAILABLE and self._endpoint is not None):

@@ -570,15 +570,40 @@ class MediaManager:
         return devices
 
     def set_video_device(self, dev_id: int) -> bool:  # pragma: no cover
+        """Выбрать видеоустройство захвата.
+
+        ВАЖНО: ``switchDev`` в pjsua2 — это НЕ выбор источника, а «горячее»
+        переключение уже активного устройства, и он работает только для
+        устройств с capability ``PJMEDIA_VID_DEV_CAP_SWITCH`` (обычно это
+        рендер-устройства вроде SDL, а не камеры/Colorbar). Для capture-
+        устройств (caps=CAP_FORMAT) switchDev бросает Error.
+
+        Поэтому здесь мы НЕ считаем отсутствие CAP_SWITCH ошибкой: выбор
+        устройства фиксируется на уровне движка (VideoPreview + startTransmit
+        к кодирующему порту звонка). switchDev пробуем как best-effort для
+        устройств, которые его реально поддерживают.
+        """
         if not self.available:
             return False
+        dev_id = int(dev_id)
+        if self._supports_switch(dev_id):
+            try:
+                param = self._pj.VideoSwitchParam()
+                param.target_id = dev_id
+                self._endpoint.vidDevManager().switchDev(dev_id, param)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("switchDev(%s) не удался: %s", dev_id, exc)
+        return True
+
+    def _supports_switch(self, dev_id: int) -> bool:  # pragma: no cover
+        """Есть ли у устройства capability PJMEDIA_VID_DEV_CAP_SWITCH."""
         try:
-            param = self._pj.VideoSwitchParam()
-            param.target_id = int(dev_id)
-            self._endpoint.vidDevManager().switchDev(dev_id, param)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось переключить камеру: %s", exc)
+            vdm = self._endpoint.vidDevManager()
+            info = vdm.getDevInfo(dev_id)
+            caps = int(getattr(info, "caps", 0))
+            # PJMEDIA_VID_DEV_CAP_SWITCH = 0x0200 (512).
+            return bool(caps & 0x0200)
+        except Exception:  # noqa: BLE001
             return False
 
     def refresh_video_devices(self) -> bool:  # pragma: no cover

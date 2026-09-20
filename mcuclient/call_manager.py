@@ -69,10 +69,13 @@ def parse_media_info(media_list: Optional[Iterable[Any]], pj: Any) -> List[Video
             continue
         status = getattr(mi, "status", None)
         window = getattr(mi, "videoWindow", None)
+        # Поток активен по статусу медиа. Наличие окна — только для рендера:
+        # в headless/серверном режиме окна нет, но видео идёт, и считать его
+        # неактивным нельзя (иначе ABR/UI не видят видеопоток).
         result.append(
             VideoMedia(
                 is_video=True,
-                active=(status == PJMEDIA_STATUS_ACTIVE and window is not None),
+                active=(status == PJMEDIA_STATUS_ACTIVE),
                 window=window,
             )
         )

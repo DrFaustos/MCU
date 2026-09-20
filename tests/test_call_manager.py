@@ -57,8 +57,16 @@ def test_parse_media_filters_non_video():
     assert parsed[0].active is True
 
 
-def test_parse_media_inactive_without_window():
+def test_parse_media_active_without_window():
+    # В headless/серверном режиме окна нет, но поток активен по статусу:
+    # считать его неактивным нельзя, иначе видео не детектится (регрессия).
     media = [_Media(2, 1, window=None)]
+    parsed = parse_media_info(media, _Pj())
+    assert parsed[0].active is True
+
+
+def test_parse_media_inactive_when_status_not_active():
+    media = [_Media(2, 0, window=object())]
     parsed = parse_media_info(media, _Pj())
     assert parsed[0].active is False
 
