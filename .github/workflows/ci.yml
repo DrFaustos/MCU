@@ -80,7 +80,7 @@ jobs:
       - name: Python syntax check (entrypoints + new modules)
         run: |
           python -m py_compile run.py mcuclient/qt_platform.py mcuclient/doctor.py \
-              mcuclient/rtcp_metrics.py \
+              mcuclient/rtcp_metrics.py mcuclient/icons.py \
               scripts/testbed/two_instance_video_call.py
           echo "OK"
 

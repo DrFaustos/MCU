@@ -41,6 +41,7 @@ from .config import Config, LAYOUT_LABELS
 from .h323_gateway import H323Gateway
 from .log import get_logger
 from .sip_engine import CallState, Participant, SipEngine
+from . import icons as _icons
 
 log = get_logger("ui")
 
@@ -97,7 +98,7 @@ if QT_AVAILABLE:
             btn_row = QtWidgets.QHBoxLayout()
             btn_row.setSpacing(4)
 
-            self.mute_audio_btn = QtWidgets.QPushButton("🔊")
+            self.mute_audio_btn = QtWidgets.QPushButton()
             self.mute_audio_btn.setToolTip("Мут аудио")
             self.mute_audio_btn.setCheckable(True)
             self.mute_audio_btn.setFixedSize(32, 28)
@@ -106,8 +107,9 @@ if QT_AVAILABLE:
                 "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
                 "QPushButton:checked { background:#8b2020; }"
             )
+            _icons.set_button_icon(self.mute_audio_btn, "mic")
 
-            self.mute_video_btn = QtWidgets.QPushButton("📹")
+            self.mute_video_btn = QtWidgets.QPushButton()
             self.mute_video_btn.setToolTip("Мут видео")
             self.mute_video_btn.setCheckable(True)
             self.mute_video_btn.setFixedSize(32, 28)
@@ -116,8 +118,9 @@ if QT_AVAILABLE:
                 "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
                 "QPushButton:checked { background:#8b2020; }"
             )
+            _icons.set_button_icon(self.mute_video_btn, "cam")
 
-            self.hangup_btn = QtWidgets.QPushButton("✕")
+            self.hangup_btn = QtWidgets.QPushButton()
             self.hangup_btn.setToolTip("Завершить вызов")
             self.hangup_btn.setFixedSize(32, 28)
             self.hangup_btn.clicked.connect(self._on_hangup)
@@ -125,6 +128,7 @@ if QT_AVAILABLE:
                 "QPushButton { background:#2a3138; border:1px solid #3a4148; border-radius:3px; }"
                 "QPushButton:hover { background:#8b2020; }"
             )
+            _icons.set_button_icon(self.hangup_btn, "hangup")
 
             btn_row.addWidget(self.mute_audio_btn)
             btn_row.addWidget(self.mute_video_btn)
@@ -159,20 +163,20 @@ if QT_AVAILABLE:
 
             if not self._native_attached:
                 if p.is_video_muted:
-                    self.video_label.setText("📷✕ Видео выкл")
+                    self.video_label.setText("Видео выкл")
                 elif p.state is CallState.INCOMING:
-                    self.video_label.setText("📞 Входящий")
+                    self.video_label.setText("Входящий вызов")
                 elif p.state is CallState.CONNECTING:
-                    self.video_label.setText("📡 Соединение...")
+                    self.video_label.setText("Соединение...")
                 elif p.state is CallState.CONFIRMED:
-                    self.video_label.setText(f"🎥 {p.video_codec or 'video'}")
+                    self.video_label.setText(f"Видео: {p.video_codec or 'video'}")
                 else:
-                    self.video_label.setText("⏸ Неактивен")
+                    self.video_label.setText("Неактивен")
 
             self.mute_audio_btn.setChecked(p.is_muted)
-            self.mute_audio_btn.setText("🔇" if p.is_muted else "🔊")
+            _icons.set_button_icon(self.mute_audio_btn, "mic_off" if p.is_muted else "mic")
             self.mute_video_btn.setChecked(p.is_video_muted)
-            self.mute_video_btn.setText("📷✕" if p.is_video_muted else "📹")
+            _icons.set_button_icon(self.mute_video_btn, "cam_off" if p.is_video_muted else "cam")
 
         def attach_native_video(self, engine: SipEngine, participant_id: int) -> bool:
             """Встроить нативное видео-окно PJSIP в этот тайл.
@@ -390,7 +394,8 @@ if QT_AVAILABLE:
             right.addLayout(btn_row)
 
             mute_all_row = QtWidgets.QHBoxLayout()
-            self.mute_all_btn = QtWidgets.QPushButton("🔇 Мут всех")
+            self.mute_all_btn = QtWidgets.QPushButton("Мут всех")
+            _icons.set_button_icon(self.mute_all_btn, "mic_off")
             self.mute_all_btn.setCheckable(True)
             self.mute_all_btn.clicked.connect(self._on_mute_all)
             self.mute_all_btn.setStyleSheet("QPushButton:checked { background:#8b2020; color:white; }")
@@ -406,19 +411,19 @@ if QT_AVAILABLE:
             devices = QtWidgets.QGroupBox("Устройства и функции")
             dlayout = QtWidgets.QGridLayout(devices)
 
-            self.camera_toggle = QtWidgets.QCheckBox("📹 Камера")
+            self.camera_toggle = QtWidgets.QCheckBox("Камера")
             self.camera_toggle.setChecked(self.engine.media_state.camera_enabled)
             self.camera_toggle.toggled.connect(self._on_camera_toggle)
 
-            self.mic_toggle = QtWidgets.QCheckBox("🎤 Микрофон")
+            self.mic_toggle = QtWidgets.QCheckBox("Микрофон")
             self.mic_toggle.setChecked(self.engine.media_state.microphone_enabled)
             self.mic_toggle.toggled.connect(self._on_mic_toggle)
 
-            self.screen_toggle = QtWidgets.QCheckBox("🖥 Демонстрация экрана")
+            self.screen_toggle = QtWidgets.QCheckBox("Демонстрация экрана")
             self.screen_toggle.setChecked(False)
             self.screen_toggle.toggled.connect(self._on_screen_toggle)
 
-            self.record_toggle = QtWidgets.QCheckBox("⏺ Запись конференции")
+            self.record_toggle = QtWidgets.QCheckBox("Запись конференции")
             self.record_toggle.setChecked(False)
             self.record_toggle.toggled.connect(self._on_record_toggle)
 
@@ -433,7 +438,8 @@ if QT_AVAILABLE:
             self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
             dlayout.addWidget(self.camera_combo, 2, 1)
 
-            self.preview_btn = QtWidgets.QPushButton("▶ Тест камеры")
+            self.preview_btn = QtWidgets.QPushButton("Тест камеры")
+            _icons.set_button_icon(self.preview_btn, "play")
             self.preview_btn.setCheckable(True)
             self.preview_btn.setToolTip("Показать локальное превью выбранной камеры")
             self.preview_btn.toggled.connect(self._on_preview_toggle)
@@ -445,7 +451,8 @@ if QT_AVAILABLE:
             self.mic_combo.currentIndexChanged.connect(self._on_mic_selected)
             dlayout.addWidget(self.mic_combo, 4, 1)
 
-            self.mic_test_btn = QtWidgets.QPushButton("🎙 Открыть монитор микрофона")
+            self.mic_test_btn = QtWidgets.QPushButton("Открыть монитор микрофона")
+            _icons.set_button_icon(self.mic_test_btn, "mic")
             self.mic_test_btn.setToolTip("Открыть окно с живым эквалайзером: видно, когда вы говорите")
             self.mic_test_btn.clicked.connect(self._on_mic_monitor)
             dlayout.addWidget(self.mic_test_btn, 5, 0, 1, 2)
@@ -456,10 +463,12 @@ if QT_AVAILABLE:
             dlayout.addWidget(self.device_status, 6, 0, 1, 2)
 
             dev_btn_row = QtWidgets.QHBoxLayout()
-            self.refresh_devices_btn = QtWidgets.QPushButton("🔄 Обновить устройства")
+            self.refresh_devices_btn = QtWidgets.QPushButton("Обновить устройства")
+            _icons.set_button_icon(self.refresh_devices_btn, "refresh")
             self.refresh_devices_btn.setToolTip("Найти подключённые камеры и микрофоны")
             self.refresh_devices_btn.clicked.connect(self._on_refresh_devices)
-            self.reconnect_btn = QtWidgets.QPushButton("🔌 Переподключить")
+            self.reconnect_btn = QtWidgets.QPushButton("Переподключить")
+            _icons.set_button_icon(self.reconnect_btn, "plug")
             self.reconnect_btn.setToolTip("Переоткрыть аудио/видео устройства (после сбоя или подключения)")
             self.reconnect_btn.clicked.connect(self._on_reconnect_devices)
             dev_btn_row.addWidget(self.refresh_devices_btn)
@@ -721,7 +730,7 @@ if QT_AVAILABLE:
             if not inputs:
                 inputs = devices  # нет явных входов — показываем всё, чтобы выбор был
             for dev in inputs:
-                self.mic_combo.addItem(f"🎤 {dev['name']}", dev["id"])
+                self.mic_combo.addItem(dev["name"], dev["id"])
             self._restore_combo(self.mic_combo, prev)
 
         @staticmethod
@@ -801,7 +810,7 @@ if QT_AVAILABLE:
                     self.device_status.setText("Не удалось запустить превью камеры")
             else:
                 self.engine.stop_local_preview()
-                self.preview_btn.setText("▶ Тест камеры")
+                self.preview_btn.setText("Тест камеры")
                 self.device_status.setText("Превью камеры остановлено")
 
         def _request_answer(self, participant_id: int) -> None:
@@ -851,10 +860,10 @@ if QT_AVAILABLE:
                 self.record_toggle.setChecked(False)
             if success:
                 if self.engine.is_recording:
-                    self.recording_status.setText(f"⏺ Запись: {self.engine.recording_file or '—'}")
+                    self.recording_status.setText(f"Запись: {self.engine.recording_file or '—'}")
                     self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
                 else:
-                    self.recording_status.setText(f"✓ Запись сохранена: {self.engine.recording_file or '—'}")
+                    self.recording_status.setText(f"Запись сохранена: {self.engine.recording_file or '—'}")
                     self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
             status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
             self.statusBar().showMessage(status, 5000)
@@ -973,10 +982,10 @@ if QT_AVAILABLE:
                     file_path = payload.get("file")
                     self.statusBar().showMessage(f"Запись конференции {state}: {file_path or '—'}", 5000)
                     if payload.get("enabled") and file_path:
-                        self.recording_status.setText(f"⏺ Запись: {file_path}")
+                        self.recording_status.setText(f"Запись: {file_path}")
                         self.recording_status.setStyleSheet("color:#e04040; font-size:11px; font-weight:bold;")
                     elif not payload.get("enabled"):
-                        self.recording_status.setText(f"✓ Запись сохранена: {file_path or '—'}")
+                        self.recording_status.setText(f"Запись сохранена: {file_path or '—'}")
                         self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
                 elif event == "media.screen_share":
                     if payload.get("enabled"):

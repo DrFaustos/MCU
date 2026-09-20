@@ -90,7 +90,36 @@ gui_env_args() {
     fi
 }
 
+# Проброс видеоустройств: по умолчанию НЕ пробрасываем (стенд работает на
+# синтетике Colorbar). Включается явно: MCU_VIDEO_DEVICES=/dev/video0,/dev/video2
+#   MCU_VIDEO_DEVICES=auto   — все /dev/video* с хоста
+#   MCU_VIDEO_DEVICES=all    — то же, что auto
+# Формат см. docs/TESTING_TWO_CLIENTS.md.
+video_device_args() {
+    local spec="${MCU_VIDEO_DEVICES:-}"
+    [ -z "$spec" ] && return 0
+    local devs=()
+    case "$spec" in
+        auto|all|1|true|yes)
+            for d in /dev/video*; do [ -e "$d" ] && devs+=("$d"); done
+            ;;
+        *)
+            IFS=',' read -r -a devs <<< "$spec"
+            ;;
+    esac
+    for d in "${devs[@]}"; do
+        [ -e "$d" ] || { warn "видеоустройство не найдено: $d"; continue; }
+        printf '%s\n' --device "$d"
+    done
+}
+
 mapfile -t GUI_ARGS < <(gui_env_args)
+mapfile -t VIDEO_ARGS < <(video_device_args)
+if [ "${#VIDEO_ARGS[@]}" -gt 0 ]; then
+    log "видеоустройства: проброшено (${MCU_VIDEO_DEVICES})"
+else
+    log "видеоустройства: не проброшены (стенд на синтетике Colorbar)"
+fi
 
 NULL_AUDIO="--null-audio"
 if printf '%s\n' "${GUI_ARGS[@]:-}" | grep -q PULSE_SERVER; then
@@ -115,6 +144,7 @@ run_client() {
         --name "$name" \
         "${net_args[@]}" \
         "${RUN_EXTRA[@]}" \
+        "${VIDEO_ARGS[@]}" \
         -v "$DEV_ROOT:/src:ro" -w /src \
         "${GUI_ARGS[@]}" \
         "$MCU_IMAGE" \
