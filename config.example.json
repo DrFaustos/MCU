@@ -52,6 +52,7 @@
     "allow_screen_share": true,
     "allow_recording": true,
     "recording_path": "./recordings",
+    "rtcp_poll_interval": 3.0,
     "layouts": {
       "available": [
         "speaker",

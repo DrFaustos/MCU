@@ -16,6 +16,7 @@ from .media_devices import (
     enumerate_devices,
 )
 from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
+from .rtcp_metrics import RtcpCollector
 from .call_manager import CallManager, normalize_uri
 from .audio_recorder import AudioRecorder
 from .call_registry import CallRegistry
@@ -228,6 +229,10 @@ class SipEngine:
         self._chat = ChatHistory()
         self._device_watcher: Optional[threading.Thread] = None
         self._device_watch_stop = threading.Event()
+        self._rtcp = RtcpCollector(_pj)
+        self._rtcp_poller: Optional[threading.Thread] = None
+        self._rtcp_poll_stop = threading.Event()
+        self._rtcp_poll_interval = float(config.features.get('rtcp_poll_interval', 3.0))
 
     def start(self) -> None:
         if self._running:
@@ -254,6 +259,7 @@ class SipEngine:
             self._layout,
         )
         self._start_device_watcher()
+        self._start_rtcp_poller()
 
     def stop(self) -> None:
         if not self._running:
@@ -279,6 +285,7 @@ class SipEngine:
                 _CALL_KEEPALIVE.extend(self._live_calls.values())
                 self._live_calls.clear()
         finally:
+            self._stop_rtcp_poller()
             self._stop_device_watcher()
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
             self._registry.clear_all_video_windows()
@@ -839,6 +846,71 @@ class SipEngine:
         )
         self._device_watcher.start()
         log.info("Наблюдение за устройствами запущено (интервал %.1fs)", interval)
+
+    def _start_rtcp_poller(self) -> None:
+        """Фоновый поток: периодически снимает RTCP-метрики активных вызовов.
+
+        Без этого ABR никогда не получает реальные потери/джиттер и остаётся
+        декоративным: report_rtcp_metrics приходилось вызывать вручную.
+        Поток НЕ трогает pjsua2 напрямую из чужого потока без регистрации —
+        сбор идёт через libRegisterThread, а решение ABR применяется в этом же
+        потоке (config.set_video_bitrate потокобезопасен для наших целей).
+        """
+        if not PJSIP_AVAILABLE or not self._abr_enabled:
+            return
+        if self._rtcp_poller is not None and self._rtcp_poller.is_alive():
+            return
+        self._rtcp_poll_stop.clear()
+        interval = max(0.5, self._rtcp_poll_interval)
+
+        def _loop() -> None:
+            try:
+                if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
+                    self._endpoint.libRegisterThread("rtcp-poll")
+            except Exception:  # noqa: BLE001
+                pass
+            while not self._rtcp_poll_stop.wait(interval):
+                try:
+                    self.poll_rtcp()
+                except Exception:  # noqa: BLE001
+                    log.debug("rtcp poll: ошибка", exc_info=True)
+
+        self._rtcp_poller = threading.Thread(
+            target=_loop, name="mcu-rtcp-poll", daemon=True
+        )
+        self._rtcp_poller.start()
+        log.info("Опрос RTCP для ABR запущен (интервал %.1fs)", interval)
+
+    def _stop_rtcp_poller(self) -> None:
+        self._rtcp_poll_stop.set()
+        poller = self._rtcp_poller
+        if poller is not None and poller.is_alive():
+            poller.join(timeout=1.0)
+        self._rtcp_poller = None
+
+    def poll_rtcp(self) -> Optional[int]:
+        """Снять RTCP-метрики со всех активных вызовов и применить ABR.
+
+        Возвращает новый целевой битрейт или None, если статистики ещё нет.
+        """
+        if not self._abr_enabled:
+            return None
+        calls = [
+            p._call
+            for p in (self.room.participants.values() if self.room else [])
+            if getattr(p, "_call", None) is not None
+        ]
+        if not calls:
+            return None
+        sample = self._rtcp.sample_calls(calls)
+        if sample is None:
+            return None
+        new = self.report_rtcp_metrics(sample.loss_fraction, sample.jitter_ms)
+        log.debug(
+            "RTCP: потери %.1f%%, джиттер %.0f мс -> битрейт %d кбит/с",
+            sample.loss_fraction * 100.0, sample.jitter_ms, new,
+        )
+        return new
 
     def _stop_device_watcher(self) -> None:
         self._device_watch_stop.set()

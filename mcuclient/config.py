@@ -73,6 +73,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "allow_screen_share": True,
         "allow_recording": True,
         "recording_path": str(default_recording_dir()),
+        "rtcp_poll_interval": 3.0,
         "layouts": {
             "available": ["speaker", "gallery_2x2", "gallery_3x3", "grid_auto"],
             "default": "speaker",

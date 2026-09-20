@@ -52,3 +52,63 @@ def test_abr_never_exceeds_bandwidth_cap():
     for _ in range(30):
         e.report_rtcp_metrics(0.0, 0.0)
     assert e.target_video_bitrate_kbps <= e.config.bandwidth_kbps
+
+
+def test_poll_rtcp_none_without_calls():
+    e = _engine()
+    # Нет участников -> нет статистики, битрейт не меняется.
+    before = e.target_video_bitrate_kbps
+    assert e.poll_rtcp() is None
+    assert e.target_video_bitrate_kbps == before
+
+
+def test_poll_rtcp_feeds_collector_sample():
+    e = _engine()
+
+    class _Rx:
+        pkt = 90
+        loss = 10  # 10% потерь
+
+    class _Rtcp:
+        rxStat = _Rx()
+        rxIpdvUsec = 5000
+
+    class _Stat:
+        rtcp = _Rtcp()
+        jbuf = None
+
+    class _FakeCall:
+        def getInfo(self):
+            class _MI:
+                type = 2
+                index = 1
+
+            class _Info:
+                media = [_MI()]
+
+            return _Info()
+
+        def getStreamStat(self, idx):
+            return _Stat()
+
+    from mcuclient.models import CallState, Participant
+
+    # Подкладываем участника с фейковым вызовом.
+    e._create_room()
+    e.room.add(Participant(
+        id=1, remote_uri="sip:peer@127.0.0.1",
+        state=CallState.CONFIRMED, _call=_FakeCall(),
+    ))
+
+    seen = []
+    e.events.subscribe(lambda name, payload: seen.append((name, payload)))
+    new = e.poll_rtcp()
+    assert new is not None
+    assert new < 1500  # 10% потерь > loss_high -> вниз
+    assert any(name == "media.bitrate.video" and p.get("adaptive") for name, p in seen)
+
+
+def test_poll_rtcp_disabled_abr_is_noop():
+    e = _engine()
+    e.set_abr_enabled(False)
+    assert e.poll_rtcp() is None
