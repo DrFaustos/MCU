@@ -109,8 +109,21 @@ build_binding() {
     local py_dir="${swig_dir}/python"
     [ -f "${py_dir}/pjsua2_wrap.cpp" ] || { log "ОШИБКА: SWIG не сгенерировал обёртку"; exit 1; }
 
+    # PEP 668: на Ubuntu 24.04 / Debian 12+ системный pip отказывается
+    # ставить пакеты без --break-system-packages (externally-managed-
+    # environment). В venv этот флаг запрещён, поэтому определяем окружение.
+    local pip_extra=""
+    local py_bin_real
+    py_bin_real="$(readlink -f "${PYTHON_BIN}")"
+    if [ -n "${VIRTUAL_ENV:-}" ] || [ -f "$(dirname "${py_bin_real}")/../pyvenv.cfg" ]; then
+        log "Обнаружен venv — pip без --break-system-packages"
+    else
+        log "Системный Python — pip с --break-system-packages (PEP 668)"
+        pip_extra="--break-system-packages"
+    fi
+
     log "Сборка и установка pjsua2 в ${PYTHON_BIN}"
-    "${PYTHON_BIN}" -m pip install --quiet --upgrade setuptools wheel
+    "${PYTHON_BIN}" -m pip install --quiet --upgrade ${pip_extra} setuptools wheel
     ( cd "${py_dir}" && "${PYTHON_BIN}" setup.py build && "${PYTHON_BIN}" setup.py install )
 }
 
