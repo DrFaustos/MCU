@@ -579,6 +579,7 @@ CallManager, сервис записи (с подменой FFmpeg).
 |------|-------|---------|
 | **Контейнеры** (2 клиента, pjsua2 + GUI) | изолированный стенд | `scripts/dev/up.sh` → `scripts/dev/test_call.sh` |
 | **Процессы** (2 headless на 127.0.0.1) | контейнеры недоступны / smoke | `scripts/dev/smoke_local.sh` |
+| **Видео** (2 процесса, Colorbar, без камеры) | проверка видеопотока | `scripts/testbed/run_two_instance_video_test.sh` |
 
 Перед первым запуском: `python3 run.py --doctor` — печатает **реальные**
 устройства (камеры/микрофоны с именами), pjsua2, занятость SIP-порта, ffmpeg,
@@ -599,6 +600,10 @@ GUI (X11→headless) и звук (PulseAudio→null-audio). Исходники �
 томом — правки кода **не требуют** пересборки образа.
 
 Процессный fallback: `scripts/dev/smoke_local.sh` (успех: `[+] MCU<->MCU OK`).
+
+Видео-стенд без камеры (синтетический источник PJSIP Colorbar):
+
+ 
 
 Полная инструкция — [docs/TESTING_TWO_CLIENTS.md](docs/TESTING_TWO_CLIENTS.md).
 

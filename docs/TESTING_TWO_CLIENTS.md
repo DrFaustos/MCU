@@ -10,6 +10,7 @@
 |------|-------|----------------|
 | **1. Контейнеры** (`scripts/dev/*.sh`) | Нужны два изолированных клиента, реальный pjsua2, GUI | SIP-звонок, видео, устройства |
 | **2. Процессы** (`scripts/dev/smoke_local.sh`) | Контейнеры недоступны / быстрый smoke | Сигналинг, CONFIRMED, teardown |
+| **2a. Видео** (`scripts/testbed/run_two_instance_video_test.sh`) | Нужно проверить видеопоток без камеры | `call.video active=True` на обоих концах |
 
 Оба пути используют **один и тот же код** из рабочего дерева.
 
@@ -136,6 +137,28 @@ scripts/dev/smoke_local.sh
 выполняет звонок. Успех: `[+] MCU<->MCU OK`, `CONFIRMED (исходящий/входящий)`.
 
 Переменные: `LISTEN_PORT`, `CALL_PORT`.
+
+---
+
+## 2a. Видео-стенд (2 процесса, синтетический источник Colorbar)
+
+ 
+
+Поднимает два headless-инстанса с **включённым видео** и источником
+**Colorbar generator** (id=2) — камера не нужна. Успех: `[+] MCU<->MCU VIDEO OK`
+и событие `call.video active=True` на **обоих** концах.
+
+Переменные: `LISTEN_PORT` (по умолч. 15082), `CALL_PORT` (15081),
+`VIDEO_DEV` (2 = Colorbar generator; 0 — реальная камера, 1 — SDL renderer).
+
+Список видеоустройств PJSIP (включая синтетические):
+
+ 
+
+> Устройство захвата задаётся **до** старта звонка через
+> `AccountVideoConfig.defaultCaptureDevice`; для активных вызовов —
+> `Call.vidSetStream(CHANGE_CAP_DEV)`. `switchDev` для камер/Colorbar не работает
+> (нет capability `PJMEDIA_VID_DEV_CAP_SWITCH`) — это была причина «пустых тайлов».
 
 ---
 
