@@ -311,6 +311,13 @@ def build_state() -> MediaState:
     return state
 
 
+def _is_synthetic_video(driver: str, name: str) -> bool:
+    """Синтетический источник PJSIP (Colorbar/SDL), а не физическая камера."""
+    d = (driver or "").lower()
+    n = (name or "").lower()
+    return d in {"sdl", "colorbar"} or "colorbar" in n
+
+
 class MediaManager:
     """Обёртка над pjsua2 для перечисления и переключения устройств.
 
@@ -532,9 +539,7 @@ class MediaManager:
     @staticmethod
     def _is_synthetic_video(driver: str, name: str) -> bool:
         """Синтетический источник PJSIP (Colorbar/SDL), а не физическая камера."""
-        d = (driver or "").lower()
-        n = (name or "").lower()
-        return d in {"sdl", "colorbar"} or "colorbar" in n
+        return _is_synthetic_video(driver, name)
     # --- видео-устройства (pjsua2 vidDevManager) ---
     def list_video_devices(self) -> List[dict]:  # pragma: no cover
         """Видеоустройства PJSIP с пометкой «синтетическое».
