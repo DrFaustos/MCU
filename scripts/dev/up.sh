@@ -7,6 +7,7 @@
 #
 # Автоматически определяет рантайм (podman/docker, rootless или через sudo),
 # доступность X11/XWayland (GUI на экран разработчика) и PulseAudio.
+# Если GUI-контейнеры не стартуют (нет X-авторизации), сам переходит в headless.
 #
 # Использование:
 #   scripts/dev/up.sh
@@ -38,35 +39,13 @@ fi
 mcu_ensure_network
 log "сетевой режим: $MCU_RESOLVED_NET_MODE"
 
-# --- GUI ---
-GUI_MODE="$MCU_X11"
-if [ "$GUI_MODE" = "auto" ]; then
-    if mcu_x11_available; then GUI_MODE="x11"; else GUI_MODE="headless"; fi
-fi
-mapfile -t GUI_ARGS < <(mcu_gui_args)
-if [ "$GUI_MODE" = "x11" ]; then
-    log "GUI: окна на экран разработчика (DISPLAY=$DISPLAY, xcb)"
-else
-    log "GUI: headless (нет X11-сокета)"
-fi
-
-NULL_AUDIO="--null-audio"
-if printf '%s\n' "${GUI_ARGS[@]:-}" | grep -q PULSE_SERVER; then
-    NULL_AUDIO=""
-    log "звук: проброшен PulseAudio"
-else
-    log "звук: --null-audio (нет PulseAudio-сокета)"
-fi
-
-HEADLESS_FLAG=""
-[ "$GUI_MODE" = "headless" ] && HEADLESS_FLAG="--headless"
-
-# В host-режиме порты должны различаться, т.к. оба клиента делят netns хоста.
-A_LISTEN_PORT="$MCU_A_PORT"
-B_LISTEN_PORT="$MCU_B_PORT"
+# --- Порты (в host-режиме оба клиента делят netns, порты различаются) ---
 if [ "$MCU_RESOLVED_NET_MODE" = "host" ]; then
     A_LISTEN_PORT="${MCU_A_PORT:-5060}"
     B_LISTEN_PORT="${MCU_B_PORT:-5061}"
+else
+    A_LISTEN_PORT="${MCU_A_PORT:-$MCU_SIP_PORT}"
+    B_LISTEN_PORT="${MCU_B_PORT:-$MCU_SIP_PORT}"
 fi
 
 # Адрес/порт, на который звонить (B).
@@ -78,30 +57,94 @@ fi
 
 mapfile -t RUN_EXTRA < <(mcu_run_extra)
 
+# Собираем GUI-аргументы и добавляем X-авторизацию (без неё xcb не подключится
+# к :0 и клиент упадёт — типично при запуске из другого окружения/через sudo).
+gui_env_args() {
+    local mode="$MCU_X11"
+    if [ "$mode" = "auto" ]; then
+        if mcu_x11_available; then mode="x11"; else mode="headless"; fi
+    fi
+    if [ "$mode" != "x11" ]; then
+        printf '%s\n' -e "MCU_QT_PLATFORM=wayland"
+        return
+    fi
+    printf '%s\n' \
+        -e "DISPLAY=${DISPLAY}" \
+        -e "QT_QPA_PLATFORM=xcb" \
+        -e "MCU_QT_PLATFORM=xcb" \
+        -v /tmp/.X11-unix:/tmp/.X11-unix:rw
+    # X-авторизация: пробрасываем cookie, если есть.
+    if [ -n "${XAUTHORITY:-}" ] && [ -f "${XAUTHORITY}" ]; then
+        printf '%s\n' -e "XAUTHORITY=${XAUTHORITY}" -v "${XAUTHORITY}:${XAUTHORITY}:ro"
+    else
+        for cand in "${HOME}/.Xauthority" "/run/user/$(id -u)/gdm/Xauthority"; do
+            if [ -f "$cand" ]; then
+                printf '%s\n' -e "XAUTHORITY=${cand}" -v "${cand}:${cand}:ro"
+                break
+            fi
+        done
+    fi
+    local pulse="/run/user/$(id -u)/pulse"
+    if [ -d "$pulse" ]; then
+        printf '%s\n' -e "PULSE_SERVER=unix:${pulse}/native" -v "${pulse}:${pulse}:rw"
+    fi
+}
+
+mapfile -t GUI_ARGS < <(gui_env_args)
+
+NULL_AUDIO="--null-audio"
+if printf '%s\n' "${GUI_ARGS[@]:-}" | grep -q PULSE_SERVER; then
+    NULL_AUDIO=""
+    log "звук: проброшен PulseAudio"
+else
+    log "звук: --null-audio (нет PulseAudio-сокета)"
+fi
+
 run_client() {
-    local name="$1" listen_port="$2" disp="$3" ip="$4"
+    local name="$1" listen_port="$2" disp="$3" ip="$4" headless="$5"
     local net_args=()
     if [ "$MCU_RESOLVED_NET_MODE" = "bridge" ]; then
         net_args=(--network "$MCU_NET" --ip "$ip")
     else
         net_args=(--network=host)
     fi
-    log "запускаю $name (порт $listen_port), display='$disp'"
-    $MCU_RT_CMD run -d --rm \
+    local hflag=""
+    [ "$headless" = "1" ] && hflag="--headless"
+    log "запускаю $name (порт $listen_port, $([ "$headless" = 1 ] && echo headless || echo gui))"
+    $MCU_RT_CMD run -d --rm --replace \
         --name "$name" \
         "${net_args[@]}" \
         "${RUN_EXTRA[@]}" \
         -v "$DEV_ROOT:/src:ro" -w /src \
         "${GUI_ARGS[@]}" \
         "$MCU_IMAGE" \
-        bash -lc "python3 run.py $HEADLESS_FLAG --listen 0.0.0.0:${listen_port} --display-name '$disp' $NULL_AUDIO" \
+        bash -lc "python3 run.py $hflag --listen 0.0.0.0:${listen_port} --display-name '$disp' $NULL_AUDIO" \
         >/dev/null
 }
 
-run_client "$MCU_A_NAME" "$A_LISTEN_PORT" "MCU-A" "$MCU_A_IP"
-run_client "$MCU_B_NAME" "$B_LISTEN_PORT" "MCU-B" "$MCU_B_IP"
+# Пробуем GUI (если доступен X11), иначе сразу headless.
+GUI_MODE="$MCU_X11"
+if [ "$GUI_MODE" = "auto" ]; then
+    if mcu_x11_available; then GUI_MODE="x11"; else GUI_MODE="headless"; fi
+fi
+HEADLESS=0; [ "$GUI_MODE" = "headless" ] && HEADLESS=1
 
+run_client "$MCU_A_NAME" "$A_LISTEN_PORT" "MCU-A" "$MCU_A_IP" "$HEADLESS"
+run_client "$MCU_B_NAME" "$B_LISTEN_PORT" "MCU-B" "$MCU_B_IP" "$HEADLESS"
 sleep 3
+
+# Self-heal: если GUI-контейнеры умерли (нет X-авторизации) — перезапуск headless.
+if [ "$HEADLESS" = "0" ]; then
+    alive="$($MCU_RT_CMD ps --format '{{.Names}}' | grep -c "$MCU_A_NAME" || true)"
+    if [ "$alive" = "0" ]; then
+        warn "GUI-клиенты не удержались (X-авторизация?) — перезапускаю headless"
+        GUI_MODE="headless"
+        run_client "$MCU_A_NAME" "$A_LISTEN_PORT" "MCU-A" "$MCU_A_IP" "1"
+        run_client "$MCU_B_NAME" "$B_LISTEN_PORT" "MCU-B" "$MCU_B_IP" "1"
+        sleep 3
+    fi
+fi
+
 cat <<EOF
 
 [+] Стенд поднят (сеть: $MCU_RESOLVED_NET_MODE, GUI: $GUI_MODE)

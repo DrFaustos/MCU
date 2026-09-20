@@ -19,6 +19,12 @@ from .screen_share import ScreenSharer
 
 log = get_logger("sip")
 
+# Держим ссылки на _Call-объекты pjsua2 до конца жизни процесса.
+# Их деструкторы вызывают pjsua_call_set_user_data на уже разрушенном
+# Endpoint (после libDestroy) -> assertion abort. Если позволить GC
+# собрать их (clear/pop), процесс падает на teardown. Паркуем навсегда.
+_CALL_KEEPALIVE: list = []
+
 # --- Именованные константы вместо «магических» чисел -------------------------
 # Базовый приоритет лучшего кодека и шаг понижения для следующих в списке.
 CODEC_BASE_PRIORITY = 250
@@ -258,8 +264,10 @@ class SipEngine:
                 # Дать pjsua2 обработать BYE и снять вызовы до разрушения lib.
                 time.sleep(0.3)
                 self._endpoint.libDestroy()
-                # Ссылки на Call освобождаем ТОЛЬКО после libDestroy, иначе
-                # GC соберёт их раньше и pjsua2 упадёт (pjsua_call_set_user_data).
+                # НЕ освобождаем Call-объекты: их деструкторы на разрушенном
+                # Endpoint вызывают pjsua_call_set_user_data -> assertion abort.
+                # Паркуем ссылки в модульный keepalive до конца процесса.
+                _CALL_KEEPALIVE.extend(self._live_calls.values())
                 self._live_calls.clear()
         finally:
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
@@ -1110,7 +1118,10 @@ class SipEngine:
     def _drop_participant(self, participant_id: int) -> None:
         """Удаляет участника и связанные с ним видео-окна (без утечек)."""
         self._registry.drop(participant_id)
-        self._live_calls.pop(participant_id, None)
+        _call = self._live_calls.pop(participant_id, None)
+        if _call is not None:
+            # Паркуем, чтобы GC не вызвал деструктор на разрушенном Endpoint.
+            _CALL_KEEPALIVE.append(_call)
         self.events.emit("call.closed", id=participant_id)
 
     @staticmethod

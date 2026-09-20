@@ -16,16 +16,15 @@ MCU_B_NAME="${MCU_B_NAME:-mcu-b}"
 MCU_BASE_IMAGE="${MCU_BASE_IMAGE:-mcu-dev-base}"
 MCU_IMAGE="${MCU_IMAGE:-mcu-dev}"
 MCU_SIP_PORT="${MCU_SIP_PORT:-5060}"
-# Порты прослушивания. По умолчанию A=MCU_SIP_PORT; B НЕ задаём — в bridge
-# оба слушают SIP_PORT на своих IP, а в host-режиме up.sh даёт B другой порт
-# (иначе конфликт в общем netns хоста).
-MCU_A_PORT="${MCU_A_PORT:-$MCU_SIP_PORT}"
-MCU_B_PORT="${MCU_B_PORT:-}"
 
 # Проброс GUI: auto (X11 если доступен, иначе headless) | x11 | headless
 MCU_X11="${MCU_X11:-auto}"
-# Сетевой режим: auto (bridge, если поддерживается, иначе host) | bridge | host
+# Сеть: auto (bridge, иначе host) | bridge | host
 MCU_NET_MODE="${MCU_NET_MODE:-auto}"
+
+# Заполняется mcu_detect_runtime(): команда вызова рантайма и префикс sudo.
+MCU_RT_CMD=""
+MCU_RT_SUDO=""
 
 log()  { printf '[dev] %s\n' "$*"; }
 warn() { printf '[dev][warn] %s\n' "$*" >&2; }
@@ -38,10 +37,14 @@ mcu_runtime() {
     die "не найден ни podman, ни docker"
 }
 
-# Определить рабочий способ вызова рантайма (rootless или через sudo) и
-# записать его в MCU_RT_CMD. Возвращает 0, если рантайм реально работает.
-# В вложенных средах без прав на user-namespace rootless падает на newuidmap,
-# но rootful через sudo может работать.
+# Определить рабочий способ вызова рантайма и записать в MCU_RT_CMD/MCU_RT_SUDO.
+# Возвращает 0, если рантайм реально работает.
+#
+# Порядок проб:
+#   1) rootless напрямую;
+#   2) через sudo (rootful);
+#   3) через sudo + --cgroups=disabled (вложенные среды, где cgroup v2
+#      недоступен, но контейнеры всё же запускаются).
 mcu_detect_runtime() {
     local rt; rt="$(mcu_runtime 2>/dev/null)" || return 1
     if "$rt" info >/dev/null 2>&1; then
@@ -55,8 +58,6 @@ mcu_detect_runtime() {
         log "rootless-рантайм недоступен — использую '$MCU_RT_CMD'"
         return 0
     fi
-    # Последняя попытка: 'info' может падать на cgroup v2, но реальный
-    # запуск контейнера с --cgroups=disabled работает (вложенные среды).
     if command -v sudo >/dev/null 2>&1; then
         if sudo -n "$rt" run --rm --network=host --cgroups=disabled \
                 hello-world >/dev/null 2>&1; then

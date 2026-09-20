@@ -6,7 +6,8 @@ set -euo pipefail
 
 source "$(dirname "$0")/_common.sh"
 
-RT="$(mcu_runtime)"
+mcu_runtime_usable || die "контейнерный рантайм недоступен"
+
 case "${1:-both}" in
     mcu-a|"$MCU_A_NAME") targets=("$MCU_A_NAME");;
     mcu-b|"$MCU_B_NAME") targets=("$MCU_B_NAME");;
@@ -15,5 +16,5 @@ esac
 
 for c in "${targets[@]}"; do
     echo "================ $c ================"
-    "$RT" logs --tail 40 "$c" 2>&1 || warn "нет контейнера $c"
+    $MCU_RT_CMD logs --tail 40 "$c" 2>&1 || warn "нет контейнера $c"
 done
