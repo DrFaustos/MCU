@@ -123,7 +123,7 @@ build_binding() {
     fi
 
     log "Сборка и установка pjsua2 в ${PYTHON_BIN}"
-    "${PYTHON_BIN}" -m pip install --quiet --upgrade ${pip_extra} setuptools wheel
+    "${PYTHON_BIN}" -m pip install --quiet --upgrade --ignore-installed ${pip_extra} setuptools wheel
     ( cd "${py_dir}" && "${PYTHON_BIN}" setup.py build && "${PYTHON_BIN}" setup.py install )
 }
 
