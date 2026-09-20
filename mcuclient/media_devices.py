@@ -529,8 +529,21 @@ class MediaManager:
         except Exception:  # noqa: BLE001
             return 0.0
 
+    @staticmethod
+    def _is_synthetic_video(driver: str, name: str) -> bool:
+        """Синтетический источник PJSIP (Colorbar/SDL), а не физическая камера."""
+        d = (driver or "").lower()
+        n = (name or "").lower()
+        return d in {"sdl", "colorbar"} or "colorbar" in n
     # --- видео-устройства (pjsua2 vidDevManager) ---
     def list_video_devices(self) -> List[dict]:  # pragma: no cover
+        """Видеоустройства PJSIP с пометкой «синтетическое».
+
+        PJSIP кроме реальных камер перечисляет встроенные источники
+        (SDL renderer, Colorbar generator). Это не мусор: Colorbar позволяет
+        проверить видеозвонок без камеры. Помечаем их флагом ``synthetic``,
+        чтобы UI мог показать «(виртуальное)» — как отдельные пункты в Zoom.
+        """
         if not self.available:
             return []
         devices: List[dict] = []
@@ -538,7 +551,15 @@ class MediaManager:
             vdm = self._endpoint.vidDevManager()
             for i in range(vdm.getDevCount()):
                 info = vdm.getDevInfo(i)
-                devices.append({"id": i, "name": info.name, "driver": info.driver})
+                driver = str(getattr(info, "driver", "") or "")
+                name = str(getattr(info, "name", f"dev{i}"))
+                synthetic = MediaManager._is_synthetic_video(driver, name)
+                devices.append({
+                    "id": i,
+                    "name": name,
+                    "driver": driver,
+                    "synthetic": synthetic,
+                })
         except Exception as exc:  # noqa: BLE001
             log.debug("Не удалось перечислить видеоустройства: %s", exc)
         return devices

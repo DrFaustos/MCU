@@ -255,3 +255,13 @@ def test_proc_asound_name_map_returns_dict():
     # Ключи (если есть) — строки.
     for k, v in mapping.items():
         assert isinstance(k, str) and isinstance(v, str)
+
+
+# --- синтетические видеоустройства PJSIP ---
+
+
+def test_video_device_synthetic_flag_detected():
+    """Colorbar/SDL считаются синтетическими (виртуальными)."""
+    assert media_devices._is_synthetic_video("Colorbar", "Colorbar generator") is True
+    assert media_devices._is_synthetic_video("SDL", "SDL renderer") is True
+    assert media_devices._is_synthetic_video("v4l2", "HD Camera") is False

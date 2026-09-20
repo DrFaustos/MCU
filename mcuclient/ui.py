@@ -681,8 +681,11 @@ if QT_AVAILABLE:
             if devices:
                 self.camera_combo.setEnabled(True)
                 for dev in devices:
+                    # Синтетические источники PJSIP (Colorbar/SDL) помечаем — это
+                    # не физическая камера, но годится для теста видеозвонка.
+                    mark = " (виртуальное)" if dev.get("synthetic") else ""
                     self.camera_combo.addItem(
-                        f"{dev['name']} [{dev.get('driver', '?')}]", dev["id"]
+                        f"{dev['name']} [{dev.get('driver', '?')}]{mark}", dev["id"]
                     )
             else:
                 os_cams = self.engine.list_known_cameras()
