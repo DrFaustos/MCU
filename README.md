@@ -578,7 +578,13 @@ v4l2loopback и выбранный `QT_QPA_PLATFORM`.
 
 Контейнерный стенд:
 
- 
+```bash
+podman build -f docker/mcu-dev-base.Dockerfile -t mcu-dev-base .  # один раз, ~10-20 мин
+podman build -f docker/mcu-dev.Dockerfile -t mcu-dev
+scripts/dev/up.sh          # mcu-a=10.0.3.10, mcu-b=10.0.3.20 (или host 5060/5061)
+scripts/dev/test_call.sh   # успех: [dev] ЗВОНОК ПОДТВЕРЖДЁН
+scripts/dev/down.sh
+```
 
 `up.sh` сам определяет рантайм (rootless / sudo podman), сеть (bridge→host),
 GUI (X11→headless) и звук (PulseAudio→null-audio). Исходники монтируются
