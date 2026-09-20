@@ -8,7 +8,13 @@ from typing import Callable, Dict, List, Optional
 
 from .config import Config, compute_auto_grid
 from .log import get_logger
-from .media_devices import MediaManager, MediaState, build_state
+from .media_devices import (
+    DeviceInfo,
+    MediaManager,
+    MediaState,
+    build_state,
+    enumerate_devices,
+)
 from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
 from .call_manager import CallManager, normalize_uri
 from .audio_recorder import AudioRecorder
@@ -220,6 +226,8 @@ class SipEngine:
         self._abr_enabled = True
         self._layout: str = config.default_layout
         self._chat = ChatHistory()
+        self._device_watcher: Optional[threading.Thread] = None
+        self._device_watch_stop = threading.Event()
 
     def start(self) -> None:
         if self._running:
@@ -245,6 +253,7 @@ class SipEngine:
             "вкл" if self.config.require_encryption else "выкл",
             self._layout,
         )
+        self._start_device_watcher()
 
     def stop(self) -> None:
         if not self._running:
@@ -270,6 +279,7 @@ class SipEngine:
                 _CALL_KEEPALIVE.extend(self._live_calls.values())
                 self._live_calls.clear()
         finally:
+            self._stop_device_watcher()
             # Освобождаем ссылки на видео-окна, чтобы не держать ресурсы PJSIP.
             self._registry.clear_all_video_windows()
             self._running = False
@@ -805,6 +815,133 @@ class SipEngine:
             self.events.emit("media.mic_device", id=dev_id)
             return True
         return False
+
+    def _start_device_watcher(self, interval: float = 2.0) -> None:
+        """Фоновый поток: периодически ищет подключённые/отключённые устройства.
+
+        Без этого список устройств фиксируется один раз при старте, и камера,
+        подключённая позже, не появляется в UI. Поток не трогает pjsua2 —
+        только перечисляет устройства и эмитит событие media.devices.
+        """
+        if self._device_watcher is not None and self._device_watcher.is_alive():
+            return
+        self._device_watch_stop.clear()
+
+        def _loop() -> None:
+            while not self._device_watch_stop.wait(interval):
+                try:
+                    self.refresh_devices(touch_pjsua=False)
+                except Exception:  # noqa: BLE001
+                    log.debug("device watcher: ошибка refresh", exc_info=True)
+
+        self._device_watcher = threading.Thread(
+            target=_loop, name="mcu-device-watch", daemon=True
+        )
+        self._device_watcher.start()
+        log.info("Наблюдение за устройствами запущено (интервал %.1fs)", interval)
+
+    def _stop_device_watcher(self) -> None:
+        self._device_watch_stop.set()
+        watcher = self._device_watcher
+        if watcher is not None and watcher.is_alive():
+            watcher.join(timeout=1.0)
+        self._device_watcher = None
+
+    def refresh_devices(self, touch_pjsua: bool = True) -> dict:
+        """Перечитать РЕАЛЬНЫЕ устройства и обновить состояние.
+
+        Возвращает словарь со списками камер/микрофонов и флагом changed.
+        Вызывается из UI по кнопке «Обновить» и watcher-потоком, чтобы
+        подхватить подключённую/отключённую камеру или микрофон.
+        """
+        try:
+            cameras, mics = enumerate_devices()
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка перечисления устройств")
+            cameras, mics = [], []
+        before = (
+            tuple(c.id for c in self.media_state.cameras),
+            tuple(m.id for m in self.media_state.microphones),
+        )
+        self.media_state.refresh(cameras, mics)
+        after = (
+            tuple(c.id for c in self.media_state.cameras),
+            tuple(m.id for m in self.media_state.microphones),
+        )
+        changed = before != after
+        # ВАЖНО: vidDevManager() можно вызывать только из потока, зарегистрированного
+        # в pjlib. Watcher работает в фоновом потоке — ему pjsua2 трогать нельзя.
+        if touch_pjsua and PJSIP_AVAILABLE and self._endpoint is not None:
+            try:
+                self._media.refresh_video_devices()
+            except Exception:  # noqa: BLE001
+                pass
+        payload = {
+            "changed": changed,
+            "cameras": [{"id": c.id, "name": c.name, "driver": c.driver} for c in cameras],
+            "microphones": [{"id": m.id, "name": m.name, "driver": m.driver} for m in mics],
+        }
+        self.events.emit("media.devices", **payload)
+        log.info("Устройства обновлены: камер=%d, микрофонов=%d, changed=%s",
+                 len(cameras), len(mics), changed)
+        return payload
+
+    def reconnect_audio(self) -> bool:
+        """Переинициализировать аудиоустройства PJSIP (после сбоя/подключения).
+
+        Если реальные устройства недоступны — включается null-аудио, чтобы
+        соединение всё равно устанавливалось.
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            self.events.emit("media.reconnect", target="audio", ok=False,
+                             error="pjsip_unavailable")
+            return False
+        try:
+            ok = self._media.reconnect_audio()
+            self.events.emit("media.reconnect", target="audio", ok=ok,
+                             null_audio=self._media.null_audio_active)
+            return ok
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Ошибка переподключения аудио")
+            self.events.emit("media.reconnect", target="audio", ok=False, error=str(exc))
+            return False
+
+    def reconnect_video(self) -> bool:
+        """Переподключить камеру: обновить список и выбрать рабочую.
+
+        Если камер нет — не ошибка: видео просто не передаётся, звонок идёт.
+        """
+        self.refresh_devices()
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            self.events.emit("media.reconnect", target="video", ok=False,
+                             error="pjsip_unavailable")
+            return False
+        if not self._video_supported:
+            self.events.emit("media.reconnect", target="video", ok=False,
+                             error="video_unsupported")
+            return False
+        devices = self.list_video_devices()
+        if not devices:
+            self.events.emit("media.reconnect", target="video", ok=False,
+                             error="no_devices")
+            return False
+        target = devices[0]["id"]
+        if self.media_state.camera_id is not None:
+            try:
+                want = int(self.media_state.camera_id)
+                if any(d["id"] == want for d in devices):
+                    target = want
+            except (TypeError, ValueError):
+                pass
+        ok = self.set_video_device(target)
+        self.events.emit("media.reconnect", target="video", ok=ok, id=target)
+        return ok
+
+    def list_known_cameras(self) -> List[DeviceInfo]:
+        return list(self.media_state.cameras)
+
+    def list_known_microphones(self) -> List[DeviceInfo]:
+        return list(self.media_state.microphones)
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
         return self._media.open_mic_monitor(dev_id)

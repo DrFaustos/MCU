@@ -1,31 +1,49 @@
 """Управление устройствами захвата: камеры и микрофоны.
 
-Перечисление устройств выполняется без жёстких зависимостей:
-* Linux  — через /dev/video* и /proc/asound (или pactl, если доступен);
-* Windows — через pjsua2 (если доступен) либо заглушку.
+Перечисление устройств выполняется без жёстких зависимостей и максимально
+приближено к реальному железу:
 
-Модуль также хранит текущее состояние «вкл/выкл» камеры и микрофона,
-которое применяется движком (sip_engine) при звонке.
+* Linux  — камеры через ``v4l2-ctl --list-devices`` (реальные имена) с
+  фильтром «умеет Video Capture» и fallback на ``/dev/video*``;
+  микрофоны через ``pactl``/``arecord -l`` (реальные имена) с fallback на
+  ``/proc/asound``.
+* Windows — через ``sounddevice`` (микрофоны) и pjsua2 (после старта движка).
+
+ВАЖНО: наличие камеры/микрофона НЕ обязательно для установления соединения.
+Если устройств нет, движок работает с null-аудио и без локального видео
+(см. :meth:`MediaManager.init_audio_devices` и SipEngine).
+
+Модуль также хранит текущее состояние «вкл/выкл» камеры и микрофона и умеет
+обновлять список устройств на лету (:meth:`MediaState.refresh`), чтобы UI мог
+подхватить подключённую/переподключённую камеру или микрофон.
 """
 
 from __future__ import annotations
 
 import os
+import pathlib
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .log import get_logger
 
 log = get_logger("media")
+
+# Таймаут внешних утилит (v4l2-ctl, pactl, arecord) — не должны подвешивать UI.
+_PROBE_TIMEOUT = 3.0
 
 
 @dataclass
 class DeviceInfo:
     id: str
     name: str
+    kind: str = ""          # "camera" | "microphone"
+    driver: str = ""
+    available: bool = True
 
 
 @dataclass
@@ -49,51 +67,197 @@ class MediaState:
         )
         return self.microphone_enabled
 
+    def refresh(self, cameras: List[DeviceInfo], microphones: List[DeviceInfo]) -> None:
+        """Обновить списки устройств.
+
+        ВАЖНО: НЕ трогаем ``camera_id``/``microphone_id`` — это индексы
+        pjsua2 (устанавливаются через set_video_device/set_audio_device), а
+        не OS-пути вроде ``/dev/video0``. Смешивать их нельзя. Выбор в UI
+        хранится отдельно (currentData комбобокса).
+        """
+        self.cameras = cameras
+        self.microphones = microphones
+
+
+def _run(cmd: List[str]) -> str:
+    """Запустить внешнюю утилиту и вернуть stdout (пусто при ошибке)."""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=False,
+        )
+        return proc.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _v4l2_capture_nodes() -> List[str]:
+    """Множество /dev/videoN, реально поддерживающих Video Capture."""
+    nodes: List[str] = []
+    out = _run(["v4l2-ctl", "--list-devices"])
+    if not out:
+        return nodes
+    # Формат вывода: "<имя> (platform:...):\n\t/dev/video0\n\t/dev/video1"
+    for block in re.split(r"\n(?=\S)", out):
+        for dev in re.findall(r"/dev/video\d+", block):
+            if dev not in nodes:
+                nodes.append(dev)
+    return nodes
+
+
+def _v4l2_device_name(dev: str) -> Tuple[str, str]:
+    """Вернуть (человекочитаемое имя, драйвер) для /dev/videoN."""
+    out = _run(["v4l2-ctl", "-d", dev, "--info"])
+    name = ""
+    driver = ""
+    for line in out.splitlines():
+        low = line.strip().lower()
+        if low.startswith("card type") and ":" in line:
+            name = line.split(":", 1)[1].strip()
+        elif low.startswith("driver name") and ":" in line:
+            driver = line.split(":", 1)[1].strip()
+    return name, driver
+
+
+def _is_capture_capable(dev: str) -> bool:
+    """Умеет ли узел Video Capture (не метаданные/не encoder-нода)."""
+    if not shutil.which("v4l2-ctl"):
+        return True  # не можем проверить — считаем камерой
+    out = _run(["v4l2-ctl", "-d", dev, "--all"])
+    if not out:
+        return False
+    return "Video Capture" in out
+
 
 def _list_linux_cameras() -> List[DeviceInfo]:
+    """Реальные камеры Linux с именами; фильтр по Video Capture.
+
+    Если ``v4l2-ctl`` недоступен — fallback на все ``/dev/video*``.
+    """
+    candidates = _v4l2_capture_nodes()
+    if not candidates:
+        try:
+            candidates = [f"/dev/{e}" for e in sorted(os.listdir("/dev")) if e.startswith("video")]
+        except OSError:
+            candidates = []
+
     cameras: List[DeviceInfo] = []
-    for entry in sorted(os.listdir("/dev")):
-        if entry.startswith("video"):
-            path = f"/dev/{entry}"
-            cameras.append(DeviceInfo(id=path, name=path))
+    for dev in candidates:
+        if not _is_capture_capable(dev):
+            log.debug("Пропускаю %s: нет Video Capture", dev)
+            continue
+        name, driver = _v4l2_device_name(dev)
+        if not name:
+            name = _sysfs_camera_name(dev) or dev
+        cameras.append(
+            DeviceInfo(
+                id=dev,
+                name=name,
+                kind="camera",
+                driver=driver or "v4l2",
+                available=True,
+            )
+        )
     return cameras
 
 
-def _list_linux_mics() -> List[DeviceInfo]:
+def _sysfs_camera_name(dev: str) -> str:
+    """Имя камеры из /sys/class/video4linux/<node>/name (без v4l2-ctl)."""
+    node = os.path.basename(dev)
+    try:
+        with open(f"/sys/class/video4linux/{node}/name", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _pactl_sources() -> List[DeviceInfo]:
+    """Микрофоны через pactl (PipeWire/PulseAudio): только источники входа."""
     mics: List[DeviceInfo] = []
-    if shutil.which("pactl"):
-        try:
-            out = subprocess.run(
-                ["pactl", "list", "short", "sources"],
-                capture_output=True, text=True, timeout=3, check=False,
-            ).stdout
-            for line in out.splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    mics.append(DeviceInfo(id=parts[0], name=parts[1]))
-            if mics:
-                return mics
-        except (OSError, subprocess.SubprocessError):
-            pass
-    # fallback: звуковые карты из /proc/asound
-    if os.path.isdir("/proc/asound"):
-        for entry in sorted(os.listdir("/proc/asound")):
-            if entry.startswith("card"):
-                mics.append(DeviceInfo(id=entry, name=entry))
+    if not shutil.which("pactl"):
+        return mics
+    out = _run(["pactl", "list", "short", "sources"])
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        src_id, name = parts[0], parts[1]
+        # *.monitor — это петля вывода, не микрофон.
+        if name.endswith(".monitor"):
+            continue
+        mics.append(DeviceInfo(id=src_id, name=name, kind="microphone", driver="pulse"))
     return mics
 
 
-def _list_windows_devices() -> tuple[List[DeviceInfo], List[DeviceInfo]]:
+def _arecord_cards() -> List[DeviceInfo]:
+    """Fallback: звуковые карты через arecord -l (ALSA), с реальными именами."""
+    mics: List[DeviceInfo] = []
+    if not shutil.which("arecord"):
+        return mics
+    out = _run(["arecord", "-l"])
+    for line in out.splitlines():
+        m = re.match(r"card\s+(\d+):\s+([^\[]+)\[([^\]]+)\],\s+device\s+(\d+)", line)
+        if m:
+            card, _short, long_name, dev = m.groups()
+            mics.append(
+                DeviceInfo(
+                    id=f"hw:{card},{dev}",
+                    name=f"{long_name.strip()} (hw:{card},{dev})",
+                    kind="microphone",
+                    driver="alsa",
+                )
+            )
+    return mics
+
+
+def _list_linux_mics() -> List[DeviceInfo]:
+    mics = _pactl_sources()
+    if mics:
+        return mics
+    mics = _arecord_cards()
+    if mics:
+        return mics
+    # Последний fallback: карты из /proc/asound (реальные имена, если есть).
+    for card_id, name in _proc_asound_cards():
+        mics.append(DeviceInfo(id=card_id, name=name, kind="microphone", driver="alsa"))
+    if mics:
+        return mics
+    if os.path.isdir("/proc/asound"):
+        for entry in sorted(os.listdir("/proc/asound")):
+            if re.fullmatch(r"card\d+", entry):
+                mics.append(DeviceInfo(id=entry, name=entry, kind="microphone", driver="alsa"))
+    return mics
+
+
+def _proc_asound_cards() -> List[Tuple[str, str]]:
+    """Разобрать /proc/asound/cards -> [(card_id, человекочитаемое имя)].
+
+    Формат строки: `` 0 [Generic_1      ]: HDA-Intel - HD-Audio Generic``.
+    """
+    result: List[Tuple[str, str]] = []
+    try:
+        text = pathlib.Path("/proc/asound/cards").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return result
+    for line in text.splitlines():
+        m = re.match(r"\s*(\d+)\s+\[([^\]]+)\s*\]:\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        card_num, short, rest = m.groups()
+        # rest = "HDA-Intel - HD-Audio Generic" -> берём часть после дефиса.
+        name = rest.split("-", 1)[1].strip() if "-" in rest else short.strip()
+        if not name:
+            name = short.strip()
+        result.append((f"card{card_num}", name))
+    return result
+
+
+def _list_windows_devices() -> Tuple[List[DeviceInfo], List[DeviceInfo]]:
     """Перечислить устройства на Windows БЕЗ pjsua2.
 
     ВАЖНО: pjsua2 здесь использовать нельзя. ``Endpoint.instance()`` до
     ``libCreate()`` в колёсной сборке pjsua2 на Windows уходит в бесконечную
-    рекурсию и роняет процесс с stack overflow (проверено на практике).
-    Реальные аудио/видеоустройства PJSIP перечисляет уже после старта
-    движка (см. SipEngine.list_audio_devices / list_video_devices).
-
-    Здесь делаем максимально безопасное перечисление через sounddevice,
-    если он установлен; иначе возвращаем пустые списки.
+    рекурсию и роняет процесс с stack overflow. Реальные аудио/видеоустройства
+    PJSIP перечисляет уже после старта движка (см. SipEngine.list_*_devices).
     """
     cameras: List[DeviceInfo] = []
     mics: List[DeviceInfo] = []
@@ -102,19 +266,29 @@ def _list_windows_devices() -> tuple[List[DeviceInfo], List[DeviceInfo]]:
 
         for i, dev in enumerate(sd.query_devices()):
             if int(dev.get("max_input_channels", 0)) > 0:
-                mics.append(DeviceInfo(id=str(i), name=str(dev.get("name", f"dev{i}"))))
+                mics.append(
+                    DeviceInfo(id=str(i), name=str(dev.get("name", f"dev{i}")),
+                               kind="microphone", driver="sounddevice")
+                )
     except Exception as exc:  # noqa: BLE001
         log.debug("sounddevice недоступен: %s", exc)
     return cameras, mics
 
 
-def enumerate_devices() -> tuple[List[DeviceInfo], List[DeviceInfo]]:
-    """Вернуть (камеры, микрофоны) для текущей платформы."""
+def enumerate_devices() -> Tuple[List[DeviceInfo], List[DeviceInfo]]:
+    """Вернуть (камеры, микрофоны) для текущей платформы.
+
+    Никогда не бросает исключение: при любой ошибке возвращает то, что успело
+    собраться (возможно, пустые списки). Отсутствие устройств — норма.
+    """
     system = platform.system()
-    if system == "Linux":
-        return _list_linux_cameras(), _list_linux_mics()
-    if system == "Windows":
-        return _list_windows_devices()
+    try:
+        if system == "Linux":
+            return _list_linux_cameras(), _list_linux_mics()
+        if system == "Windows":
+            return _list_windows_devices()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ошибка перечисления устройств (%s): %s", system, exc)
     return [], []
 
 
@@ -127,10 +301,9 @@ def build_state() -> MediaState:
         log.warning("Не удалось перечислить устройства: %s", exc)
         cameras, mics = [], []
     state = MediaState(cameras=cameras, microphones=mics)
-    if cameras:
-        state.camera_id = cameras[0].id
-    if mics:
-        state.microphone_id = mics[0].id
+    # camera_id/microphone_id НЕ выставляем здесь: они хранят индекс
+    # pjsua2 (задаётся set_video_device/set_audio_device), а не OS-путь
+    # вроде /dev/video0 или hw:0,0. Начальный выбор делает UI/движок.
     log.info(
         "Найдено устройств: камер=%d, микрофонов=%d",
         len(cameras), len(mics),
@@ -150,10 +323,16 @@ class MediaManager:
         self._pj = pj_module
         self._endpoint = endpoint
         self._null_audio = bool(null_audio)
+        self._null_audio_active = False
 
     @property
     def available(self) -> bool:
         return self._pj is not None and self._endpoint is not None
+
+    @property
+    def null_audio_active(self) -> bool:
+        """Активен ли null-аудио-режим (нет реального звука, но звонок идёт)."""
+        return self._null_audio_active
 
     def bind(self, endpoint) -> None:
         self._endpoint = endpoint
@@ -213,8 +392,28 @@ class MediaManager:
             pass
         return []
 
+    def enable_null_audio(self, reason: str = "") -> bool:  # pragma: no cover
+        """Переключиться на null-аудиоустройство (звонок без реального звука)."""
+        try:
+            mgr = self.aud_mgr()
+            if mgr is None:
+                return False
+            fn = getattr(mgr, "setNullDev", None)
+            if callable(fn):
+                fn()
+                self._null_audio_active = True
+                log.info("null-аудио включено%s", f" ({reason})" if reason else "")
+                return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось включить null-аудио: %s", exc)
+        return False
+
     def init_audio_devices(self) -> None:  # pragma: no cover
-        """Выбрать устройства захвата/воспроизведения по умолчанию."""
+        """Выбрать устройства захвата/воспроизведения по умолчанию.
+
+        Всегда завершается успешно: если устройств нет или они нерабочие,
+        включается null-аудио — соединение всё равно устанавливается.
+        """
         try:
             mgr = self.aud_mgr()
         except Exception as exc:  # noqa: BLE001
@@ -223,23 +422,11 @@ class MediaManager:
         if mgr is None:
             return
         if self._null_audio:
-            try:
-                fn = getattr(mgr, "setNullDev", None)
-                if callable(fn):
-                    fn()
-                    log.info("null_audio=on: включено null-аудиоустройство")
-                    return
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось включить null-аудиоустройство: %s", exc)
+            if self.enable_null_audio("null_audio=on"):
+                return
         devices = self.enum_devices(mgr)
         if not devices:
-            try:
-                fn = getattr(mgr, "setNullDev", None)
-                if callable(fn):
-                    fn()
-                    log.warning("Аудиоустройства не найдены — включено null-устройство")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось включить null-устройство: %s", exc)
+            self.enable_null_audio("нет аудиоустройств")
             return
         cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
         play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
@@ -254,26 +441,24 @@ class MediaManager:
                     self.dev_set(mgr, "captureDev", "setCaptureDev", i)
                     break
         # В headless/контейнерных окружениях устройства могут присутствовать
-        # в списке, но быть нерабочими (драйвер не открывается). Тогда
-        # makeCall() падает с PJMEDIA_EAUD_SYSERR. Включаем null-устройство,
-        # чтобы звонок устанавливался без локального аудио.
+        # в списке, но быть нерабочими. Тогда makeCall() падает с
+        # PJMEDIA_EAUD_SYSERR — включаем null-устройство.
         cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
         play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
         if cap < 0 or play < 0:
-            try:
-                mgr.setNullDev()
-                log.warning(
-                    "Аудиоустройства недоступны (capture=%s, playback=%s) — включено null-устройство",
-                    cap, play,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Не удалось включить null-устройство: %s", exc)
+            self.enable_null_audio(f"capture={cap}, playback={play}")
         log.info(
             "Аудиоустройства: capture=%s, playback=%s (всего %d)",
             self.dev_int(mgr, "captureDev", "getCaptureDev"),
             self.dev_int(mgr, "playbackDev", "getPlaybackDev"),
             len(devices),
         )
+
+    def reconnect_audio(self) -> bool:  # pragma: no cover
+        """Переинициализировать аудиоустройства (после подключения/сбоя)."""
+        self._null_audio_active = False
+        self.init_audio_devices()
+        return self.available
 
     def list_audio_devices(self) -> List[dict]:  # pragma: no cover
         if not self.available:
@@ -301,6 +486,7 @@ class MediaManager:
             ok = self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
             if not ok:
                 raise RuntimeError("setCaptureDev недоступен")
+            self._null_audio_active = False
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось переключить микрофон: %s", exc)
@@ -366,4 +552,18 @@ class MediaManager:
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось переключить камеру: %s", exc)
+            return False
+
+    def refresh_video_devices(self) -> bool:  # pragma: no cover
+        """Перечитать список видеоустройств (после подключения камеры)."""
+        if not self.available:
+            return False
+        try:
+            vdm = self._endpoint.vidDevManager()
+            fn = getattr(vdm, "refreshDevs", None)
+            if callable(fn):
+                fn()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("refreshDevs недоступен: %s", exc)
             return False

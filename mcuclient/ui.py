@@ -455,6 +455,17 @@ if QT_AVAILABLE:
             self.device_status.setWordWrap(True)
             dlayout.addWidget(self.device_status, 6, 0, 1, 2)
 
+            dev_btn_row = QtWidgets.QHBoxLayout()
+            self.refresh_devices_btn = QtWidgets.QPushButton("🔄 Обновить устройства")
+            self.refresh_devices_btn.setToolTip("Найти подключённые камеры и микрофоны")
+            self.refresh_devices_btn.clicked.connect(self._on_refresh_devices)
+            self.reconnect_btn = QtWidgets.QPushButton("🔌 Переподключить")
+            self.reconnect_btn.setToolTip("Переоткрыть аудио/видео устройства (после сбоя или подключения)")
+            self.reconnect_btn.clicked.connect(self._on_reconnect_devices)
+            dev_btn_row.addWidget(self.refresh_devices_btn)
+            dev_btn_row.addWidget(self.reconnect_btn)
+            dlayout.addLayout(dev_btn_row, 7, 0, 1, 2)
+
             right.addWidget(devices)
 
             self.recording_status = QtWidgets.QLabel("")
@@ -658,27 +669,91 @@ if QT_AVAILABLE:
             self.statusBar().showMessage(status, 5000)
 
         def _populate_cameras(self) -> None:
+            """Заполнить список камер реальными устройствами.
+
+            Приоритет — устройства PJSIP (pjsua2, реальные индексы для
+            set_video_device). Если PJSIP пуст, показываем OS-камеры
+            (list_known_cameras) как информационный список.
+            """
+            prev = self.camera_combo.currentData()
             self.camera_combo.clear()
             devices = self.engine.list_video_devices()
-            if not devices:
-                self.camera_combo.addItem("нет видеоустройств", -1)
-                self.camera_combo.setEnabled(False)
-                return
-            self.camera_combo.setEnabled(True)
-            for dev in devices:
-                self.camera_combo.addItem(f"{dev['name']} [{dev['driver']}]", dev["id"])
+            if devices:
+                self.camera_combo.setEnabled(True)
+                for dev in devices:
+                    self.camera_combo.addItem(
+                        f"{dev['name']} [{dev.get('driver', '?')}]", dev["id"]
+                    )
+            else:
+                os_cams = self.engine.list_known_cameras()
+                if os_cams:
+                    self.camera_combo.setEnabled(False)
+                    for c in os_cams:
+                        self.camera_combo.addItem(f"{c.name} [{c.driver}] (нет PJSIP)", c.id)
+                else:
+                    self.camera_combo.addItem("нет видеоустройств", -1)
+                    self.camera_combo.setEnabled(False)
+            self._restore_combo(self.camera_combo, prev)
 
         def _populate_mics(self) -> None:
+            """Заполнить список микрофонов реальными устройствами PJSIP."""
+            prev = self.mic_combo.currentData()
             self.mic_combo.clear()
             devices = self.engine.list_audio_devices()
             if not devices:
-                self.mic_combo.addItem("нет аудиоустройств", -1)
-                self.mic_combo.setEnabled(False)
+                known = self.engine.list_known_microphones()
+                if known:
+                    self.mic_combo.setEnabled(False)
+                    for m in known:
+                        self.mic_combo.addItem(f"{m.name} [{m.driver}] (нет PJSIP)", m.id)
+                else:
+                    self.mic_combo.addItem("нет аудиоустройств", -1)
+                    self.mic_combo.setEnabled(False)
+                self._restore_combo(self.mic_combo, prev)
                 return
             self.mic_combo.setEnabled(True)
             for dev in devices:
                 mark = "🎤" if dev.get("inputs", 0) > 0 else "🔊"
                 self.mic_combo.addItem(f"{mark} {dev['name']}", dev["id"])
+            self._restore_combo(self.mic_combo, prev)
+
+        @staticmethod
+        def _restore_combo(combo, prev) -> None:
+            """Восстановить прежний выбор комбобокса, если он ещё доступен."""
+            if prev is None:
+                return
+            for i in range(combo.count()):
+                if combo.itemData(i) == prev:
+                    combo.setCurrentIndex(i)
+                    return
+
+        def _on_refresh_devices(self) -> None:
+            """Ручное обновление списка устройств (кнопка)."""
+            try:
+                self.engine.refresh_devices()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Ошибка обновления устройств")
+                self.device_status.setText(f"Ошибка обновления: {exc}")
+                return
+            self._populate_cameras()
+            self._populate_mics()
+            n_cam = self.camera_combo.count() if self.camera_combo.isEnabled() else 0
+            n_mic = self.mic_combo.count() if self.mic_combo.isEnabled() else 0
+            self.device_status.setText(f"Устройства обновлены: камер={n_cam}, микрофонов={n_mic}")
+            self.statusBar().showMessage("Список устройств обновлён", 3000)
+
+        def _on_reconnect_devices(self) -> None:
+            """Переподключить аудио и видео (после сбоя/подключения)."""
+            self.statusBar().showMessage("Переподключение устройств...", 3000)
+            ok_audio = self.engine.reconnect_audio()
+            ok_video = self.engine.reconnect_video()
+            self._populate_cameras()
+            self._populate_mics()
+            self.device_status.setText(
+                f"Переподключение: аудио={'ok' if ok_audio else 'нет'}, "
+                f"видео={'ok' if ok_video else 'нет'}"
+            )
+            self.statusBar().showMessage("Переподключение завершено", 4000)
 
         def _on_camera_selected(self, index: int) -> None:
             dev_id = self.camera_combo.itemData(index)
@@ -902,6 +977,23 @@ if QT_AVAILABLE:
                         self.camera_toggle.setChecked(False)
                     else:
                         self.statusBar().showMessage("Демонстрация экрана: выкл", 5000)
+                elif event == "media.devices":
+                    # Watcher нашёл изменение состава устройств — обновляем списки.
+                    self._populate_cameras()
+                    self._populate_mics()
+                    if payload.get("changed"):
+                        self.statusBar().showMessage("Состав устройств изменился", 3000)
+                elif event == "media.reconnect":
+                    tgt = payload.get("target", "?")
+                    ok = payload.get("ok")
+                    extra = ""
+                    if payload.get("null_audio"):
+                        extra = " (null-аудио)"
+                    elif payload.get("error"):
+                        extra = f" ({payload['error']})"
+                    self.statusBar().showMessage(
+                        f"Переподключение {tgt}: {'ok' if ok else 'нет'}{extra}", 4000
+                    )
                 elif event in {"participant.muted", "participant.video_muted"}:
                     self._refresh_tiles()
                     self._refresh_participants_list()

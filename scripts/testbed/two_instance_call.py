@@ -85,4 +85,15 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    # os._exit: не даём интерпретатору разрушать pjsua2 при выходе — иначе
+    # деструкторы _Call дёргают pjsua_call_set_user_data на уже разрушенном
+    # Endpoint, и процесс падает с assertion abort (как лечится в run.py).
+    import os as _os
+
+    _code = main(sys.argv[1:])
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    _os._exit(_code)
