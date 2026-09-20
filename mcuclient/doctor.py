@@ -4,7 +4,7 @@
 
 * pjsua2: наличие, версия, реальный ``libCreate()/libDestroy()``;
 * возможность занять SIP-порт (bind UDP);
-* аудио/видео устройства;
+* аудио/видео устройства (реальные имена, а не предполагаемые);
 * ffmpeg, v4l2loopback;
 * графическую сессию (Wayland/X11) и выбранный ``QT_QPA_PLATFORM``.
 
@@ -14,11 +14,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
+import sys
 from pathlib import Path
+from typing import List, Tuple
 
-Status = tuple[str, str, str]  # (level, title, detail)
+Status = Tuple[str, str, str]  # (level, title, detail)
 
 
 def _ok(title: str, detail: str = "") -> Status:
@@ -33,9 +36,9 @@ def _fail(title: str, detail: str = "") -> Status:
     return ("FAIL", title, detail)
 
 
-def check_pjsua2() -> list[Status]:
+def check_pjsua2() -> List[Status]:
     """Наличие pjsua2 и реальная инициализация Endpoint."""
-    out: list[Status] = []
+    out: List[Status] = []
     try:
         import pjsua2  # noqa: PLC0415
 
@@ -46,7 +49,6 @@ def check_pjsua2() -> list[Status]:
         out.append(_warn("SIP-транспорт", "без pjsua2 вызовы работать не будут"))
         return out
 
-    # Реальный libCreate/libDestroy — самый честный тест, что биндинг рабочий.
     ep = None
     try:
         ep = pjsua2.Endpoint()
@@ -72,7 +74,7 @@ def check_pjsua2() -> list[Status]:
     return out
 
 
-def check_sip_port(host: str = "0.0.0.0", port: int = 5060) -> list[Status]:
+def check_sip_port(host: str = "0.0.0.0", port: int = 5060) -> List[Status]:
     """Можно ли занять UDP-порт под SIP."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -88,20 +90,71 @@ def check_sip_port(host: str = "0.0.0.0", port: int = 5060) -> list[Status]:
         )]
 
 
-def check_media() -> list[Status]:
-    """Аудио/видео устройства через уже установленный pjsua2."""
-    out: list[Status] = []
-    try:
-        from mcuclient.media_devices import MediaManager  # noqa: PLC0415
+def check_media() -> List[Status]:
+    """РЕАЛЬНЫЕ аудио/видеоустройства (OS-перечисление), а не предполагаемые.
 
-        mm = MediaManager(None, None)
-        cams = mm.list_video_devices() if hasattr(mm, "list_video_devices") else []
-        mics = mm.list_audio_devices() if hasattr(mm, "list_audio_devices") else []
-        out.append(_ok("Видеоустройства", f"{len(cams)} шт." if cams else "нет"))
-        out.append(_ok("Аудиоустройства", f"{len(mics)} шт." if mics else "нет"))
+    Сначала показываем устройства, которые видит операционная система
+    (v4l2-ctl/pactl/arecord/sounddevice) — это то, что пользователь реально
+    может выбрать. Затем отдельно перечисляем устройства PJSIP, если движок
+    уже поднят (для этого нужен запущенный Endpoint).
+    """
+    out: List[Status] = []
+
+    # 1. OS-устройства — источник правды для UI.
+    try:
+        from mcuclient.media_devices import enumerate_devices  # noqa: PLC0415
+
+        cameras, mics = enumerate_devices()
+        if cameras:
+            names = ", ".join(f"{c.id} ({c.name})" for c in cameras[:5])
+            out.append(_ok(f"Камеры (ОС): {len(cameras)}", names))
+        else:
+            out.append(_warn("Камеры (ОС): не найдены",
+                             "звонок возможен без камеры (только аудио/приём)"))
+        if mics:
+            names = ", ".join(f"{m.id} ({m.name})" for m in mics[:5])
+            out.append(_ok(f"Микрофоны (ОС): {len(mics)}", names))
+        else:
+            out.append(_warn("Микрофоны (ОС): не найдены",
+                             "звонок возможен (null-аудио)"))
     except Exception as exc:  # noqa: BLE001
-        out.append(_warn("Медиаустройства не перечислены", str(exc)))
-    # /dev/video*
+        out.append(_warn("ОС-устройства не перечислены", str(exc)))
+
+    # 2. Устройства PJSIP — только если доступен эндпоинт.
+    try:
+        import pjsua2  # noqa: PLC0415
+
+        ep = pjsua2.Endpoint()
+        cfg = pjsua2.EpConfig()
+        try:
+            cfg.logConfig.level = 0
+        except Exception:  # noqa: BLE001
+            pass
+        ep.libCreate()
+        ep.libInit(cfg)
+        ep.libStart()
+        try:
+            vdm = ep.vidDevManager()
+            vcams = [vdm.getDevInfo(i).name for i in range(vdm.getDevCount())]
+        except Exception:  # noqa: BLE001
+            vcams = []
+        try:
+            adm = ep.audDevManager()
+            acaps = [adm.enumDev2()[i].name for i in range(adm.enumDev2().__len__())]
+        except Exception:  # noqa: BLE001
+            acaps = []
+        if vcams:
+            out.append(_ok(f"Камеры (PJSIP): {len(vcams)}", ", ".join(vcams[:5])))
+        if acaps:
+            out.append(_ok(f"Аудиоустройства (PJSIP): {len(acaps)}", ", ".join(acaps[:5])))
+        try:
+            ep.libDestroy()
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3. /dev/video* и v4l2loopback.
     try:
         vids = sorted(Path("/dev").glob("video*"))
         if vids:
@@ -110,7 +163,6 @@ def check_media() -> list[Status]:
             out.append(_warn("Устройства /dev/video*", "не найдены"))
     except OSError as exc:
         out.append(_warn("/dev/video*", str(exc)))
-    # v4l2loopback
     try:
         mod = Path("/sys/module/v4l2loopback")
         if mod.exists():
@@ -122,17 +174,17 @@ def check_media() -> list[Status]:
     return out
 
 
-def check_ffmpeg() -> list[Status]:
+def check_ffmpeg() -> List[Status]:
     path = shutil.which("ffmpeg")
     if path:
         return [_ok("ffmpeg", path)]
     return [_warn("ffmpeg", "не найден в PATH (запись/демонстрация экрана не будут работать)")]
 
 
-def check_display() -> list[Status]:
+def check_display() -> List[Status]:
     from mcuclient import qt_platform  # noqa: PLC0415
 
-    out: list[Status] = []
+    out: List[Status] = []
     session = qt_platform.session_type() or "unknown"
     out.append(_ok("XDG_SESSION_TYPE", session))
     out.append(_ok(
@@ -154,7 +206,7 @@ def run_doctor(config=None) -> int:
     from mcuclient.log import get_logger
 
     log = get_logger("doctor")
-    checks: list[Status] = []
+    checks: List[Status] = []
     checks += check_display()
     checks += check_pjsua2()
     host, port = "0.0.0.0", 5060
