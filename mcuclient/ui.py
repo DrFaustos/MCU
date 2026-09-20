@@ -712,9 +712,13 @@ if QT_AVAILABLE:
                 self._restore_combo(self.mic_combo, prev)
                 return
             self.mic_combo.setEnabled(True)
-            for dev in devices:
-                mark = "🎤" if dev.get("inputs", 0) > 0 else "🔊"
-                self.mic_combo.addItem(f"{mark} {dev['name']}", dev["id"])
+            # Показываем устройства ВХОДА (микрофоны) первыми, как в Zoom/Teams.
+            # Устройства только-вывода (outputs>0, inputs=0) не микрофоны.
+            inputs = [d for d in devices if d.get("inputs", 0) > 0]
+            if not inputs:
+                inputs = devices  # нет явных входов — показываем всё, чтобы выбор был
+            for dev in inputs:
+                self.mic_combo.addItem(f"🎤 {dev['name']}", dev["id"])
             self._restore_combo(self.mic_combo, prev)
 
         @staticmethod

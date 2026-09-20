@@ -469,7 +469,8 @@ class MediaManager:
             for i, info in enumerate(self.enum_devices(mgr)):
                 devices.append({
                     "id": i,
-                    "name": getattr(info, "name", f"dev{i}"),
+                    "name": _friendly_audio_name(getattr(info, "name", f"dev{i}")),
+                    "raw_name": getattr(info, "name", f"dev{i}"),
                     "driver": getattr(info, "driver", "?"),
                     "inputs": getattr(info, "inputCount", 0),
                     "outputs": getattr(info, "outputCount", 0),
@@ -567,3 +568,44 @@ class MediaManager:
         except Exception as exc:  # noqa: BLE001
             log.debug("refreshDevs недоступен: %s", exc)
             return False
+
+
+def _proc_asound_name_map() -> dict:
+    """Карта: короткое имя карты ALSA -> человекочитаемое имя.
+
+    ``Generic_1`` -> ``HD-Audio Generic``. Нужна, чтобы микрофоны в UI
+    выглядели как в Zoom/Teams, а не как ``hw:CARD=Generic_1,DEV=3``.
+    """
+    mapping: dict = {}
+    try:
+        text = pathlib.Path("/proc/asound/cards").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return mapping
+    for line in text.splitlines():
+        m = re.match(r"\s*(\d+)\s+\[([^\]]+)\s*\]:\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        card_num, short, rest = m.groups()
+        human = rest.split("-", 1)[1].strip() if "-" in rest else short.strip()
+        human = human or short.strip()
+        mapping[f"card{card_num}"] = human
+        mapping[short.strip()] = human
+    return mapping
+
+
+def _friendly_audio_name(pjsip_name: str) -> str:
+    """ALSA-имя PJSIP -> человекочитаемое (как в Zoom/Teams).
+
+    ``hw:CARD=Generic_1,DEV=3`` -> ``HD-Audio Generic (hw:CARD=Generic_1,DEV=3)``.
+    Если карта не распознана — исходное имя без изменений.
+    """
+    if not pjsip_name:
+        return pjsip_name
+    m = re.search(r"CARD=([A-Za-z0-9_]+)", pjsip_name)
+    if not m:
+        return pjsip_name
+    short = m.group(1)
+    human = _proc_asound_name_map().get(short)
+    if human and human.lower() != short.lower():
+        return f"{human} ({pjsip_name})"
+    return pjsip_name

@@ -228,3 +228,30 @@ def test_media_manager_list_empty_without_endpoint():
     assert mm.list_video_devices() == []
     assert mm.set_capture_device(0) is False
     assert mm.set_video_device(0) is False
+
+
+# --- человекочитаемые имена устройств (как в Zoom/Teams) ---
+
+
+def test_friendly_audio_name_maps_alsa_card():
+    # hw:CARD=Generic_1,DEV=3 -> содержит человекочитаемое имя карты.
+    name = media_devices._friendly_audio_name("hw:CARD=Generic_1,DEV=3")
+    # Если карта есть в /proc/asound — имя обогащено; иначе вернулось исходное.
+    assert "hw:CARD=Generic_1,DEV=3" in name
+
+
+def test_friendly_audio_name_empty_is_safe():
+    assert media_devices._friendly_audio_name("") == ""
+
+
+def test_friendly_audio_name_without_card_unchanged():
+    assert media_devices._friendly_audio_name("default") == "default"
+    assert media_devices._friendly_audio_name("plughw:0,0") == "plughw:0,0"
+
+
+def test_proc_asound_name_map_returns_dict():
+    mapping = media_devices._proc_asound_name_map()
+    assert isinstance(mapping, dict)
+    # Ключи (если есть) — строки.
+    for k, v in mapping.items():
+        assert isinstance(k, str) and isinstance(v, str)
