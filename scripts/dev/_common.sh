@@ -16,10 +16,11 @@ MCU_B_NAME="${MCU_B_NAME:-mcu-b}"
 MCU_BASE_IMAGE="${MCU_BASE_IMAGE:-mcu-dev-base}"
 MCU_IMAGE="${MCU_IMAGE:-mcu-dev}"
 MCU_SIP_PORT="${MCU_SIP_PORT:-5060}"
-# В host-режиме оба клиента делят сетевой namespace хоста, поэтому им нужны
-# РАЗНЫЕ SIP-порты. В bridge-режиме оба слушают 5060 на своих IP.
+# Порты прослушивания. По умолчанию A=MCU_SIP_PORT; B НЕ задаём — в bridge
+# оба слушают SIP_PORT на своих IP, а в host-режиме up.sh даёт B другой порт
+# (иначе конфликт в общем netns хоста).
 MCU_A_PORT="${MCU_A_PORT:-$MCU_SIP_PORT}"
-MCU_B_PORT="${MCU_B_PORT:-$MCU_SIP_PORT}"
+MCU_B_PORT="${MCU_B_PORT:-}"
 
 # Проброс GUI: auto (X11 если доступен, иначе headless) | x11 | headless
 MCU_X11="${MCU_X11:-auto}"
@@ -53,6 +54,18 @@ mcu_detect_runtime() {
         MCU_RT_SUDO="sudo -n"
         log "rootless-рантайм недоступен — использую '$MCU_RT_CMD'"
         return 0
+    fi
+    # Последняя попытка: 'info' может падать на cgroup v2, но реальный
+    # запуск контейнера с --cgroups=disabled работает (вложенные среды).
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n "$rt" run --rm --network=host --cgroups=disabled \
+                hello-world >/dev/null 2>&1; then
+            MCU_RT_CMD="sudo -n $rt"
+            MCU_RT_SUDO="sudo -n"
+            export MCU_CGROUPS_DISABLED="${MCU_CGROUPS_DISABLED:-1}"
+            log "рантайм работает только через sudo + --cgroups=disabled"
+            return 0
+        fi
     fi
     return 1
 }
