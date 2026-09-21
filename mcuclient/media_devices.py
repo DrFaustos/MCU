@@ -618,17 +618,20 @@ class MediaManager:
             return False
 
     def refresh_video_devices(self) -> bool:  # pragma: no cover
-        """Перечитать список видеоустройств (после подключения камеры)."""
+        """Совместимость. НЕ вызывает refreshDevs.
+
+        pjsua2 VidDevManager.refreshDevs() в сборке PJSIP 2.16 повреждает
+        память (corrupted size vs. prev_size -> Aborted) и роняет процесс.
+        Список устройств и так читается заново через getDevCount/getDevInfo.
+        """
         if not self.available:
             return False
         try:
             vdm = self._endpoint.vidDevManager()
-            fn = getattr(vdm, "refreshDevs", None)
-            if callable(fn):
-                fn()
-            return True
+            # Просто читаем — без refreshDevs.
+            return vdm.getDevCount() >= 0
         except Exception as exc:  # noqa: BLE001
-            log.debug("refreshDevs недоступен: %s", exc)
+            log.debug("getDevCount недоступен: %s", exc)
             return False
 
 

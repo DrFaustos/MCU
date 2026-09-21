@@ -1067,13 +1067,12 @@ class SipEngine:
             tuple(m.id for m in self.media_state.microphones),
         )
         changed = before != after
-        # ВАЖНО: vidDevManager() можно вызывать только из потока, зарегистрированного
-        # в pjlib. Watcher работает в фоновом потоке — ему pjsua2 трогать нельзя.
-        if touch_pjsua and PJSIP_AVAILABLE and self._endpoint is not None:
-            try:
-                self._media.refresh_video_devices()
-            except Exception:  # noqa: BLE001
-                pass
+        # ВАЖНО: pjsua2 VidDevManager.refreshDevs() ПОВРЕЖДАЕТ память
+        # (corrupted size vs. prev_size -> Aborted) в этой сборке PJSIP 2.16.
+        # Поэтому его не вызываем. Список устройств PJSIP всё равно
+        # перечитывается через list_video_devices() (getDevCount/getDevInfo),
+        # а OS-устройства — через enumerate_devices().
+        _ = touch_pjsua  # параметр оставлен для совместимости
         payload = {
             "changed": changed,
             "cameras": [{"id": c.id, "name": c.name, "driver": c.driver} for c in cameras],
