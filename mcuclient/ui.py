@@ -601,6 +601,29 @@ if QT_AVAILABLE:
             self._update_buttons()
             self._rebuild_video_grid()
 
+        _LOCAL_SENTINEL = object()
+
+        def _setup_local_tile(self, tile) -> None:
+            """Настроить тайл как «своя камера» и встроить превью."""
+            tile.participant_id = None
+            tile._is_local = True
+            tile.name_label.setText("Вы (своя камера)")
+            tile.name_label.setStyleSheet(
+                "color:#7fd1a0; font-size:11px; font-weight:bold;"
+            )
+            tile.setEnabled(True)
+            try:
+                if self.engine.attach_local_preview(tile.video_holder):
+                    tile._native_attached = True
+                    tile.video_label.hide()
+                    try:
+                        h = tile.video_holder
+                        self.engine.resize_local_preview(h.width(), h.height())
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+
         def _ensure_tile_pool(self, count: int) -> None:
             """Довести пул тайлов до нужного размера (создание без удаления)."""
             while len(self._tile_pool) < count:
@@ -666,17 +689,20 @@ if QT_AVAILABLE:
                 self._tiles.clear()
 
                 # Формируем список ячеек: участники + пустые.
+                # Первым — локальный тайл (своя камера), как в Zoom/Teams.
                 cells = []
-                if not visible:
+                if self.engine.local_preview_active:
+                    cells.append(self._LOCAL_SENTINEL)
+                if not visible and not cells:
                     cells = [None]
                     rows, cols = 1, 1
                 else:
-                    for idx, p in enumerate(visible):
-                        if idx // cols >= rows:
-                            break
+                    for p in visible:
                         cells.append(p)
                     while len(cells) < rows * cols:
                         cells.append(None)
+                    while len(cells) > rows * cols:
+                        cols += 1
 
                 self._ensure_tile_pool(len(cells))
 
@@ -684,7 +710,9 @@ if QT_AVAILABLE:
                     tile = self._tile_pool[i]
                     row = i // cols
                     col = i % cols
-                    if p is not None:
+                    if p is self._LOCAL_SENTINEL:
+                        self._setup_local_tile(tile)
+                    elif p is not None:
                         tile.set_participant(p)
                         self._tiles[p.id] = tile
                     else:

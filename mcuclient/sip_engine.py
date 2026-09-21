@@ -196,6 +196,7 @@ class SipEngine:
         self._running = False
         self._video_supported = False
         self._video_preview = None
+        self._local_preview_xid: Optional[int] = None
         self._capture_bindings: list = []
         self._embedded_xids: Dict[int, int] = {}
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
@@ -968,6 +969,35 @@ class SipEngine:
     @property
     def local_preview_active(self) -> bool:
         return self._video_preview is not None
+
+    def local_preview_xid(self) -> Optional[int]:
+        """Нативный XID окна локального превью (или None)."""
+        if self._video_preview is None:
+            return None
+        try:
+            return x11_embed.native_xid(self._video_preview.getVideoWindow())
+        except Exception:  # noqa: BLE001
+            return None
+
+    def attach_local_preview(self, widget) -> bool:
+        """Встроить окно локального превью в тайл (X11 reparent)."""
+        xid = self.local_preview_xid()
+        if not xid:
+            return False
+        try:  # pragma: no cover
+            parent = int(widget.winId())
+            ok = x11_embed.embed_window(xid, parent, max(1, widget.width()), max(1, widget.height()))
+            if ok:
+                self._local_preview_xid = xid
+                log.info("Локальное превью встроено в тайл (xid=%s)", xid)
+            return ok
+        except Exception:  # noqa: BLE001
+            return False
+
+    def resize_local_preview(self, width: int, height: int) -> None:
+        xid = getattr(self, "_local_preview_xid", None)
+        if xid:
+            x11_embed.resize_window(xid, max(1, width), max(1, height))
 
     def list_audio_devices(self) -> List[dict]:
         return self._media.list_audio_devices()
