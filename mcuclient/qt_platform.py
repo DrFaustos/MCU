@@ -80,6 +80,28 @@ def _xcb_plugin_present() -> bool:
     return True
 
 
+def _pin_pyside_plugin_path() -> None:
+    """Жёстко указать Qt путь к плагинам PySide6.
+
+    Проблема: пакет cv2 кладёт собственные Qt-плагины в ``cv2/qt/plugins`` и
+    при импорте переопределяет ``QT_QPA_PLATFORM_PLUGIN_PATH`` на них. Тогда
+    xcb-плагин берётся от cv2 и падает (нет нужных зависимостей/версия).
+    Выставляем путь плагинов PySide6 и убираем cv2-путь из поиска.
+    """
+    if os.environ.get("MCU_QT_KEEP_CV2_PLUGINS"):
+        return
+    try:
+        import PySide6  # noqa: PLC0415
+
+        plug = Path(PySide6.__file__).resolve().parent / "Qt" / "plugins"
+        platforms = plug / "platforms"
+        if platforms.is_dir():
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms)
+            os.environ["QT_PLUGIN_PATH"] = str(plug)
+    except Exception:  # noqa: BLE001 — PySide6 может быть не установлен
+        pass
+
+
 def choose_qt_platform(mode: str | None = None) -> dict:
     """Выставить ``QT_QPA_PLATFORM`` и вернуть отчёт для лога/доктора.
 
@@ -117,6 +139,7 @@ def choose_qt_platform(mode: str | None = None) -> dict:
         return report
 
     if requested == "xcb":
+        _pin_pyside_plugin_path()
         os.environ["QT_QPA_PLATFORM"] = "xcb"
         report["platform"] = "xcb"
         report["xwayland"] = x11_socket_available()
@@ -130,6 +153,7 @@ def choose_qt_platform(mode: str | None = None) -> dict:
     # auto: на Wayland уходим на xcb (XWayland), на X11 ничего не меняем.
     if is_wayland_session():
         if x11_socket_available() and _xcb_plugin_present():
+            _pin_pyside_plugin_path()
             os.environ["QT_QPA_PLATFORM"] = "xcb"
             os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
             report["platform"] = "xcb"
