@@ -91,6 +91,31 @@ def parse_media_info(media_list: Optional[Iterable[Any]], pj: Any) -> List[Video
     return result
 
 
+def active_codecs(media_list: Optional[Iterable[Any]], pj: Any) -> dict:
+    """Согласованные кодеки по итогам SDP offer/answer.
+
+    Возвращает ``{"audio": name|None, "video": name|None}``. PJMEDIA держит
+    один активный кодек на поток, поэтому берём первый непустой
+    ``mi.codecName`` среди потоков соответствующего типа. Если стек не
+    заполнил поле (ранний этап или stub) — значение None.
+    """
+    result: dict = {"audio": None, "video": None}
+    for mi in media_list or []:
+        try:
+            if pj is not None and mi.type == pj.PJMEDIA_TYPE_VIDEO:
+                kind = "video"
+            else:
+                kind = "audio"
+        except Exception:  # noqa: BLE001
+            kind = "audio"
+        if result.get(kind):
+            continue
+        name = getattr(mi, "codecName", None)
+        if name:
+            result[kind] = str(name)
+    return result
+
+
 class CallManager:
     """Логика вызовов поверх ``CallRegistry`` и ``EventBus``.
 

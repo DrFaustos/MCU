@@ -592,6 +592,17 @@ class SipEngine:
             self._calls.apply_media_state(ci, call)
         except Exception:  # noqa: BLE001
             log.debug("apply_media_state: ошибка", exc_info=True)
+        # Фиксируем в логе фактические кодеки, согласованные по SDP
+        # offer/answer (PJMEDIA держит один активный кодек на поток).
+        try:
+            from .call_manager import active_codecs  # noqa: PLC0415
+            codecs = active_codecs(getattr(ci, "media", None), _pj)
+            log.info(
+                "Согласованные кодеки вызова: аудио=%s, видео=%s",
+                codecs.get("audio") or "-", codecs.get("video") or "-",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("active_codecs: ошибка", exc_info=True)
         # Как только у вызова поднялся видеопоток — подключаем выбранную
         # камеру к его кодирующему порту.
         dev = self.media_state.camera_id
