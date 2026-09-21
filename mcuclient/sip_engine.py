@@ -1199,15 +1199,13 @@ class SipEngine:
         targets = [participant] if participant else list(
             (self.room.participants.values() if self.room else [])
         )
-        # ВАЖНО: Call.vidSetStream(op, param) принимает ПЕРВЫМ аргументом
-        # ОПЕРАЦИЮ (PJSUA_CALL_VID_STRM_*), а не направление. Раньше сюда
-        # ошибочно передавали PJMEDIA_DIR_* -> операция трактовалась как
-        # CHANGE_DIR(3) без param, и мут/вкл камеры НЕ применялись.
-        # Теперь: камера выключена -> STOP_TRANSMIT, включена -> START_TRANSMIT.
+        # Меняем НАПРАВЛЕНИЕ видео через CHANGE_DIR: это шлёт re-INVITE, и
+        # удалённая сторона корректно убирает наш видеопоток (при STOP_TRANSMIT
+        # без пересогласования у собеседника «замирал» последний кадр).
         want_send = bool(self._screen_share_enabled or self.media_state.camera_enabled)
-        op_stop = getattr(_pj, "PJSUA_CALL_VID_STRM_STOP_TRANSMIT", None)
-        op_start = getattr(_pj, "PJSUA_CALL_VID_STRM_START_TRANSMIT", None)
-        op = op_start if want_send else op_stop
+        op = getattr(_pj, "PJSUA_CALL_VID_STRM_CHANGE_DIR", None)
+        dir_send = getattr(_pj, "PJMEDIA_DIR_ENCODING_DECODING", 3)
+        dir_recv = getattr(_pj, "PJMEDIA_DIR_DECODING", 2)
         if op is None:
             return
         for p in targets:
@@ -1221,10 +1219,11 @@ class SipEngine:
                     continue
                 prm = _pj.CallVidSetStreamParam()
                 prm.medIdx = int(idx)
+                prm.dir = dir_send if want_send else dir_recv
                 p._call.vidSetStream(op, prm)
                 log.info(
-                    "Видео-поток вызова %s: %s",
-                    p.id, "возобновлён" if want_send else "остановлен (камера выкл)",
+                    "Видео вызова %s: направление %s",
+                    p.id, "send+recv" if want_send else "только приём (камера выкл)",
                 )
             except Exception as exc:  # noqa: BLE001
                 log.debug("Не удалось применить медиа-состояние: %s", exc)
