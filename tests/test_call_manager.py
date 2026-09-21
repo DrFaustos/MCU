@@ -20,10 +20,15 @@ class _Pj:
 
 
 class _Media:
-    def __init__(self, mtype, status, window=None):
+    def __init__(self, mtype, status, window=None, window_id=None):
         self.type = mtype
         self.status = status
         self.videoWindow = window
+        # Как в pjsua2: -1 если окна нет; иначе валидный id (>=0).
+        # Если не задан явно — выводим из наличия window.
+        if window_id is None:
+            window_id = 0 if window is not None else -1
+        self.videoIncomingWindowId = window_id
 
 
 class _CallInfo:

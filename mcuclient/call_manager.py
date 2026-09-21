@@ -146,18 +146,19 @@ class CallManager:
                     break
         call_id = part.id if part is not None else pj_call_id
         for vm in parse_media_info(media, self._pj):
-            if vm.active:
+            # ВАЖНО: status может быть ACTIVE, а окно уже уничтожено
+            # (winId=-1) после re-INVITE/выкл камеры у собеседника. Тогда
+            # показывать нечего — иначе тайл держит мёртвое окно и «замирает».
+            display_active = bool(vm.active and vm.window_id >= 0)
+            if display_active:
                 # Захватываем нативный XID СЕЙЧАС, пока окно валидно: позже
                 # VideoWindow.getInfo() может упасть нативным assert.
                 xid = None
-                # Читаем XID ТОЛЬКО если окно валидно (window_id >= 0). Иначе
-                # getInfo() даёт нативный assert и роняет процесс.
-                if vm.window_id >= 0:
-                    try:
-                        from . import x11_embed  # noqa: PLC0415
-                        xid = x11_embed.native_xid(vm.window)
-                    except Exception:  # noqa: BLE001
-                        xid = None
+                try:
+                    from . import x11_embed  # noqa: PLC0415
+                    xid = x11_embed.native_xid(vm.window)
+                except Exception:  # noqa: BLE001
+                    xid = None
                 self._registry.set_video_window(call_id, vm.window, xid)
                 log.info("Видеопоток участника %s подключён (xid=%s)", call_id, xid)
                 self._events.emit("call.video", id=call_id, active=True, xid=xid)
