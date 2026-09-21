@@ -51,6 +51,7 @@ class VideoMedia:
     is_video: bool
     active: bool
     window: Any = None
+    window_id: int = -1
 
 
 def parse_media_info(media_list: Optional[Iterable[Any]], pj: Any) -> List[VideoMedia]:
@@ -69,6 +70,13 @@ def parse_media_info(media_list: Optional[Iterable[Any]], pj: Any) -> List[Video
             continue
         status = getattr(mi, "status", None)
         window = getattr(mi, "videoWindow", None)
+        # videoIncomingWindowId: -1 если окна нет. ВАЖНО: по нему защищаемся
+        # от вызова getInfo() на невалидном окне (нативный assert
+        # pjsua_vid_win_get_info: wid >= 0 && wid < 16 роняет процесс).
+        try:
+            win_id = int(getattr(mi, "videoIncomingWindowId", -1))
+        except (TypeError, ValueError):
+            win_id = -1
         # Поток активен по статусу медиа. Наличие окна — только для рендера:
         # в headless/серверном режиме окна нет, но видео идёт, и считать его
         # неактивным нельзя (иначе ABR/UI не видят видеопоток).
@@ -77,6 +85,7 @@ def parse_media_info(media_list: Optional[Iterable[Any]], pj: Any) -> List[Video
                 is_video=True,
                 active=(status == PJMEDIA_STATUS_ACTIVE),
                 window=window,
+                window_id=win_id,
             )
         )
     return result
@@ -141,11 +150,14 @@ class CallManager:
                 # Захватываем нативный XID СЕЙЧАС, пока окно валидно: позже
                 # VideoWindow.getInfo() может упасть нативным assert.
                 xid = None
-                try:
-                    from . import x11_embed  # noqa: PLC0415
-                    xid = x11_embed.native_xid(vm.window)
-                except Exception:  # noqa: BLE001
-                    xid = None
+                # Читаем XID ТОЛЬКО если окно валидно (window_id >= 0). Иначе
+                # getInfo() даёт нативный assert и роняет процесс.
+                if vm.window_id >= 0:
+                    try:
+                        from . import x11_embed  # noqa: PLC0415
+                        xid = x11_embed.native_xid(vm.window)
+                    except Exception:  # noqa: BLE001
+                        xid = None
                 self._registry.set_video_window(call_id, vm.window, xid)
                 log.info("Видеопоток участника %s подключён (xid=%s)", call_id, xid)
                 self._events.emit("call.video", id=call_id, active=True, xid=xid)

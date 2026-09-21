@@ -179,6 +179,15 @@ if QT_AVAILABLE:
                     "color:#7fd1a0; font-size:11px; font-weight:bold;"
                 )
 
+            if p.is_video_muted and self._native_attached:
+                # Видео замучено — скрываем нативное окно (иначе замерший кадр).
+                self.detach_native_video()
+                if self._engine is not None:
+                    try:
+                        self._engine.detach_embedded_video(p.id)
+                    except Exception:  # noqa: BLE001
+                        pass
+
             if not self._native_attached:
                 if p.is_video_muted:
                     self.video_label.setText("Видео выкл")
