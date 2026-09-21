@@ -218,6 +218,9 @@ if QT_AVAILABLE:
             # Тайл переиспользуется под другого участника — сбросим состояние видео.
             if self.participant_id != p.id:
                 self.detach_native_video()
+            if self._is_local:
+                self._is_local = False
+                self.name_label.setStyleSheet("color:#c0c8d0; font-size:11px;")
 
             self.participant_id = p.id
             self.setEnabled(True)
@@ -674,6 +677,10 @@ if QT_AVAILABLE:
             """Настроить тайл как «своя камера» и встроить превью."""
             tile.participant_id = None
             tile._is_local = True
+            tile._engine = self.engine
+            # При смене камеры окно превью пересоздаётся -> подключаемся
+            # к НОВОМУ XID (иначе показывалась бы старая камера).
+            tile._native_attached = False
             tile.name_label.setText("Вы (своя камера)")
             tile.name_label.setStyleSheet(
                 "color:#7fd1a0; font-size:11px; font-weight:bold;"
@@ -963,6 +970,17 @@ if QT_AVAILABLE:
             dev_id = self.camera_combo.itemData(index)
             if dev_id is not None and dev_id >= 0:
                 self.engine.set_video_device(dev_id)
+                # Если превью активно — перезапускаем на новой камере.
+                if self.engine.local_preview_active:
+                    try:
+                        self.engine.stop_local_preview()
+                        self.engine.start_local_preview(int(dev_id))
+                        for tile in self._tiles.values():
+                            if getattr(tile, "_is_local", False):
+                                self._setup_local_tile(tile)
+                        self._schedule_grid_rebuild()
+                    except Exception:  # noqa: BLE001
+                        pass
                 self.device_status.setText(f"Выбрана камера: {self.camera_combo.currentText()}")
 
         def _on_mic_selected(self, index: int) -> None:
