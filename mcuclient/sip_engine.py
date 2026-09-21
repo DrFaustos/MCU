@@ -443,18 +443,22 @@ class SipEngine:
         if not hasattr(ep, "codecEnum2"):
             log.info("Настройка кодеков недоступна в этом биндинге pjsua2")
             return
-        wanted = self.config.audio_codecs + self.config.video_codecs
+        # ВАЖНО: codecEnum2() перечисляет ТОЛЬКО аудио-кодеки, видео идёт
+        # отдельным API videoCodecEnum2(). Раньше список wanted смешивал
+        # аудио и видео, из-за чего ранги видео сдвигали аудио-приоритеты.
+        wanted = self.config.audio_codecs
         try:
-            for i, codec in enumerate(ep.codecEnum2()):
+            for codec in ep.codecEnum2():
                 codec_id = f"{codec.codecId}"
                 prio = 0
+                base = codec_id.split("/")[0].lower().split(".")[0]
                 for rank, name in enumerate(wanted):
-                    if name.split("/")[0].lower() in codec_id.lower():
+                    if name.split("/")[0].lower() == base:
                         prio = max(CODEC_MIN_PRIORITY, CODEC_BASE_PRIORITY - rank * CODEC_PRIORITY_STEP)
                         break
                 ep.codecSetPriority(codec_id, prio)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось настроить кодеки: %s", exc)
+            log.warning("Не удалось настроить аудио-кодеки: %s", exc)
         # Видео-кодеки настраиваются отдельным API (videoCodecEnum2).
         self._configure_video_codecs(ep)
 
@@ -468,8 +472,11 @@ class SipEngine:
             for codec in ep.videoCodecEnum2():
                 codec_id = f"{codec.codecId}"
                 prio = 0
+                base = codec_id.split("/")[0].lower()
                 for rank, name in enumerate(wanted):
-                    if name.split("/")[0].lower() in codec_id.lower():
+                    want = name.split("/")[0].lower()
+                    # Точное совпадение токена: H263 != H263-1998, G722 != G7221.
+                    if want == base or base.startswith(want + "-"):
                         prio = max(CODEC_MIN_PRIORITY, CODEC_BASE_PRIORITY - rank * CODEC_PRIORITY_STEP)
                         break
                 ep.videoCodecSetPriority(codec_id, prio)
@@ -489,7 +496,7 @@ class SipEngine:
         try:
             for codec in ep.codecEnum2():
                 cid = str(codec.codecId).lower()
-                if any(k in cid for k in ("h264", "h265", "vp8", "vp9", "h263")):
+                if any(k in cid for k in ("h261", "h263", "h264", "h265", "vp8", "vp9")):
                     return True
         except Exception:  # noqa: BLE001
             pass

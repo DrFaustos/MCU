@@ -50,7 +50,10 @@ def test_user_config_merge(tmp_path):
     assert cfg.sip_port == 5070
     # значения по умолчанию, не перечисленные пользователем, на месте
     assert cfg.sip_transport == "udp"
-    assert "opus" in cfg.audio_codecs[0]
+    # По умолчанию первым идёт G.711 (PCMU) — приоритет для совместимости
+    # с парком ВКС (Polycom/Sony); opus ниже, для современных SIP-клиентов.
+    assert "pcmu" in cfg.audio_codecs[0].lower()
+    assert any("opus" in c.lower() for c in cfg.audio_codecs)
 
 
 def test_media_setters_clamp():
