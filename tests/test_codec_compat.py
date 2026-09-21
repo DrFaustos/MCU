@@ -79,3 +79,47 @@ def test_all_default_codecs_have_slash_format():
     codecs = DEFAULT_CONFIG["sip"]["codecs"]
     for c in codecs["audio"] + codecs["video"]:
         assert "/" in c, f"кодек без формата samplerate: {c}"
+
+
+# --- Спецификация Polycom RealPresence Desktop ----------------------------
+
+
+def test_audio_covers_polycom_realpresence_set():
+    """G.719 и G.722.1/G.722.1C явно указаны в спеке Polycom."""
+    audio = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["audio"]]
+    assert any(c.startswith("g719") for c in audio), "нет G.719 (HD-аудио Polycom)"
+    assert any(c.startswith("g7221/48000") for c in audio), "нет G.722.1C (G7221/48000)"
+    # Старый парк Polycom: G.728/G.729.
+    assert any(c.startswith("g728") for c in audio), "нет G.728"
+    assert any(c.startswith("g729") for c in audio), "нет G.729"
+
+
+def test_video_covers_polycom_legacy_plus():
+    """H.263+ в SDP = H263-1998; H.261 для самого старого парка."""
+    video = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["video"]]
+    assert any(c.startswith("h263-1998") for c in video), "нет H.263+ (H263-1998)"
+    assert any(c.startswith("h261") for c in video), "нет H.261"
+
+
+def test_g719_and_g722_above_opus():
+    audio = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["audio"]]
+    idx_opus = next(i for i, c in enumerate(audio) if c.startswith("opus"))
+    for must in ("g719", "g7221/48000"):
+        idx = next(i for i, c in enumerate(audio) if c.startswith(must))
+        assert idx < idx_opus, f"{must} должен идти раньше opus для Polycom"
+
+
+def test_h264_is_first_video_codec():
+    """H.264 — основной кодек Polycom; должен быть первым в приоритете."""
+    video = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["video"]]
+    assert video[0].startswith("h264"), "H.264 должен быть первым видео-кодеком"
+
+
+def test_polycom_audio_ids_are_unique():
+    audio = DEFAULT_CONFIG["sip"]["codecs"]["audio"]
+    assert len(audio) == len(set(audio)), "дубли в списке аудио-кодеков"
+
+
+def test_polycom_video_ids_are_unique():
+    video = DEFAULT_CONFIG["sip"]["codecs"]["video"]
+    assert len(video) == len(set(video)), "дубли в списке видео-кодеков"
