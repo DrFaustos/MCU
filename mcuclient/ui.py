@@ -698,6 +698,25 @@ if QT_AVAILABLE:
             except Exception:  # noqa: BLE001
                 pass
 
+        def _schedule_local_preview_attach(self, attempt: int = 0) -> None:
+            """Встроить локальное превью в тайл с несколькими попытками.
+
+            После пересоздания VideoPreview (смена камеры) нативный XID
+            появляется не сразу — пробуем несколько раз с интервалом.
+            """
+            def _try() -> None:
+                done = False
+                for tile in self._tiles.values():
+                    if getattr(tile, "_is_local", False):
+                        tile._native_attached = False
+                        self._setup_local_tile(tile)
+                        done = bool(tile._native_attached)
+                if not done and attempt < 8:
+                    QtCore.QTimer.singleShot(250, lambda: self._schedule_local_preview_attach(attempt + 1))
+                else:
+                    self._schedule_grid_rebuild()
+            QtCore.QTimer.singleShot(50 if attempt == 0 else 0, _try)
+
         def _ensure_tile_pool(self, count: int) -> None:
             """Довести пул тайлов до нужного размера (создание без удаления)."""
             while len(self._tile_pool) < count:
@@ -975,10 +994,10 @@ if QT_AVAILABLE:
                     try:
                         self.engine.stop_local_preview()
                         self.engine.start_local_preview(int(dev_id))
-                        for tile in self._tiles.values():
-                            if getattr(tile, "_is_local", False):
-                                self._setup_local_tile(tile)
-                        self._schedule_grid_rebuild()
+                        # Новое окно превью создаётся не мгновенно: XID готов
+                        # чуть позже. Поэтому встраиваем с задержкой (несколько
+                        # попыток), иначе окно останется отдельным.
+                        self._schedule_local_preview_attach()
                     except Exception:  # noqa: BLE001
                         pass
                 self.device_status.setText(f"Выбрана камера: {self.camera_combo.currentText()}")
@@ -1017,7 +1036,7 @@ if QT_AVAILABLE:
                 dev_id = None
             try:
                 if self.engine.start_local_preview(int(dev_id) if dev_id is not None else None):
-                    self._schedule_grid_rebuild()
+                    self._schedule_local_preview_attach()
             except Exception:  # noqa: BLE001
                 pass
 
