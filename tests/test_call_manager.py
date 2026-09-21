@@ -121,9 +121,16 @@ def test_apply_media_state_sets_and_clears_window():
     ci.media = [_Media(2, 1, window=win)]
     mgr.apply_media_state(ci)
     assert reg.get_video_window(part.id) is win
-    assert ("call.video", {"id": part.id, "active": True}) in seen
+    # payload теперь содержит ещё и xid — проверяем подмножество ключей.
+    assert any(
+        e == "call.video" and p.get("id") == part.id and p.get("active") is True
+        for e, p in seen
+    )
 
     ci.media = [_Media(2, 0, window=None)]
     mgr.apply_media_state(ci)
     assert reg.get_video_window(part.id) is None
-    assert ("call.video", {"id": part.id, "active": False}) in seen
+    assert any(
+        e == "call.video" and p.get("id") == part.id and p.get("active") is False
+        for e, p in seen
+    )

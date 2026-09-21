@@ -21,6 +21,7 @@ class CallRegistry:
         self._next_id = 1
         self._lock = threading.Lock()
         self._video_windows: Dict[int, object] = {}
+        self._video_xids: Dict[int, int] = {}
 
     def set_room(self, room: Room) -> None:
         self.room = room
@@ -71,14 +72,21 @@ class CallRegistry:
         return list(self.room.participants.values())
 
     # --- видео-окна ---
-    def set_video_window(self, participant_id: int, window: Any) -> None:
+    def set_video_window(self, participant_id: int, window: Any, xid: Optional[int] = None) -> None:
         self._video_windows[participant_id] = window
+        if xid:
+            self._video_xids[participant_id] = int(xid)
+
+    def get_video_xid(self, participant_id: int) -> Optional[int]:
+        return self._video_xids.get(participant_id)
 
     def get_video_window(self, participant_id: int) -> Optional[Any]:
         return self._video_windows.get(participant_id)
 
     def clear_video_window(self, participant_id: int) -> None:
         self._video_windows.pop(participant_id, None)
+        self._video_xids.pop(participant_id, None)
 
     def clear_all_video_windows(self) -> None:
         self._video_windows.clear()
+        self._video_xids.clear()

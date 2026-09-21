@@ -114,18 +114,41 @@ class CallManager:
         log.info("Вызов %s: состояние %s", call_id, state_text)
         self._events.emit("call.state", id=call_id, state=state_text)
 
-    def apply_media_state(self, call_info: Any) -> None:
-        """Обновляет видео-окна участника по событию onCallMediaState."""
+    def apply_media_state(self, call_info: Any, call: Any = None) -> None:
+        """Обновляет видео-окна участника по событию onCallMediaState.
+
+        ВАЖНО: ``call_info.id`` — это id pjsua2, он НЕ совпадает с нашим
+        ``Participant.id``. Ключуем реестр по id участника (иначе UI не
+        находит окно и встраивание не происходит).
+        """
         try:
-            call_id = call_info.id
             media = call_info.media
         except Exception:  # noqa: BLE001
             return
+        pj_call_id = getattr(call_info, "id", None)
+        part = None
+        if call is not None:
+            part = self._registry.find_by_call(call, pj_call_id)
+        if part is None and pj_call_id is not None:
+            # Фолбэк: искать по id pjsua2 среди участников.
+            for cand in self._registry.participants():
+                if getattr(cand, "_call", None) is call and call is not None:
+                    part = cand
+                    break
+        call_id = part.id if part is not None else pj_call_id
         for vm in parse_media_info(media, self._pj):
             if vm.active:
-                self._registry.set_video_window(call_id, vm.window)
-                log.info("Видеопоток вызова %s подключён", call_id)
-                self._events.emit("call.video", id=call_id, active=True)
+                # Захватываем нативный XID СЕЙЧАС, пока окно валидно: позже
+                # VideoWindow.getInfo() может упасть нативным assert.
+                xid = None
+                try:
+                    from . import x11_embed  # noqa: PLC0415
+                    xid = x11_embed.native_xid(vm.window)
+                except Exception:  # noqa: BLE001
+                    xid = None
+                self._registry.set_video_window(call_id, vm.window, xid)
+                log.info("Видеопоток участника %s подключён (xid=%s)", call_id, xid)
+                self._events.emit("call.video", id=call_id, active=True, xid=xid)
             else:
                 self._registry.clear_video_window(call_id)
                 self._events.emit("call.video", id=call_id, active=False)

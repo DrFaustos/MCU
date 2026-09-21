@@ -556,7 +556,7 @@ class SipEngine:
             log.debug("_on_call_media_state: getInfo не удался: %s", exc)
             return
         try:
-            self._calls.apply_media_state(ci)
+            self._calls.apply_media_state(ci, call)
         except Exception:  # noqa: BLE001
             log.debug("apply_media_state: ошибка", exc_info=True)
         # Как только у вызова поднялся видеопоток — подключаем выбранную
@@ -591,22 +591,15 @@ class SipEngine:
         Qt через ``XReparentWindow`` (см. mcuclient/x11_embed.py). Работает
         на X11 и XWayland.
         """
-        # ВСТРАИВАНИЕ ОПЦИОНАЛЬНО (по умолчанию ВЫКЛ).
-        # На этой сборке PJSIP 2.16 вызов VideoWindow.getInfo() для окна
-        # ВЫЗОВА падает нативным assert `pjsua_vid_win_get_info:
-        # wid >= 0 && wid < 16` (Python его не ловит) -> краш GUI.
-        # Поэтому по умолчанию видео показывает сам PJSIP отдельным окном.
-        # Включить эксперимент: MCU_EMBED_VIDEO=1 (на свой риск).
         import os as _os
-        if _os.environ.get("MCU_EMBED_VIDEO") != "1":
+        if _os.environ.get("MCU_NO_EMBED_VIDEO") == "1":
             return False
-        window = self._registry.get_video_window(participant_id)
-        if window is None or not PJSIP_AVAILABLE:
+        if not PJSIP_AVAILABLE:
             return False
-        try:
-            xid = x11_embed.native_xid(window)
-        except Exception:  # noqa: BLE001
-            xid = None
+        # Берём XID, закешированный в момент onCallMediaState (окно тогда
+        # валидно). Повторный getInfo() позже может упасть нативным assert
+        # `pjsua_vid_win_get_info: wid >= 0 && wid < 16`.
+        xid = self._registry.get_video_xid(participant_id)
         if not xid:
             return False
         try:  # pragma: no cover

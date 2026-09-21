@@ -23,6 +23,27 @@ log = get_logger("x11")
 _xlib = None
 _X11_READY = False
 
+# Обработчик X-ошибок: без него любая BadWindow/BadMatch от Xlib аварийно
+# завершает процесс (X Error of failed request -> abort). Reparent чужого
+# окна может дать BadWindow — это НЕ должно ронять GUI.
+_ERROR_HANDLER = None
+
+
+def _install_error_handler(lib) -> None:
+    global _ERROR_HANDLER
+    try:
+        CB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _noop(display, event):  # noqa: ANN001
+            return 0
+
+        _ERROR_HANDLER = CB(_noop)
+        lib.XSetErrorHandler.argtypes = [CB]
+        lib.XSetErrorHandler.restype = ctypes.c_void_p
+        lib.XSetErrorHandler(_ERROR_HANDLER)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _load() -> bool:
     global _xlib, _X11_READY
@@ -32,25 +53,56 @@ def _load() -> bool:
     try:
         name = ctypes.util.find_library("X11") or "libX11.so.6"
         _xlib = ctypes.cdll.LoadLibrary(name)
+        _install_error_handler(_xlib)
         _xlib.XOpenDisplay.restype = ctypes.c_void_p
         _xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
-        for fn in ("XReparentWindow", "XMoveResizeWindow", "XMapWindow",
-                   "XRaiseWindow", "XFlush", "XSync"):
-            getattr(_xlib, fn).argtypes = [ctypes.c_void_p, ctypes.c_ulong] + \
-                ([ctypes.c_int, ctypes.c_int] if fn in ("XMoveResizeWindow",) else
-                 [ctypes.c_int, ctypes.c_int] if fn == "XReparentWindow" else [])
+        # Точные сигнатуры (иначе ctypes зовёт с неверным числом аргументов,
+        # и reparent/resize молча возвращают False):
+        #   XReparentWindow(Display*, Window, Window, int, int) -> 5
+        #   XMoveResizeWindow(Display*, Window, int, int, uint, uint) -> 6
+        #   XMapWindow/XRaiseWindow/XSync(Display*, ...) -> 2
+        #   XFlush(Display*) -> 1
+        dp = ctypes.c_void_p
+        w = ctypes.c_ulong
+        i = ctypes.c_int
+        u = ctypes.c_uint
+        _xlib.XReparentWindow.argtypes = [dp, w, w, i, i]
+        _xlib.XReparentWindow.restype = ctypes.c_int
+        _xlib.XMoveResizeWindow.argtypes = [dp, w, i, i, u, u]
+        _xlib.XMoveResizeWindow.restype = ctypes.c_int
+        _xlib.XMapWindow.argtypes = [dp, w]
+        _xlib.XMapWindow.restype = ctypes.c_int
+        _xlib.XRaiseWindow.argtypes = [dp, w]
+        _xlib.XRaiseWindow.restype = ctypes.c_int
+        _xlib.XFlush.argtypes = [dp]
+        _xlib.XFlush.restype = ctypes.c_int
+        _xlib.XSync.argtypes = [dp, i]
+        _xlib.XSync.restype = ctypes.c_int
     except Exception as exc:  # noqa: BLE001
         log.debug("libX11 недоступна: %s", exc)
         _xlib = None
     return _xlib is not None
 
 
+_display_handle = None
+
+
 def _display():
+    """Одно подключение к X на процесс (кэш).
+
+    ВАЖНО: XOpenDisplay на КАЖДЫЙ вызов исчерпывает лимит X-клиентов
+    ("Maximum number of clients reached"), после чего reparent перестаёт
+    работать. Держим единственный Display и переиспользуем его.
+    """
+    global _display_handle
+    if _display_handle:
+        return _display_handle
     if not _load():
         return None
     import os
     d = _xlib.XOpenDisplay(os.environ.get("DISPLAY", "").encode() or None)
-    return d
+    _display_handle = d or None
+    return _display_handle
 
 
 def embed_window(child_xid: int, parent_xid: int, width: int = 0, height: int = 0) -> bool:
