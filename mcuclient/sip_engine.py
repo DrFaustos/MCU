@@ -251,6 +251,11 @@ class SipEngine:
         if self._running:
             return
         self._create_room()
+        # ВАЖНО: коммутатор поднимаем ДО инициализации PJSIP — иначе
+        # виртуальное устройство (v4l2loopback) ещё не «оживёт» и PJSIP
+        # не увидит его в списке камер на старте.
+        if self.config.virtual_camera_enabled:
+            self.start_virtual_camera()
         if PJSIP_AVAILABLE:
             self._start_pjsip()
         else:
@@ -272,7 +277,7 @@ class SipEngine:
             self._layout,
         )
         if self.config.virtual_camera_enabled:
-            self.start_virtual_camera()
+            self._select_virtual_device()
         self._start_device_watcher()
         self._start_rtcp_poller()
 
@@ -1245,6 +1250,32 @@ class SipEngine:
     @property
     def virtual_camera_running(self) -> bool:
         return self._vswitch.running
+
+    def _select_virtual_device(self) -> None:
+        """Назначить виртуальное устройство (v4l2loopback) камерой для звонков.
+
+        Ищем устройство PJSIP по имени, соответствующему конфигу
+        (обычно «OBS Virtual Camera»), и делаем его источником захвата.
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return
+        want = self.config.virtual_camera_device  # напр. /dev/video0
+        try:
+            devs = self.list_video_devices()
+        except Exception:  # noqa: BLE001
+            return
+        target = None
+        for d in devs:
+            name = str(d.get("name", ""))
+            if "OBS" in name or "Virtual" in name or "v4l2loopback" in name:
+                target = d["id"]
+                break
+        if target is None and devs:
+            # фолбэк: id=0 обычно и есть виртуальная камера
+            target = devs[0]["id"]
+        if target is not None:
+            self.set_video_device(int(target))
+            log.info("Камера звонка -> виртуальное устройство id=%s (%s)", target, want)
 
     def start_virtual_camera(self, kind: str = "camera", device: int | None = None) -> bool:
         """Запустить коммутатор: источник -> виртуальное устройство."""
