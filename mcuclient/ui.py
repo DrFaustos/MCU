@@ -67,6 +67,9 @@ if QT_AVAILABLE:
             super().__init__(parent)
             self._aspect = aspect if aspect > 0 else 16.0 / 9.0
             self._child = None
+            # Колбэк (w, h) при изменении размера ребёнка — чтобы движок
+            # подгонял нативное окно PJSIP под тайл.
+            self.on_child_resize = None
 
         def set_child(self, child) -> None:
             self._child = child
@@ -92,6 +95,11 @@ if QT_AVAILABLE:
             x = (w - cw) // 2
             y = (h - ch) // 2
             self._child.setGeometry(x, y, max(1, cw), max(1, ch))
+            if callable(self.on_child_resize):
+                try:
+                    self.on_child_resize(max(1, cw), max(1, ch))
+                except Exception:  # noqa: BLE001
+                    pass
 
         def resizeEvent(self, event):  # noqa: N802
             super().resizeEvent(event)
@@ -147,6 +155,7 @@ if QT_AVAILABLE:
             self.video_label.setStyleSheet("background:transparent; color:#7a8592;")
             inner_layout.addWidget(self.video_label, stretch=1)
             self.video_holder.set_child(self.video_inner)
+            self.video_holder.on_child_resize = self._on_video_resized
             layout.addWidget(self.video_holder, stretch=1)
 
             self.name_label = QtWidgets.QLabel("—")
@@ -250,6 +259,18 @@ if QT_AVAILABLE:
             _icons.set_button_icon(self.mute_audio_btn, "mic_off" if p.is_muted else "mic")
             self.mute_video_btn.setChecked(p.is_video_muted)
             _icons.set_button_icon(self.mute_video_btn, "cam_off" if p.is_video_muted else "cam")
+
+        def _on_video_resized(self, w: int, h: int) -> None:
+            """Подогнать встроенное видео под новый размер контейнера."""
+            if not self._native_attached or self._engine is None:
+                return
+            try:
+                if self._is_local:
+                    self._engine.resize_local_preview(w, h)
+                elif self.participant_id is not None:
+                    self._engine.resize_embedded_video(self.participant_id, w, h)
+            except Exception:  # noqa: BLE001
+                pass
 
         def attach_native_video(self, engine: SipEngine, participant_id: int) -> bool:
             """Встроить нативное видео-окно PJSIP в этот тайл.

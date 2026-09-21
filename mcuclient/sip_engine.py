@@ -197,6 +197,7 @@ class SipEngine:
         self._video_supported = False
         self._video_preview = None
         self._local_preview_xid: Optional[int] = None
+        self._local_preview_dev: int = -1
         self._capture_bindings: list = []
         self._embedded_xids: Dict[int, int] = {}
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
@@ -943,11 +944,22 @@ class SipEngine:
                     return False
                 target = devices[0]["id"]
             self.set_video_device(target)
+            # ВАЖНО: VideoPreview(dev) привязывает устройство при создании.
+            # Если превью уже открыто, а устройство сменилось — пересоздаём,
+            # иначе показывается старая камера (switchDev для capture не работает).
+            if self._video_preview is not None and int(getattr(self, "_local_preview_dev", -1)) != int(target):
+                try:
+                    self._video_preview.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._video_preview = None
+                self._local_preview_xid = None
             if self._video_preview is None:
                 self._video_preview = _pj.VideoPreview(int(target))
+                self._local_preview_dev = int(target)
             prm = _pj.VideoPreviewOpParam()
             self._video_preview.start(prm)
-            log.info("Локальное превью камеры запущено")
+            log.info("Локальное превью камеры запущено (dev=%s)", target)
             self.events.emit("media.preview", active=True)
             return True
         except Exception as exc:  # noqa: BLE001
@@ -963,6 +975,8 @@ class SipEngine:
         except Exception as exc:  # noqa: BLE001
             log.debug("Ошибка остановки превью: %s", exc)
         self._video_preview = None
+        self._local_preview_xid = None
+        self._local_preview_dev = -1
         self.events.emit("media.preview", active=False)
         log.info("Локальное превью камеры остановлено")
 
