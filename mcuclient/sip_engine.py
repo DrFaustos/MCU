@@ -24,7 +24,7 @@ from .chat import ChatHistory, normalize_message
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
 from .video_source import SourceInfo, VideoSourceSwitcher
-from . import x11_embed
+from . import video_embed
 
 log = get_logger("sip")
 
@@ -351,6 +351,13 @@ class SipEngine:
             pass
         if hasattr(ep_cfg.uaConfig, "userAgent"):
             ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
+        # КРИТИЧНО: отключаем внутренние worker-потоки PJSUA2.
+        # pjsua2-из-Python не переносит их: потоки PJSUA2 вызывают Python-колбэки
+        # и приводят к нативному assertion/segfault в pjlib (часто через ~10 c
+        # после старта — без Python-трейсбэка). threadCnt = 0 заставляет PJSIP
+        # работать в вызывающем потоке (main thread).
+        if hasattr(ep_cfg.uaConfig, "threadCnt"):
+            ep_cfg.uaConfig.threadCnt = 0
         if hasattr(ep_cfg.medConfig, "noVad"):
             ep_cfg.medConfig.noVad = False
         self._configure_nat(ep_cfg)
@@ -607,8 +614,8 @@ class SipEngine:
         ``Show(True)`` на невалидном окне роняет процесс нативным assert.
         Поэтому используем X11: берём нативный XID окна PJSIP
         (``getInfo().winHandle.handle.window``) и переподчиняем его виджету
-        Qt через ``XReparentWindow`` (см. mcuclient/x11_embed.py). Работает
-        на X11 и XWayland.
+        Qt через reparent нативного окна (см. mcuclient/video_embed.py).
+        Работает на X11/XWayland (XReparentWindow) и на Windows (SetParent).
         """
         import os as _os
         if _os.environ.get("MCU_NO_EMBED_VIDEO") == "1":
@@ -627,7 +634,7 @@ class SipEngine:
             return False
         w = max(1, widget.width())
         h = max(1, widget.height())
-        ok = x11_embed.embed_window(xid, parent, w, h)
+        ok = video_embed.embed_window(xid, parent, w, h)
         if ok:
             self._embedded_xids[participant_id] = xid
             log.info("Видео вызова %s встроено в тайл (xid=%s)", participant_id, xid)
@@ -637,13 +644,13 @@ class SipEngine:
         """Убрать встроенное видео участника (камера выключена/вызов завершён)."""
         xid = self._embedded_xids.pop(participant_id, None)
         if xid:
-            x11_embed.unmap_window(xid)
+            video_embed.unmap_window(xid)
 
     def resize_embedded_video(self, participant_id: int, width: int, height: int) -> None:
         """Подогнать встроенное видео под размер тайла."""
         xid = self._embedded_xids.get(participant_id)
         if xid:
-            x11_embed.resize_window(xid, max(1, width), max(1, height))
+            video_embed.resize_window(xid, max(1, width), max(1, height))
 
     def show_video_window(self, participant_id: int) -> bool:
         """Совместимость: нативное окно показывает PJSIP (autoShowIncoming)."""
@@ -1010,7 +1017,7 @@ class SipEngine:
         if self._video_preview is None:
             return None
         try:
-            return x11_embed.native_xid(self._video_preview.getVideoWindow())
+            return video_embed.native_handle(self._video_preview.getVideoWindow())
         except Exception:  # noqa: BLE001
             return None
 
@@ -1021,7 +1028,7 @@ class SipEngine:
             return False
         try:  # pragma: no cover
             parent = int(widget.winId())
-            ok = x11_embed.embed_window(xid, parent, max(1, widget.width()), max(1, widget.height()))
+            ok = video_embed.embed_window(xid, parent, max(1, widget.width()), max(1, widget.height()))
             if ok:
                 self._local_preview_xid = xid
                 log.info("Локальное превью встроено в тайл (xid=%s)", xid)
@@ -1032,7 +1039,7 @@ class SipEngine:
     def resize_local_preview(self, width: int, height: int) -> None:
         xid = getattr(self, "_local_preview_xid", None)
         if xid:
-            x11_embed.resize_window(xid, max(1, width), max(1, height))
+            video_embed.resize_window(xid, max(1, width), max(1, height))
 
     def list_audio_devices(self) -> List[dict]:
         return self._media.list_audio_devices()

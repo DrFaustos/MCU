@@ -155,8 +155,8 @@ class CallManager:
                 # VideoWindow.getInfo() может упасть нативным assert.
                 xid = None
                 try:
-                    from . import x11_embed  # noqa: PLC0415
-                    xid = x11_embed.native_xid(vm.window)
+                    from . import video_embed  # noqa: PLC0415
+                    xid = video_embed.native_handle(vm.window)
                 except Exception:  # noqa: BLE001
                     xid = None
                 self._registry.set_video_window(call_id, vm.window, xid)

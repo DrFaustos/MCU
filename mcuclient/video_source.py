@@ -14,6 +14,17 @@
 Зависимости: ``mss``, ``numpy``, ``pyvirtualcam`` (+ ``opencv-python`` для
 масштабирования и чтения камеры). Без OBS: v4l2loopback ставится один раз
 на уровне ОС, приложение лишь пишет в него.
+
+Потокобезопасность
+------------------
+
+* :meth:`set_source` вызывается из UI-потока, кадры отдаются в фоновом
+  потоке ``mcu-vsource`` — доступ к текущему источнику защищён ``_lock``.
+* :attr:`on_frame` вызывается **в потоке коммутатора**. Потребитель обязан
+  сам маршалить в свой поток (Qt: ``QMetaObject.invokeMethod`` / сигнал), если
+  работает с GUI.
+* :meth:`stop` идемпотентен и дожидается завершения потока; повторный
+  :meth:`start` после :meth:`stop` разрешён.
 """
 
 from __future__ import annotations
@@ -45,6 +56,11 @@ try:  # pragma: no cover
 except ImportError:  # pragma: no cover
     cv2 = None  # type: ignore
     _HAVE_CV2 = False
+
+
+def available() -> bool:
+    """Доступен ли коммутатор (есть все зависимости)."""
+    return _HAVE_CAM and _HAVE_CV2
 
 
 # --- Источники -----------------------------------------------------------------
@@ -95,9 +111,14 @@ class VideoSourceSwitcher:
         self._running = False
         self._last_error: str | None = None
         self._frames_sent = 0
-        # Внешний потребитель превью (w, h, rgb-кадр) — для тайла «Своя камера».
+        # Внешний потребитель превью (RGB-кадр) — для тайла «Своя камера».
+        # Вызывается в потоке коммутатора (см. docstring модуля).
         self.on_frame: Callable[[Any], None] | None = None
         self._cap = None  # cv2.VideoCapture текущей камеры
+        self._cap_dev: int | None = None
+        # mss держим один на поток — создание на каждый кадр дорого и течёт.
+        self._sct = None
+        self._sct_monitor: int = 1
 
     # --- свойства ---
     @property
@@ -127,7 +148,7 @@ class VideoSourceSwitcher:
             self._last_error = "нет mss/numpy/pyvirtualcam/cv2"
             log.error("Коммутатор видео недоступен: %s", self._last_error)
             return False
-        if self._running:
+        if self._running and self._thread is not None and self._thread.is_alive():
             if source is not None:
                 self.set_source(source)
             return True
@@ -143,38 +164,68 @@ class VideoSourceSwitcher:
         return True
 
     def stop(self) -> None:
-        if not self._running:
+        """Остановить коммутатор и дождаться завершения потока.
+
+        Идемпотентен. Если поток не завершился за отведённое время (например,
+        завис в нативном вызове драйвера), всё равно сбрасываем состояние и
+        логируем предупреждение — повторный :meth:`start` создаст новый поток.
+        """
+        if not self._running and (self._thread is None or not self._thread.is_alive()):
             return
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                log.warning("Поток коммутатора не завершился за 3 c — продолжаем без него")
         self._close_capture()
+        self._close_screen()
         self._running = False
-        log.info("Коммутатор видео остановлен")
+        self._thread = None
+        log.info("Коммутатор видео остановлен (кадров отправлено: %d)", self._frames_sent)
 
     def set_source(self, source: SourceInfo) -> None:
         """Сменить источник на лету (устройство звонка не трогаем)."""
         with self._lock:
             old = self._source
             self._source = source
-        if old.kind == "camera" and source.kind != "camera":
+        # Закрываем прежний захват, если уходим с камеры ИЛИ меняем её device.
+        if old.kind == "camera" and (
+            source.kind != "camera" or source.device != old.device
+        ):
             self._close_capture()
-        log.info("Источник видео: %s -> %s", old.kind, source.kind)
+        # Уходя с экрана — освобождаем mss, чтобы не держать ресурс впустую.
+        if old.kind == "screen" and source.kind != "screen":
+            self._close_screen()
+        log.info(
+            "Источник видео: %s%s -> %s%s",
+            old.kind, f"(dev={old.device})" if old.kind == "camera" else "",
+            source.kind, f"(dev={source.device})" if source.kind == "camera" else "",
+        )
 
     # --- внутреннее ---
     def _close_capture(self) -> None:
         cap = self._cap
         self._cap = None
+        self._cap_dev = None
         if cap is not None:
             try:
                 cap.release()
             except Exception:  # noqa: BLE001
                 pass
 
+    def _close_screen(self) -> None:
+        sct = self._sct
+        self._sct = None
+        if sct is not None:
+            try:
+                sct.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _open_capture(self, dev_id: int):
         if not _HAVE_CV2:
             return None
-        # v4l2 индекс; opencv принимает числовой id.
         cap = cv2.VideoCapture(int(dev_id))
         if not cap.isOpened():
             try:
@@ -187,10 +238,12 @@ class VideoSourceSwitcher:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         except Exception:  # noqa: BLE001
             pass
+        self._cap_dev = int(dev_id)
         return cap
 
     def _grab_camera(self, dev_id: int):
-        if self._cap is None:
+        if self._cap is None or self._cap_dev != int(dev_id):
+            self._close_capture()
             self._cap = self._open_capture(dev_id)
         cap = self._cap
         if cap is None:
@@ -205,19 +258,26 @@ class VideoSourceSwitcher:
     def _grab_screen(self):
         import mss  # локальный импорт: не тянуть, если не используется
 
-        with mss.mss() as sct:
-            mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-            shot = sct.grab(mon)
-            return np.array(shot)[..., :3][..., ::-1]  # RGB
+        if self._sct is None:
+            self._sct = mss.mss()
+        monitors = self._sct.monitors
+        idx = 1 if len(monitors) > 1 else 0
+        self._sct_monitor = idx
+        shot = self._sct.grab(monitors[idx])
+        return np.array(shot)[..., :3][..., ::-1]  # BGRA -> RGB
 
     def _make_colorbar(self):
-        # Простая цветная таблица средствами numpy (без cv2).
+        """Тест-таблица с бегущей полосой — видно, что поток живой."""
         img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         bars = 8
         for i in range(bars):
             x0 = i * self.width // bars
             x1 = (i + 1) * self.width // bars
             img[:, x0:x1] = [(i * 32) % 256, (255 - i * 24) % 256, (i * 48) % 256]
+        # Бегущая вертикальная полоса (позиция зависит от frames_sent).
+        bar_w = max(2, self.width // 40)
+        x = (self._frames_sent * max(4, self.width // 120)) % max(1, self.width - bar_w)
+        img[:, x:x + bar_w] = (255, 255, 255)
         return img
 
     def _fit(self, frame):
@@ -226,6 +286,8 @@ class VideoSourceSwitcher:
             return None
         h, w = frame.shape[:2]
         if (w, h) != (self.width, self.height):
+            if not _HAVE_CV2:
+                return None
             frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
         return frame
 
@@ -267,6 +329,7 @@ class VideoSourceSwitcher:
                                 except Exception:  # noqa: BLE001
                                     pass
                     cam.sleep_until_next_frame()
+                    # Дополнительная пауза только если источник был быстрее кадра.
                     dt = time.time() - t0
                     if dt < period * 0.5:
                         time.sleep(max(0.0, period - dt))
@@ -276,3 +339,4 @@ class VideoSourceSwitcher:
         finally:
             self._running = False
             self._close_capture()
+            self._close_screen()
