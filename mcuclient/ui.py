@@ -348,7 +348,8 @@ if QT_AVAILABLE:
         def _build_ui(self) -> None:
             central = QtWidgets.QWidget()
             self.setCentralWidget(central)
-            root = QtWidgets.QHBoxLayout(central)
+            central_layout = QtWidgets.QVBoxLayout(central)
+            central_layout.setContentsMargins(0, 0, 0, 0)
 
             left = QtWidgets.QVBoxLayout()
             layout_bar = QtWidgets.QHBoxLayout()
@@ -377,15 +378,21 @@ if QT_AVAILABLE:
             call_row.addWidget(self.uri_edit, stretch=1)
             call_row.addWidget(call_btn)
             left.addLayout(call_row)
-            root.addLayout(left, stretch=5)
+            left_host = QtWidgets.QWidget()
+            left_host.setLayout(left)
 
             # Правая панель: прокручиваемая и с ограничением ширины, чтобы
             # не съедала место под видео (список участников + устройства).
             right_scroll = QtWidgets.QScrollArea()
             right_scroll.setWidgetResizable(True)
-            right_scroll.setMaximumWidth(420)
             right_scroll.setMinimumWidth(300)
             right_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            right_scroll.setHorizontalScrollBarPolicy(
+                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            right_scroll.setVerticalScrollBarPolicy(
+                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
             right_host = QtWidgets.QWidget()
             right = QtWidgets.QVBoxLayout(right_host)
             right.addWidget(QtWidgets.QLabel("Управление вызовами"))
@@ -442,6 +449,10 @@ if QT_AVAILABLE:
 
             dlayout.addWidget(QtWidgets.QLabel("Камера:"), 2, 0)
             self.camera_combo = QtWidgets.QComboBox()
+            self.camera_combo.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.camera_combo.setMinimumContentsLength(12)
             self._populate_cameras()
             self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
             dlayout.addWidget(self.camera_combo, 2, 1)
@@ -455,6 +466,10 @@ if QT_AVAILABLE:
 
             dlayout.addWidget(QtWidgets.QLabel("Микрофон:"), 4, 0)
             self.mic_combo = QtWidgets.QComboBox()
+            self.mic_combo.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.mic_combo.setMinimumContentsLength(12)
             self._populate_mics()
             self.mic_combo.currentIndexChanged.connect(self._on_mic_selected)
             dlayout.addWidget(self.mic_combo, 4, 1)
@@ -532,7 +547,22 @@ if QT_AVAILABLE:
             right.addWidget(quality)
             right.addStretch()
             right_scroll.setWidget(right_host)
-            root.addWidget(right_scroll, stretch=1)
+
+            # Разделитель видео | настройки: границу можно тянуть мышью,
+            # поэтому меню не обрезается и не «съедает» всё место.
+            self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            self.main_splitter.addWidget(left_host)
+            self.main_splitter.addWidget(right_scroll)
+            self.main_splitter.setStretchFactor(0, 1)
+            self.main_splitter.setStretchFactor(1, 0)
+            self.main_splitter.setChildrenCollapsible(False)
+            # Даём правой панели ширину по её содержимому (иначе обрезается),
+            # но не больше половины окна — видео всегда остаётся просторным.
+            _right_w = max(420, right_host.sizeHint().width())
+            self.main_splitter.setSizes([900, _right_w])
+            self.main_splitter.setCollapsible(1, False)
+            right_scroll.setMinimumWidth(360)
+            central_layout.addWidget(self.main_splitter)
 
             self.statusBar().showMessage("Готов")
             self._update_buttons()
