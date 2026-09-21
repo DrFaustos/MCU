@@ -23,6 +23,7 @@ from .call_registry import CallRegistry
 from .chat import ChatHistory, normalize_message
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
+from .video_source import SourceInfo, VideoSourceSwitcher
 from . import x11_embed
 
 log = get_logger("sip")
@@ -215,6 +216,13 @@ class SipEngine:
             target_height=config.video.get("height", 720),
         )
         self._screen_share_enabled = False
+        # Встроенный коммутатор источников (единое виртуальное устройство).
+        self._vswitch = VideoSourceSwitcher(
+            device=config.virtual_camera_device,
+            width=config.video.get("width", 1280),
+            height=config.video.get("height", 720),
+            fps=config.video.get("fps", 20),
+        )
 
         rec_dir = config.features.get("recording_path", "./recordings")
         self._recorder = ConferenceRecorder(output_dir=rec_dir)
@@ -263,6 +271,8 @@ class SipEngine:
             "вкл" if self.config.require_encryption else "выкл",
             self._layout,
         )
+        if self.config.virtual_camera_enabled:
+            self.start_virtual_camera()
         self._start_device_watcher()
         self._start_rtcp_poller()
 
@@ -278,6 +288,8 @@ class SipEngine:
                 self.stop_local_preview()
             if self._screen_sharer.is_running:
                 self._screen_sharer.stop()
+            if self._vswitch.running:
+                self._vswitch.stop()
             self._detach_own_media()
             if PJSIP_AVAILABLE and self._endpoint is not None:
                 self._hangup_all()
@@ -1224,6 +1236,34 @@ class SipEngine:
 
     def read_mic_level(self) -> float:
         return self._media.read_mic_level()
+
+    # --- встроенный коммутатор источников (единое виртуальное устройство) ---
+    @property
+    def virtual_camera_available(self) -> bool:
+        return self._vswitch.available
+
+    @property
+    def virtual_camera_running(self) -> bool:
+        return self._vswitch.running
+
+    def start_virtual_camera(self, kind: str = "camera", device: int | None = None) -> bool:
+        """Запустить коммутатор: источник -> виртуальное устройство."""
+        src = SourceInfo(kind, kind, device=device)
+        ok = self._vswitch.start(src)
+        self.events.emit("media.vsource", active=self._vswitch.running, kind=kind)
+        return ok
+
+    def stop_virtual_camera(self) -> None:
+        self._vswitch.stop()
+        self.events.emit("media.vsource", active=False, kind="off")
+
+    def set_video_source(self, kind: str, device: int | None = None) -> None:
+        """Сменить источник на лету (устройство звонка не меняется)."""
+        self._vswitch.set_source(SourceInfo(kind, kind, device=device))
+        self.events.emit("media.vsource", active=self._vswitch.running, kind=kind)
+
+    def current_video_source(self) -> str:
+        return self._vswitch.current_source().kind
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         if enabled and not self._screen_share_enabled:

@@ -71,6 +71,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "h323": {"enabled": False, "port": 1720},
     "features": {
         "allow_screen_share": True,
+        # Встроенный коммутатор источников (аналог OBS): приложение
+        # отдаёт ОДНО виртуальное устройство, а источник меняется внутри.
+        "virtual_camera": False,
+        "virtual_camera_device": "/dev/video0",
         "allow_recording": True,
         "recording_path": str(default_recording_dir()),
         "rtcp_poll_interval": 3.0,
@@ -359,6 +363,16 @@ class Config:
     @property
     def features(self) -> Dict[str, Any]:
         return dict(self.raw.get("features", DEFAULT_CONFIG["features"]))
+
+    @property
+    def virtual_camera_enabled(self) -> bool:
+        """Включён ли встроенный коммутатор источников (единый девайс)."""
+        return bool(self.features.get("virtual_camera", False))
+
+    @property
+    def virtual_camera_device(self) -> str:
+        """Путь к виртуальному устройству (v4l2loopback/OBS Virtual Camera)."""
+        return str(self.features.get("virtual_camera_device", "/dev/video0"))
 
     @property
     def recording_path(self) -> str:

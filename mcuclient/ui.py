@@ -560,6 +560,18 @@ if QT_AVAILABLE:
             self.camera_combo.currentIndexChanged.connect(self._on_camera_selected)
             dlayout.addWidget(self.camera_combo, 2, 1)
 
+            # Встроенный коммутатор источников (единое виртуальное устройство).
+            # Показываем, только если режим включён в конфиге.
+            self.source_combo = QtWidgets.QComboBox()
+            self.source_combo.addItem("Камера (напрямую)", "camera")
+            self.source_combo.addItem("Тест-таблица", "colorbar")
+            self.source_combo.addItem("Демонстрация экрана", "screen")
+            self.source_combo.currentIndexChanged.connect(self._on_video_source_selected)
+            self.source_label = QtWidgets.QLabel("Источник видео:")
+            self.source_combo.setEnabled(self.engine.virtual_camera_available)
+            dlayout.addWidget(self.source_label, 8, 0)
+            dlayout.addWidget(self.source_combo, 8, 1)
+
             self.preview_btn = QtWidgets.QPushButton("Тест камеры")
             _icons.set_button_icon(self.preview_btn, "play")
             self.preview_btn.setCheckable(True)
@@ -1001,6 +1013,24 @@ if QT_AVAILABLE:
                     except Exception:  # noqa: BLE001
                         pass
                 self.device_status.setText(f"Выбрана камера: {self.camera_combo.currentText()}")
+
+        def _on_video_source_selected(self, index: int) -> None:
+            """Переключить источник встроенного коммутатора."""
+            kind = self.source_combo.itemData(index)
+            if kind is None:
+                return
+            try:
+                dev = None
+                if kind == "camera":
+                    d = self.camera_combo.currentData()
+                    dev = int(d) if d is not None and d >= 0 else None
+                if not self.engine.virtual_camera_running:
+                    self.engine.start_virtual_camera(kind, dev)
+                else:
+                    self.engine.set_video_source(kind, dev)
+                self.device_status.setText(f"Источник видео: {kind}")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Смена источника видео: %s", exc)
 
         def _on_mic_selected(self, index: int) -> None:
             dev_id = self.mic_combo.itemData(index)
