@@ -377,9 +377,17 @@ if QT_AVAILABLE:
             call_row.addWidget(self.uri_edit, stretch=1)
             call_row.addWidget(call_btn)
             left.addLayout(call_row)
-            root.addLayout(left, stretch=3)
+            root.addLayout(left, stretch=5)
 
-            right = QtWidgets.QVBoxLayout()
+            # Правая панель: прокручиваемая и с ограничением ширины, чтобы
+            # не съедала место под видео (список участников + устройства).
+            right_scroll = QtWidgets.QScrollArea()
+            right_scroll.setWidgetResizable(True)
+            right_scroll.setMaximumWidth(420)
+            right_scroll.setMinimumWidth(300)
+            right_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            right_host = QtWidgets.QWidget()
+            right = QtWidgets.QVBoxLayout(right_host)
             right.addWidget(QtWidgets.QLabel("Управление вызовами"))
             btn_row = QtWidgets.QHBoxLayout()
             self.accept_btn = QtWidgets.QPushButton("Принять")
@@ -522,7 +530,9 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.bandwidth, 3, 1)
             qlayout.addWidget(self.bandwidth_label, 3, 2)
             right.addWidget(quality)
-            root.addLayout(right, stretch=2)
+            right.addStretch()
+            right_scroll.setWidget(right_host)
+            root.addWidget(right_scroll, stretch=1)
 
             self.statusBar().showMessage("Готов")
             self._update_buttons()

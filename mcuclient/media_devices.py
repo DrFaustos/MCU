@@ -243,12 +243,23 @@ def _proc_asound_cards() -> List[Tuple[str, str]]:
         if not m:
             continue
         card_num, short, rest = m.groups()
-        # rest = "HDA-Intel - HD-Audio Generic" -> берём часть после дефиса.
-        name = rest.split("-", 1)[1].strip() if "-" in rest else short.strip()
-        if not name:
-            name = short.strip()
-        result.append((f"card{card_num}", name))
+        result.append((f"card{card_num}", _clean_card_name(rest, short)))
     return result
+
+
+def _clean_card_name(rest: str, short: str) -> str:
+    """Человекочитаемое имя карты из строки /proc/asound/cards.
+
+    ВАЖНО: разделитель — пробел-дефис-пробел, а не первый дефис. Иначе
+    ``HDA-Intel - HD-Audio Generic`` режется в ``Intel - HD-Audio Generic``
+    (ложный «Intel» на AMD-машинах).
+    """
+    rest = (rest or "").strip()
+    if " - " in rest:
+        name = rest.split(" - ", 1)[1].strip()
+    else:
+        name = rest or short.strip()
+    return name or short.strip()
 
 
 def _list_windows_devices() -> Tuple[List[DeviceInfo], List[DeviceInfo]]:
@@ -621,6 +632,29 @@ class MediaManager:
             return False
 
 
+def _card_codec_name(card_num: str) -> str:
+    """Имя кодека карты из /proc/asound/cardN/codec#* (реальный вендор).
+
+    Пример: ``Codec: ATI R6xx HDMI`` -> ``ATI R6xx HDMI``. Точнее, чем имя
+    драйвера (HDA-Intel), и убирает ложный «Intel» на AMD/других платах.
+    """
+    base = pathlib.Path("/proc/asound") / f"card{card_num}"
+    try:
+        codecs = sorted(base.glob("codec#*"))
+    except OSError:
+        return ""
+    for codec in codecs:
+        try:
+            for line in codec.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lower().startswith("codec:"):
+                    name = line.split(":", 1)[1].strip()
+                    if name:
+                        return name
+        except OSError:
+            continue
+    return ""
+
+
 def _proc_asound_name_map() -> dict:
     """Карта: короткое имя карты ALSA -> человекочитаемое имя.
 
@@ -637,8 +671,10 @@ def _proc_asound_name_map() -> dict:
         if not m:
             continue
         card_num, short, rest = m.groups()
-        human = rest.split("-", 1)[1].strip() if "-" in rest else short.strip()
-        human = human or short.strip()
+        human = _clean_card_name(rest, short)
+        codec = _card_codec_name(card_num)
+        if codec:
+            human = codec
         mapping[f"card{card_num}"] = human
         mapping[short.strip()] = human
     return mapping
