@@ -1206,15 +1206,33 @@ class SipEngine:
         targets = [participant] if participant else list(
             (self.room.participants.values() if self.room else [])
         )
+        # ВАЖНО: Call.vidSetStream(op, param) принимает ПЕРВЫМ аргументом
+        # ОПЕРАЦИЮ (PJSUA_CALL_VID_STRM_*), а не направление. Раньше сюда
+        # ошибочно передавали PJMEDIA_DIR_* -> операция трактовалась как
+        # CHANGE_DIR(3) без param, и мут/вкл камеры НЕ применялись.
+        # Теперь: камера выключена -> STOP_TRANSMIT, включена -> START_TRANSMIT.
+        want_send = bool(self._screen_share_enabled or self.media_state.camera_enabled)
+        op_stop = getattr(_pj, "PJSUA_CALL_VID_STRM_STOP_TRANSMIT", None)
+        op_start = getattr(_pj, "PJSUA_CALL_VID_STRM_START_TRANSMIT", None)
+        op = op_start if want_send else op_stop
+        if op is None:
+            return
         for p in targets:
             if p is None or p._call is None:
                 continue
             try:  # pragma: no cover
-                if hasattr(p._call, "vidSetStream"):
-                    if self._screen_share_enabled or self.media_state.camera_enabled:
-                        p._call.vidSetStream(_pj.PJMEDIA_DIR_ENCODING_DECODING)
-                    else:
-                        p._call.vidSetStream(_pj.PJMEDIA_DIR_DECODING)
+                if not hasattr(p._call, "vidSetStream"):
+                    continue
+                idx = p._call.vidGetStreamIdx() if hasattr(p._call, "vidGetStreamIdx") else 0
+                if idx is None or idx < 0:
+                    continue
+                prm = _pj.CallVidSetStreamParam()
+                prm.medIdx = int(idx)
+                p._call.vidSetStream(op, prm)
+                log.info(
+                    "Видео-поток вызова %s: %s",
+                    p.id, "возобновлён" if want_send else "остановлен (камера выкл)",
+                )
             except Exception as exc:  # noqa: BLE001
                 log.debug("Не удалось применить медиа-состояние: %s", exc)
 
