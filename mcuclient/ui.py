@@ -1021,10 +1021,22 @@ if QT_AVAILABLE:
                     )
                 elif event == "call.video":
                     # Появился/пропал видеопоток — перестроим сетку и подключим окно.
-                    self._refresh_participants_list()
+                    pid = payload.get("id")
                     if payload.get("active"):
+                        self._refresh_participants_list()
                         self._schedule_grid_rebuild()
-                    QtCore.QTimer.singleShot(50, self._attach_available_video)
+                        QtCore.QTimer.singleShot(50, self._attach_available_video)
+                    else:
+                        # Видео пропало (камера выключена/мут) — отцепляем тайл,
+                        # иначе остаётся «замороженный» последний кадр.
+                        tile = self._tiles.get(pid) if pid is not None else None
+                        if tile is not None:
+                            tile.detach_native_video()
+                        try:
+                            self.engine.detach_embedded_video(pid)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._refresh_participants_list()
                 elif event == "call.rejected":
                     self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
                 elif event == "media.preview":

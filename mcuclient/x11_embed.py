@@ -135,6 +135,20 @@ def resize_window(xid: int, width: int, height: int) -> bool:
         return False
 
 
+def unmap_window(xid: int) -> bool:
+    """Скрыть нативное окно (XUnmapWindow) — чтобы кадр не «замирал». """
+    d = _display()
+    if not d or not xid:
+        return False
+    try:
+        _xlib.XUnmapWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        _xlib.XUnmapWindow(d, ctypes.c_ulong(xid))
+        _xlib.XFlush(d)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def native_xid(video_window) -> Optional[int]:
     """Достать нативный XID из pjsua2 VideoWindow (или None)."""
     if video_window is None:

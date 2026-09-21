@@ -614,6 +614,12 @@ class SipEngine:
             log.info("Видео вызова %s встроено в тайл (xid=%s)", participant_id, xid)
         return ok
 
+    def detach_embedded_video(self, participant_id: int) -> None:
+        """Убрать встроенное видео участника (камера выключена/вызов завершён)."""
+        xid = self._embedded_xids.pop(participant_id, None)
+        if xid:
+            x11_embed.unmap_window(xid)
+
     def resize_embedded_video(self, participant_id: int, width: int, height: int) -> None:
         """Подогнать встроенное видео под размер тайла."""
         xid = self._embedded_xids.get(participant_id)
