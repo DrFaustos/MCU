@@ -677,7 +677,8 @@ if QT_AVAILABLE:
 
                 # Сигнатура: если состав и сетка не изменились — не трогаем
                 # layout вообще (иначе повторный addWidget роняет Qt на Windows).
-                signature = (tuple(getattr(p, "id", None) for p in visible), rows, cols)
+                local_on = bool(self.engine.local_preview_active)
+                signature = (local_on, tuple(getattr(p, "id", None) for p in visible), rows, cols)
                 if signature == self._grid_signature and self.video_grid_layout.count() > 0:
                     QtCore.QTimer.singleShot(50, self._attach_available_video)
                     return
