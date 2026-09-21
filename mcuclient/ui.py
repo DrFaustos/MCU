@@ -66,7 +66,21 @@ if QT_AVAILABLE:
             super().__init__(parent)
             self.participant_id: int | None = None
             self._native_attached = False
+            self._engine = None
+            self._is_local = False
             self._build_ui()
+
+        def resizeEvent(self, event):  # noqa: N802
+            super().resizeEvent(event)
+            # Нативное окно PJSIP не масштабируется само — подгоняем его под тайл.
+            if self._native_attached and self._engine is not None and self.participant_id is not None:
+                try:
+                    h = self.video_holder
+                    self._engine.resize_embedded_video(
+                        self.participant_id, h.width(), h.height()
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         def _build_ui(self) -> None:
             layout = QtWidgets.QVBoxLayout(self)
@@ -158,7 +172,12 @@ if QT_AVAILABLE:
                 name = name[4:]
             if "@" in name:
                 name = name.split("@")[0]
-            self.name_label.setText(name)
+            tag = "  (Вы)" if self._is_local else ""
+            self.name_label.setText(f"#{p.id}  {name}{tag}")
+            if self._is_local:
+                self.name_label.setStyleSheet(
+                    "color:#7fd1a0; font-size:11px; font-weight:bold;"
+                )
 
             if not self._native_attached:
                 if p.is_video_muted:
@@ -190,7 +209,13 @@ if QT_AVAILABLE:
             embedded = engine.attach_video_window(participant_id, self.video_holder)
             if embedded:
                 self._native_attached = True
+                self._engine = engine
                 self.video_label.hide()
+                try:
+                    h = self.video_holder
+                    engine.resize_embedded_video(participant_id, h.width(), h.height())
+                except Exception:  # noqa: BLE001
+                    pass
                 return True
             # Встраивание не удалось (Wayland/чужой toolkit) — показываем
             # видео отдельным нативным окном, но не считаем тайл «готовым».
