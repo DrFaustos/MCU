@@ -23,6 +23,7 @@ from .call_registry import CallRegistry
 from .chat import ChatHistory, normalize_message
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
+from . import x11_embed
 
 log = get_logger("sip")
 
@@ -196,6 +197,7 @@ class SipEngine:
         self._video_supported = False
         self._video_preview = None
         self._capture_bindings: list = []
+        self._embedded_xids: Dict[int, int] = {}
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
         self._CallClass = None  # подкласс pj.Call
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
@@ -580,20 +582,50 @@ class SipEngine:
         return self._registry.get_video_window(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        """Встроить видео PJSIP в тайл.
+        """Встроить нативное окно видео PJSIP в тайл (X11 reparent).
 
-        ВАЖНО: ``VideoWindow.setWindow`` в pjsua2 документирован как
-        поддерживаемый ТОЛЬКО на Android. На Linux он не работает, а
-        последующий ``Show(True)`` на невалидном окне вызывает нативный
-        assertion ``pjsua_vid_win_set_show: wid >= 0 && wid < 16`` и роняет
-        процесс (Python-исключение его не ловит).
-
-        Поэтому здесь НЕ трогаем нативное окно. Видео показывает сам PJSIP:
-        аккаунт создаётся с ``autoShowIncoming = True``, и входящее видео
-        открывается отдельным нативным окном. Возвращаем False — тайл не
-        используется, но процесс не падает.
+        ``VideoWindow.setWindow`` в pjsua2 работает только на Android, а
+        ``Show(True)`` на невалидном окне роняет процесс нативным assert.
+        Поэтому используем X11: берём нативный XID окна PJSIP
+        (``getInfo().winHandle.handle.window``) и переподчиняем его виджету
+        Qt через ``XReparentWindow`` (см. mcuclient/x11_embed.py). Работает
+        на X11 и XWayland.
         """
-        return False
+        # ВСТРАИВАНИЕ ОПЦИОНАЛЬНО (по умолчанию ВЫКЛ).
+        # На этой сборке PJSIP 2.16 вызов VideoWindow.getInfo() для окна
+        # ВЫЗОВА падает нативным assert `pjsua_vid_win_get_info:
+        # wid >= 0 && wid < 16` (Python его не ловит) -> краш GUI.
+        # Поэтому по умолчанию видео показывает сам PJSIP отдельным окном.
+        # Включить эксперимент: MCU_EMBED_VIDEO=1 (на свой риск).
+        import os as _os
+        if _os.environ.get("MCU_EMBED_VIDEO") != "1":
+            return False
+        window = self._registry.get_video_window(participant_id)
+        if window is None or not PJSIP_AVAILABLE:
+            return False
+        try:
+            xid = x11_embed.native_xid(window)
+        except Exception:  # noqa: BLE001
+            xid = None
+        if not xid:
+            return False
+        try:  # pragma: no cover
+            parent = int(widget.winId())
+        except Exception:  # noqa: BLE001
+            return False
+        w = max(1, widget.width())
+        h = max(1, widget.height())
+        ok = x11_embed.embed_window(xid, parent, w, h)
+        if ok:
+            self._embedded_xids[participant_id] = xid
+            log.info("Видео вызова %s встроено в тайл (xid=%s)", participant_id, xid)
+        return ok
+
+    def resize_embedded_video(self, participant_id: int, width: int, height: int) -> None:
+        """Подогнать встроенное видео под размер тайла."""
+        xid = self._embedded_xids.get(participant_id)
+        if xid:
+            x11_embed.resize_window(xid, max(1, width), max(1, height))
 
     def show_video_window(self, participant_id: int) -> bool:
         """Совместимость: нативное окно показывает PJSIP (autoShowIncoming)."""
