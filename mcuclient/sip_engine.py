@@ -958,8 +958,12 @@ class SipEngine:
                 self._video_preview = _pj.VideoPreview(int(target))
                 self._local_preview_dev = int(target)
             prm = _pj.VideoPreviewOpParam()
+            # ВАЖНО: show=False — PJSIP НЕ показывает своё окно сам. Мы встраиваем
+            # его в тайл через X11 reparent (иначе появляется отдельное окно,
+            # которое не убирается). XID при этом доступен.
+            prm.show = False
             self._video_preview.start(prm)
-            log.info("Локальное превью камеры запущено (dev=%s)", target)
+            log.info("Локальное превью камеры запущено (dev=%s, show=False)", target)
             self.events.emit("media.preview", active=True)
             return True
         except Exception as exc:  # noqa: BLE001
