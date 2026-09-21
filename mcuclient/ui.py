@@ -915,6 +915,26 @@ if QT_AVAILABLE:
             state = "включён" if checked else "выключен"
             self.statusBar().showMessage(f"Микрофон {state}", 3000)
 
+        def _ensure_local_preview(self) -> None:
+            """Автозапуск превью своей камеры при активном звонке.
+
+            Нужно, чтобы в сетке был свой тайл («Вы»), как в Zoom/Teams:
+            пользователь видит и себя, и собеседника. Запускается только
+            если камера включена и превью ещё не активно.
+            """
+            if self.engine.local_preview_active:
+                return
+            if not self.engine.media_state.camera_enabled:
+                return
+            dev_id = self.camera_combo.currentData()
+            if dev_id is None or dev_id < 0:
+                dev_id = None
+            try:
+                if self.engine.start_local_preview(int(dev_id) if dev_id is not None else None):
+                    self._schedule_grid_rebuild()
+            except Exception:  # noqa: BLE001
+                pass
+
         def _on_preview_toggle(self, checked: bool) -> None:
             if checked:
                 dev_id = self.camera_combo.currentData()
@@ -1074,6 +1094,7 @@ if QT_AVAILABLE:
                         # См. комментарий выше: перестройку сетки откладываем,
                         # чтобы не трогать нативные виджеты во время обработки
                         # события (access violation на Windows).
+                        self._ensure_local_preview()
                         self._schedule_grid_rebuild()
                     self.statusBar().showMessage(f"Вызов {pid}: {state}", 5000)
                 elif event == "call.error":
