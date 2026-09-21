@@ -716,6 +716,16 @@ if QT_AVAILABLE:
             status = "Все заглушены" if muted else "Мут снят со всех"
             self.statusBar().showMessage(status, 5000)
 
+        def _selected_camera_id(self):
+            """Текущая выбранная камера: из media_state, иначе из комбобокса."""
+            raw = getattr(self.engine.media_state, "camera_id", None)
+            if raw is not None:
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    pass
+            return self.camera_combo.currentData()
+
         def _populate_cameras(self) -> None:
             """Заполнить список камер реальными устройствами.
 
@@ -723,7 +733,12 @@ if QT_AVAILABLE:
             set_video_device). Если PJSIP пуст, показываем OS-камеры
             (list_known_cameras) как информационный список.
             """
-            prev = self.camera_combo.currentData()
+            # ВАЖНО: блокируем сигналы на время перезаполнения. Иначе clear()
+            # и addItem() эмитят currentIndexChanged -> _on_camera_selected
+            # -> set_video_device(0), и watcher (раз в 2с) сбрасывает выбор
+            # камеры на dev 0. Предпочитаем текущее выбранное движком.
+            prev = self._selected_camera_id()
+            blocker = QtCore.QSignalBlocker(self.camera_combo)
             self.camera_combo.clear()
             devices = self.engine.list_video_devices()
             if devices:
@@ -745,10 +760,12 @@ if QT_AVAILABLE:
                     self.camera_combo.addItem("нет видеоустройств", -1)
                     self.camera_combo.setEnabled(False)
             self._restore_combo(self.camera_combo, prev)
+            del blocker  # снимаем блокировку сигналов
 
         def _populate_mics(self) -> None:
             """Заполнить список микрофонов реальными устройствами PJSIP."""
             prev = self.mic_combo.currentData()
+            blocker = QtCore.QSignalBlocker(self.mic_combo)
             self.mic_combo.clear()
             devices = self.engine.list_audio_devices()
             if not devices:
@@ -761,6 +778,7 @@ if QT_AVAILABLE:
                     self.mic_combo.addItem("нет аудиоустройств", -1)
                     self.mic_combo.setEnabled(False)
                 self._restore_combo(self.mic_combo, prev)
+                del blocker
                 return
             self.mic_combo.setEnabled(True)
             # Показываем устройства ВХОДА (микрофоны) первыми, как в Zoom/Teams.
@@ -771,6 +789,7 @@ if QT_AVAILABLE:
             for dev in inputs:
                 self.mic_combo.addItem(dev["name"], dev["id"])
             self._restore_combo(self.mic_combo, prev)
+            del blocker
 
         @staticmethod
         def _restore_combo(combo, prev) -> None:
@@ -912,6 +931,11 @@ if QT_AVAILABLE:
             if item is None:
                 return None
             return item.data(QtCore.Qt.ItemDataRole.UserRole)
+
+        def call_uri(self, uri: str) -> None:
+            """Инициировать вызов на URI (для --auto-call и внешних сценариев)."""
+            self.uri_edit.setText(uri)
+            self._on_call()
 
         def _on_call(self) -> None:
             uri = self.uri_edit.text().strip()
@@ -1085,7 +1109,7 @@ else:  # pragma: no cover
             raise RuntimeError("PySide6 не установлен. Установите: pip install PySide6")
 
 
-def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
+def run_gui(config: Config, engine: SipEngine, h323: H323Gateway, auto_call: str | None = None) -> int:
     """Запустить Qt-приложение. Возвращает код выхода."""
     log.info("GUI: проверка PySide6 (QT_AVAILABLE=%s)", QT_AVAILABLE)
     if not QT_AVAILABLE:
@@ -1114,6 +1138,9 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     window = MainWindow(config, engine, h323)
     log.info("GUI: показ окна...")
     window.show()
+    if auto_call:
+        # Небольшая задержка: даём окну и движку полностью инициализироваться.
+        QtCore.QTimer.singleShot(1500, lambda: window.call_uri(auto_call))
     log.info("GUI: вход в цикл событий")
     try:
         code = app.exec()

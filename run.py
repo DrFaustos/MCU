@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--doctor", action="store_true",
                    help="диагностика окружения (pjsua2, порт, устройства, графика) и выход")
     p.add_argument("--call", help="headless: позвонить на SIP URI/IP и выйти (тест исходящего вызова)")
+    p.add_argument("--auto-call", metavar="URI",
+                   help="GUI: сразу позвонить на SIP URI/IP после старта")
     p.add_argument("--call-wait", type=int, default=30,
                    help="headless: сколько секунд ждать вызова (по умолчанию 30)")
 
@@ -281,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         from mcuclient.ui import run_gui
 
         log.info("Шаг 6/6: запуск GUI (run_gui)...")
-        code = run_gui(config, engine, h323)
+        code = run_gui(config, engine, h323, auto_call=args.auto_call)
         log.info("GUI завершился с кодом %s", code)
         return code
     except Exception:  # noqa: BLE001

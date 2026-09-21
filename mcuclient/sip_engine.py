@@ -580,35 +580,24 @@ class SipEngine:
         return self._registry.get_video_window(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        window = self._registry.get_video_window(participant_id)
-        if window is None or not PJSIP_AVAILABLE:
-            return False
-        embedded = False
-        try:  # pragma: no cover
-            handle = _pj.VideoWindowHandle()
-            handle.handle.window = int(widget.winId())
-            handle.type = 0
-            window.setWindow(handle)
-            embedded = True
-        except Exception as exc:  # noqa: BLE001
-            log.info("Встраивание видео в тайл не удалось (%s); показываю отдельным окном", exc)
-        try:  # pragma: no cover
-            window.Show(True)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось показать видеоокно: %s", exc)
-            return False
-        return embedded
+        """Встроить видео PJSIP в тайл.
+
+        ВАЖНО: ``VideoWindow.setWindow`` в pjsua2 документирован как
+        поддерживаемый ТОЛЬКО на Android. На Linux он не работает, а
+        последующий ``Show(True)`` на невалидном окне вызывает нативный
+        assertion ``pjsua_vid_win_set_show: wid >= 0 && wid < 16`` и роняет
+        процесс (Python-исключение его не ловит).
+
+        Поэтому здесь НЕ трогаем нативное окно. Видео показывает сам PJSIP:
+        аккаунт создаётся с ``autoShowIncoming = True``, и входящее видео
+        открывается отдельным нативным окном. Возвращаем False — тайл не
+        используется, но процесс не падает.
+        """
+        return False
 
     def show_video_window(self, participant_id: int) -> bool:
-        window = self._registry.get_video_window(participant_id)
-        if window is None or not PJSIP_AVAILABLE:
-            return False
-        try:  # pragma: no cover
-            window.Show(True)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось показать видеоокно: %s", exc)
-            return False
+        """Совместимость: нативное окно показывает PJSIP (autoShowIncoming)."""
+        return False
 
     def _build_id_uri(self) -> str:
         import re
