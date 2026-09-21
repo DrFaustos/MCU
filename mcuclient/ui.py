@@ -55,6 +55,48 @@ except Exception as _exc:  # noqa: BLE001
 
 if QT_AVAILABLE:
 
+    class AspectRatioContainer(QtWidgets.QWidget):
+        """Контейнер, вписывающий дочерний виджет с сохранением 16:9.
+
+        Видео PJSIP встраивается в ``child``; при изменении размера тайла
+        child центрируется и масштабируется так, чтобы не искажать кадр
+        (чёрные поля по бокам/сверху — как в Zoom/Teams).
+        """
+
+        def __init__(self, aspect: float = 16.0 / 9.0, parent=None) -> None:
+            super().__init__(parent)
+            self._aspect = aspect if aspect > 0 else 16.0 / 9.0
+            self._child = None
+
+        def set_child(self, child) -> None:
+            self._child = child
+            child.setParent(self)
+
+        def child(self):
+            return self._child
+
+        def _fit(self) -> None:
+            if self._child is None:
+                return
+            w = self.width()
+            h = self.height()
+            if w <= 0 or h <= 0:
+                return
+            # Вписываем 16:9 в доступную область (contain).
+            if w / h > self._aspect:
+                ch = h
+                cw = int(h * self._aspect)
+            else:
+                cw = w
+                ch = int(w / self._aspect)
+            x = (w - cw) // 2
+            y = (h - ch) // 2
+            self._child.setGeometry(x, y, max(1, cw), max(1, ch))
+
+        def resizeEvent(self, event):  # noqa: N802
+            super().resizeEvent(event)
+            self._fit()
+
     class ParticipantTile(QtWidgets.QWidget):
         """Ячейка видео для одного участника с кнопками мута."""
 
@@ -75,7 +117,7 @@ if QT_AVAILABLE:
             # Нативное окно PJSIP не масштабируется само — подгоняем его под тайл.
             if self._native_attached and self._engine is not None and self.participant_id is not None:
                 try:
-                    h = self.video_holder
+                    h = self.video_inner
                     self._engine.resize_embedded_video(
                         self.participant_id, h.width(), h.height()
                     )
@@ -89,18 +131,22 @@ if QT_AVAILABLE:
 
             # holder — стабильный нативный контейнер, в который PJSIP встраивает
             # своё видео-окно (см. SipEngine.attach_video_window).
-            self.video_holder = QtWidgets.QWidget()
-            self.video_holder.setMinimumSize(160, 120)
+            self.video_holder = AspectRatioContainer(16.0 / 9.0)
+            self.video_holder.setMinimumSize(160, 90)
             self.video_holder.setStyleSheet(
-                "background:#1a2028; border:1px solid #2a3138; border-radius:4px;"
+                "background:#0a0e12; border:1px solid #2a3138; border-radius:4px;"
             )
-            holder_layout = QtWidgets.QVBoxLayout(self.video_holder)
-            holder_layout.setContentsMargins(0, 0, 0, 0)
+            # Внутренний виджет — реальный приёмник нативного окна PJSIP.
+            self.video_inner = QtWidgets.QWidget(self.video_holder)
+            self.video_inner.setStyleSheet("background:#1a2028;")
+            inner_layout = QtWidgets.QVBoxLayout(self.video_inner)
+            inner_layout.setContentsMargins(0, 0, 0, 0)
 
             self.video_label = QtWidgets.QLabel("Нет видео")
             self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.video_label.setStyleSheet("background:transparent; color:#7a8592;")
-            holder_layout.addWidget(self.video_label, stretch=1)
+            inner_layout.addWidget(self.video_label, stretch=1)
+            self.video_holder.set_child(self.video_inner)
             layout.addWidget(self.video_holder, stretch=1)
 
             self.name_label = QtWidgets.QLabel("—")
@@ -215,13 +261,13 @@ if QT_AVAILABLE:
                 return True
             if engine.get_video_window(participant_id) is None:
                 return False
-            embedded = engine.attach_video_window(participant_id, self.video_holder)
+            embedded = engine.attach_video_window(participant_id, self.video_inner)
             if embedded:
                 self._native_attached = True
                 self._engine = engine
                 self.video_label.hide()
                 try:
-                    h = self.video_holder
+                    h = self.video_inner
                     engine.resize_embedded_video(participant_id, h.width(), h.height())
                 except Exception:  # noqa: BLE001
                     pass
@@ -613,11 +659,11 @@ if QT_AVAILABLE:
             )
             tile.setEnabled(True)
             try:
-                if self.engine.attach_local_preview(tile.video_holder):
+                if self.engine.attach_local_preview(tile.video_inner):
                     tile._native_attached = True
                     tile.video_label.hide()
                     try:
-                        h = tile.video_holder
+                        h = tile.video_inner
                         self.engine.resize_local_preview(h.width(), h.height())
                     except Exception:  # noqa: BLE001
                         pass
