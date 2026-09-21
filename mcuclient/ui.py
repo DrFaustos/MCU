@@ -18,11 +18,10 @@
 from __future__ import annotations
 
 import os
-import sys
-import signal
 import queue
+import signal
+import sys
 import traceback
-from typing import Dict, Optional
 
 # === ВАЖНО ===
 # Выбор QT_QPA_PLATFORM (Wayland -> XWayland/xcb) делает run.py ДО создания
@@ -37,11 +36,11 @@ if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
             os.environ['QT_PLUGIN_PATH'] = plugin_path
             os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(plugin_path, 'platforms')
 
-from .config import Config, LAYOUT_LABELS
+from . import icons as _icons
+from .config import LAYOUT_LABELS, Config
 from .h323_gateway import H323Gateway
 from .log import get_logger
 from .sip_engine import CallState, Participant, SipEngine
-from . import icons as _icons
 
 log = get_logger("ui")
 
@@ -63,9 +62,9 @@ if QT_AVAILABLE:
         mute_video_clicked = QtCore.Signal(int, bool)
         hangup_clicked = QtCore.Signal(int)
 
-        def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
             super().__init__(parent)
-            self.participant_id: Optional[int] = None
+            self.participant_id: int | None = None
             self._native_attached = False
             self._build_ui()
 
@@ -136,7 +135,7 @@ if QT_AVAILABLE:
             btn_row.addStretch()
             layout.addLayout(btn_row)
 
-        def set_participant(self, p: Optional[Participant]) -> None:
+        def set_participant(self, p: Participant | None) -> None:
             if p is None:
                 self.participant_id = None
                 if not self._native_attached:
@@ -217,8 +216,8 @@ if QT_AVAILABLE:
     class MicMonitorWindow(QtWidgets.QDialog):
         BARS = 32
 
-        def __init__(self, engine: SipEngine, dev_id: Optional[int] = None,
-                     parent: Optional[QtWidgets.QWidget] = None) -> None:
+        def __init__(self, engine: SipEngine, dev_id: int | None = None,
+                     parent: QtWidgets.QWidget | None = None) -> None:
             super().__init__(parent)
             self.engine = engine
             self._levels = [0.0] * self.BARS
@@ -268,7 +267,7 @@ if QT_AVAILABLE:
             super().closeEvent(event)
 
     class _LevelBars(QtWidgets.QWidget):
-        def __init__(self, count: int, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        def __init__(self, count: int, parent: QtWidgets.QWidget | None = None) -> None:
             super().__init__(parent)
             self._count = count
             self._levels = [0.0] * count
@@ -306,7 +305,7 @@ if QT_AVAILABLE:
             self.config = config
             self.engine = engine
             self.h323 = h323
-            self._tiles: Dict[int, ParticipantTile] = {}
+            self._tiles: dict[int, ParticipantTile] = {}
             # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
             # время обработки событий вызова приводил к access violation на Windows).
             self._tile_pool: list = []
@@ -327,7 +326,7 @@ if QT_AVAILABLE:
             # signal) на Windows приводят к access violation. Поэтому события
             # только складываются в очередь, а обрабатываются в главном потоке
             # Qt по таймеру.
-            self._event_queue: "queue.Queue" = queue.Queue()
+            self._event_queue: queue.Queue = queue.Queue()
             self.engine.events.subscribe(self._on_event)
 
             self.engine.set_answer_dispatch(self._request_answer)
@@ -908,7 +907,7 @@ if QT_AVAILABLE:
             status = "Идёт запись" if self.engine.is_recording else "Запись остановлена"
             self.statusBar().showMessage(status, 5000)
 
-        def _current_id(self) -> Optional[int]:
+        def _current_id(self) -> int | None:
             item = self.participants_list.currentItem()
             if item is None:
                 return None
@@ -969,7 +968,7 @@ if QT_AVAILABLE:
             if not self.engine:
                 log.warning("_handle_event: engine is None, event=%s", event)
                 return
-            
+
             try:
                 if event in {"call.incoming", "call.outgoing", "call.confirmed", "call.closed"}:
                     self._refresh_participants_list()
@@ -1110,7 +1109,7 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MCU Client")
     app.setOrganizationName("MCU")
-    
+
     log.info("GUI: создание главного окна...")
     window = MainWindow(config, engine, h323)
     log.info("GUI: показ окна...")
@@ -1120,6 +1119,6 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway) -> int:
         code = app.exec()
         log.info("GUI: цикл событий завершён, код=%s", code)
         return code
-    except Exception as e:
+    except Exception:
         log.critical("Исключение в app.exec():", exc_info=True)
         return 1
