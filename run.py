@@ -154,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         from mcuclient.config import load_config, parse_listen
         log.info("Импорт mcuclient.h323_gateway...")
         from mcuclient.h323_gateway import H323Gateway
+        from mcuclient.h323_endpoint import H323Endpoint
         log.info("Импорт mcuclient.sip_engine (включает pjsua2)...")
         from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine
         log.info("Импорт завершён. PJSIP_AVAILABLE=%s", PJSIP_AVAILABLE)
@@ -192,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
         engine = SipEngine(config)
         log.info("Шаг 3/6: создание H323Gateway...")
         h323 = H323Gateway(config)
+        # Этап 1 (ADR-0002): нативный H.323-эндпоинт (порт 1720) на H323Plus.
+        # Работает, только если собран H323Plus; иначе start() вернёт False
+        # и приём H.323 останется выключенным (SIP продолжает работать).
+        h323_native = H323Endpoint(
+            engine.room, engine.events, config, port=config.h323_port
+        )
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         return 3
@@ -243,7 +250,18 @@ def main(argv: list[str] | None = None) -> int:
             st = h323.status()
             log.info("H.323: %s", st.message)
         except Exception:  # noqa: BLE001
-            log.exception("Ошибка запуска H.323")
+            log.exception("Ошибка запуска H.323 (legacy gateway)")
+        # Этап 1: нативный приём H.323 на H323Plus (единый медиа-слой).
+        try:
+            if h323_native.start():
+                log.info("H.323: нативный эндпоинт слушает порт %s", h323_native.port)
+            else:
+                log.warning(
+                    "H.323: нативный приём недоступен (H323Plus не собран). "
+                    "См. scripts/install_h323plus.sh (ADR-0002)."
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка запуска нативного H.323-эндпоинта")
 
     if args.headless:
         if args.call:
@@ -264,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
                     if getattr(p.state, "value", "") == "disconnected":
                         break
             try:
+                h323_native.stop()
                 h323.stop()
                 engine.stop()
             except Exception:  # noqa: BLE001
@@ -280,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             pass
         finally:
+            h323_native.stop()
             h323.stop()
             engine.stop()
         return 0
@@ -297,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         log.critical("GUI недоступен или упал:", exc_info=True)
         log.info("Запустите с --headless для серверного режима.")
         try:
+            h323_native.stop()
             h323.stop()
             engine.stop()
         except Exception:  # noqa: BLE001
