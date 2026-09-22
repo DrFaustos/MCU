@@ -67,7 +67,8 @@ jobs:
 
       - name: Shellcheck dev scripts (syntax)
         run: |
-          for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/run_gui.sh; do
+          for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/run_gui.sh \
+                   scripts/install_h323plus.sh; do
             bash -n "$f" && echo "OK  $f" || { echo "FAIL $f"; exit 1; }
           done
 
