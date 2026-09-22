@@ -138,3 +138,13 @@ H323Plus/PJSIP: работает на PCM-буферах (numpy, с чистым
 `mix_for(pid)` исключает голос самого участника (нет эха себя).
 19 тестов в `tests/test_audio_mixer.py`; всего 277. Подключение к
 медиа-слою H323Plus — следующий шаг после нативной сборки.
+
+### 2026-09-22 — Этап 5 (ADR-0002): согласование и диагностика кодеков SDP
+
+Добавлен `mcuclient/codec_negotiation.py` — разбор SDP-кодеков (`a=rtpmap`,
+`a=fmtp`) и согласование с нашим списком с **диагностикой по каждому
+отклонённому кодеку** (главная боль OpenMCU.ru — молчаливый mismatch).
+Разбирает H.264 `profile-level-id` (baseline/main/high) и level, объясняет
+«не тот clock rate», «H.264 high profile не поддержан», «нет в списке».
+Это даёт лучшую совместимость с Sony/Polycom, чем у OpenMCU.ru.
+29 тестов в `tests/test_codec_negotiation.py`; всего 306.
