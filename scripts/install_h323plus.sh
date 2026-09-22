@@ -120,6 +120,28 @@ refresh_ldconfig() {
     fi
 }
 
+
+# --- 6. Проверка видео-кодеков и итоговый отчёт ------------------------------
+report() {
+    log "---- Итог ----"
+    log "PREFIX=${PREFIX}"
+    log "LD_LIBRARY_PATH=${PREFIX}/lib"
+    log "PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig"
+    # Проверяем, что собрались библиотеки (имена могут отличаться).
+    local found=0
+    for lib in "${PREFIX}"/lib/libh323*.so* "${PREFIX}"/lib/libpt*.so*; do
+        [ -e "$lib" ] || continue
+        found=$((found + 1))
+        log "библиотека: $(basename "$lib")"
+    done
+    if [ "$found" -eq 0 ]; then
+        log "ПРЕДУПРЕЖДЕНИЕ: .so не найдены в ${PREFIX}/lib — проверьте сборку"
+    fi
+    log "Экспортируйте перед запуском MCU:"
+    log "  export LD_LIBRARY_PATH=${PREFIX}/lib:$LD_LIBRARY_PATH"
+    log "  export PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH"
+}
+
 # --- 5. Проверка -------------------------------------------------------------
 verify() {
     log "Проверка установки"
@@ -148,4 +170,5 @@ build_ptlib
 build_h323plus
 refresh_ldconfig
 verify
+report
 log "Готово. Следующий шаг: Этап 1 — mcuclient/h323_endpoint.py (приём H.323)."
