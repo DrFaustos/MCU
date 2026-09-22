@@ -148,3 +148,13 @@ H323Plus/PJSIP: работает на PCM-буферах (numpy, с чистым
 «не тот clock rate», «H.264 high profile не поддержан», «нет в списке».
 Это даёт лучшую совместимость с Sony/Polycom, чем у OpenMCU.ru.
 29 тестов в `tests/test_codec_negotiation.py`; всего 306.
+
+### 2026-09-22 — Этап 5 (ADR-0002): согласование кодеков и диагностика (Sony/Polycom)
+
+Добавлен `mcuclient/codec_negotiation.py` — чистая логика разбора и
+согласования SDP-кодеков без PJSIP/H323Plus. Парсит `a=rtpmap`/`a=fmtp`,
+сопоставляет с нашим списком и **объясняет, почему кодек не согласовался**
+(нет в списке, другой clock rate, H.264 High Profile и т.п.). Это
+направлено на главную боль OpenMCU.ru — «молчаливое» расхождение кодеков
+с терминалами Sony. Разбор H.264 `profile-level-id` → profile/level.
+29 тестов в `tests/test_codec_negotiation.py`; всего 306.

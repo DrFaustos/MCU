@@ -196,3 +196,42 @@ def supported_audio_from_config(audio_list):
 
 def supported_video_from_config(video_list):
     return [c for c in video_list if _is_video(c.split('/')[0])]
+
+
+def log_codec_mismatch(call_info, codecs, audio_supported, video_supported):
+    """Stage 5 (ADR-0002): explain WHY audio/video was not negotiated.
+
+    Sony/Polycom often connect but have no audio/video because their
+    preferred codec (G.722.1C, G.719, H.264 High) was silently unmatched.
+    """
+    for want, chosen in (("audio", codecs.get("audio")), ("video", codecs.get("video"))):
+        if chosen:
+            continue
+        remote = _remote_codecs_from_call(call_info, want)
+        if not remote:
+            log.info("Кодек %s не согласован: терминал не прислал rtpmap", want)
+            continue
+        supported = audio_supported if want == "audio" else video_supported
+        res = negotiate(remote, supported, want=want)
+        for name, reason in res.rejected:
+            log.warning("Кодек %s отклонён: %s", name, reason)
+
+
+def _remote_codecs_from_call(call_info, want):
+    """Best-effort: pull codec names from PJSIP media info (raw SDP is not
+    exposed by PJSIP). Returns a list of CodecInfo."""
+    out = []
+    for mi in getattr(call_info, "media", None) or []:
+        name = getattr(mi, "codecName", None)
+        if not name:
+            continue
+        parts = str(name).split("/")
+        base = parts[0]
+        if (want == "video") != _is_video(base):
+            continue
+        try:
+            clock = int(parts[1]) if len(parts) > 1 else 8000
+        except ValueError:
+            clock = 8000
+        out.append(CodecInfo(payload_type=0, name=base, clock_rate=clock))
+    return out

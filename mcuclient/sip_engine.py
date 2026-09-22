@@ -618,6 +618,20 @@ class SipEngine:
                 "Согласованные кодеки вызова: аудио=%s, видео=%s",
                 codecs.get("audio") or "-", codecs.get("video") or "-",
             )
+            # Этап 5 (ADR-0002): если кодек не согласован, объясняем ПОЧЕМУ,
+            # а не оставляем тихое "-". Особенно важно для Sony (G.722.1C,
+            # G.719, H.264 High): терминал "соединился", но нет звука/видео.
+            from .codec_negotiation import (  # noqa: PLC0415
+                log_codec_mismatch,
+                supported_audio_from_config,
+                supported_video_from_config,
+            )
+            log_codec_mismatch(
+                ci,
+                codecs,
+                supported_audio_from_config(self.config.audio_codecs()),
+                supported_video_from_config(self.config.video_codecs()),
+            )
         except Exception:  # noqa: BLE001
             log.debug("active_codecs: ошибка", exc_info=True)
         # Как только у вызова поднялся видеопоток — подключаем выбранную
