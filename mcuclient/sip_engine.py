@@ -327,6 +327,23 @@ class SipEngine:
         except Exception as exc:  # noqa: BLE001
             log.debug("libRegisterThread(main): %s", exc)
 
+    def process_events(self, timeout: float = 0.0) -> None:
+        """Обработать события PJSIP (входящие пакеты, колбэки, таймеры).
+
+        КРИТИЧНО для headless/серверного режима. В GUI события прокачивает
+        Qt-цикл (через worker/таймер), но в headless его нет — если не
+        вызывать libHandleEvents(), входящие INVITE копятся в буфере сокета
+        (Recv-Q растёт), авто-ответ не срабатывает, и дозвониться нельзя.
+
+        :param timeout: сколько секунд ждать событий (0 — не блокироваться).
+        """
+        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+            return
+        try:  # pragma: no cover
+            self._endpoint.libHandleEvents(int(max(0.0, timeout) * 1000))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("libHandleEvents: %s", exc)
+
     def set_answer_dispatch(self, dispatch) -> None:
         self._answer_dispatch = dispatch
 

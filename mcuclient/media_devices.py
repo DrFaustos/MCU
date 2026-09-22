@@ -36,6 +36,11 @@ log = get_logger("media")
 # Таймаут внешних утилит (v4l2-ctl, pactl, arecord) — не должны подвешивать UI.
 _PROBE_TIMEOUT = 3.0
 
+# Верхняя граница числа видеоустройств PJSIP. getDevInfo по индексу за
+# пределами реального списка роняет процесс нативным segfault, поэтому
+# перечисление всегда ограничиваем разумным максимумом.
+MAX_VIDEO_DEVICES = 32
+
 
 @dataclass
 class DeviceInfo:
@@ -565,8 +570,22 @@ class MediaManager:
         devices: List[dict] = []
         try:
             vdm = self._endpoint.vidDevManager()
-            for i in range(vdm.getDevCount()):
-                info = vdm.getDevInfo(i)
+            # Снимок числа устройств ОДИН раз: если между getDevCount() и
+            # getDevInfo(i) список изменится, getDevInfo по несуществующему
+            # индексу роняет процесс НАТИВНЫМ segfault (Python-исключение его
+            # не ловит). Поэтому фиксируем count и ограничиваем его разумным
+            # максимумом, а каждый getDevInfo вызываем в своём try.
+            try:
+                count = int(vdm.getDevCount())
+            except Exception:  # noqa: BLE001
+                count = 0
+            count = max(0, min(count, MAX_VIDEO_DEVICES))
+            for i in range(count):
+                try:
+                    info = vdm.getDevInfo(i)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("getDevInfo(%d) не удался: %s", i, exc)
+                    continue
                 driver = str(getattr(info, "driver", "") or "")
                 name = str(getattr(info, "name", f"dev{i}"))
                 synthetic = MediaManager._is_synthetic_video(driver, name)

@@ -253,7 +253,11 @@ def main(argv: list[str] | None = None) -> int:
             log.info("Вызов инициирован: pid=%s", pid)
             deadline = time.time() + max(1, args.call_wait)
             while time.time() < deadline:
-                time.sleep(0.5)
+                # ВАЖНО: без libHandleEvents() PJSIP не обрабатывает входящие
+                # пакеты и колбэки (медиа/состояния) — процесс жив, но звонки
+                # не принимаются. В headless нет Qt-цикла, поэтому крутим сами.
+                engine.process_events(0.5)
+                time.sleep(0.1)
                 p = engine.room.participants.get(pid) if (pid and engine.room) else None
                 if p is not None:
                     log.info("Состояние вызова %s: %s", pid, p.state)
@@ -269,7 +273,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             import time
             while True:
-                time.sleep(1)
+                # КРИТИЧНО: прокачиваем события PJSIP. Без этого входящие
+                # INVITE копятся в буфере сокета (Recv-Q растёт), авто-ответ
+                # не срабатывает, и дозвониться до клиента невозможно.
+                engine.process_events(1.0)
         except KeyboardInterrupt:
             pass
         finally:
