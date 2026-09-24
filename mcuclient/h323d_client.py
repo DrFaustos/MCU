@@ -5,7 +5,7 @@ H323Plus — C++-библиотека без Python-биндингов. Поэт
 
 * подключается к его unix-сокету (newline-delimited JSON);
 * отдаёт события хоста как :class:`H323dEvent`;
-* шлёт хосту команды (ответ/сброс/останов).
+* шлёт хосту команды (ответ/сброс/исходящий вызов/останов).
 
 Всё, кроме сокета, — чистые функции, тестируемые без нативного стека.
 """
@@ -126,6 +126,17 @@ class H323dClient:
 
     def hangup(self, token: str) -> bool:
         return self.send_command("call.hangup", token=token)
+
+    def make_call(self, address: str, **extra: Any) -> bool:
+        """Инициировать исходящий H.323-вызов на адрес (IP или E.164).
+
+        Хост создаёт исходящее соединение H323Plus и пришлёт события
+        ``call.outgoing`` / ``call.connected`` / ``call.disconnected``.
+        """
+        address = (address or "").strip()
+        if not address:
+            return False
+        return self.send_command("call.make", address=address, **extra)
 
     def shutdown(self) -> bool:
         return self.send_command("shutdown")

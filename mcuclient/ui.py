@@ -36,6 +36,7 @@ if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
             os.environ['QT_PLUGIN_PATH'] = plugin_path
             os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(plugin_path, 'platforms')
 
+from . import call_proto
 from . import icons as _icons
 from .config import LAYOUT_LABELS, Config
 from .h323_gateway import H323Gateway
@@ -404,11 +405,14 @@ if QT_AVAILABLE:
             "1080p": (1920, 1080, 30),
         }
 
-        def __init__(self, config: Config, engine: SipEngine, h323: H323Gateway) -> None:
+        def __init__(self, config: Config, engine: SipEngine, h323: H323Gateway,
+                     h323_native=None, initial_protocol=None) -> None:
             super().__init__()
             self.config = config
             self.engine = engine
             self.h323 = h323
+            self.h323_native = h323_native
+            self._initial_protocol = call_proto.normalize_protocol(initial_protocol)
             self._tiles: dict[int, ParticipantTile] = {}
             # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
             # время обработки событий вызова приводил к access violation на Windows).
@@ -475,10 +479,26 @@ if QT_AVAILABLE:
 
             call_row = QtWidgets.QHBoxLayout()
             self.uri_edit = QtWidgets.QLineEdit()
-            self.uri_edit.setPlaceholderText("sip:100@192.168.1.50  или  192.168.1.50")
+            self.uri_edit.setPlaceholderText(
+                "sip:100@192.168.1.50, h323:10.0.0.1 или 192.168.1.50")
+            self.uri_edit.returnPressed.connect(self._on_call)
+            self.protocol_combo = QtWidgets.QComboBox()
+            for _key in call_proto.PROTOCOL_ORDER:
+                self.protocol_combo.addItem(
+                    call_proto.PROTOCOL_LABELS[_key], _key)
+            _init_proto = getattr(self, "_initial_protocol", call_proto.PROTOCOL_AUTO)
+            for _i in range(self.protocol_combo.count()):
+                if self.protocol_combo.itemData(_i) == _init_proto:
+                    self.protocol_combo.setCurrentIndex(_i)
+                    break
+            self.protocol_combo.setToolTip(
+                "Протокол исходящего вызова. «Авто» определяет по адресу "
+                "(h323:... -> H.323, иначе SIP)."
+            )
             call_btn = QtWidgets.QPushButton("Позвонить")
             call_btn.clicked.connect(self._on_call)
             call_row.addWidget(self.uri_edit, stretch=1)
+            call_row.addWidget(self.protocol_combo)
             call_row.addWidget(call_btn)
             left.addLayout(call_row)
             left_host = QtWidgets.QWidget()
@@ -1154,20 +1174,71 @@ if QT_AVAILABLE:
             self.uri_edit.setText(uri)
             self._on_call()
 
+        def _native_h323_available(self) -> bool:
+            """Подключён ли нативный H.323-хост (mcu_h323d)."""
+            return self.h323_native is not None and bool(
+                getattr(self.h323_native, "available", False)
+            )
+
+        def _current_protocol(self) -> str:
+            """Выбранный в GUI протокол (канонический ключ)."""
+            return call_proto.normalize_protocol(
+                self.protocol_combo.currentData())
+
         def _on_call(self) -> None:
             uri = self.uri_edit.text().strip()
             if not uri:
-                self.statusBar().showMessage("Введите SIP/H.323 URI или IP-адрес", 5000)
+                self.statusBar().showMessage(
+                    "Введите SIP/H.323 URI или IP-адрес", 5000)
                 return
-            log.info("Исходящий вызов: %s", uri)
-            if uri.lower().startswith("h323:"):
-                self.h323.call(uri.split(":", 1)[1])
+            target = call_proto.resolve_call(
+                self._current_protocol(), uri,
+                native_available=self._native_h323_available(),
+            )
+            if not target.ok:
+                log.warning(
+                    "Вызов отклонён (%s): %s", target.protocol, target.error)
+                self.statusBar().showMessage(
+                    f"Не удалось начать вызов: {target.error}", 8000
+                )
                 return
-            pid = self.engine.call(uri)
+            label = call_proto.protocol_label(target.protocol)
+            log.info("Исходящий вызов [%s]: %s", label, target.address)
+
+            if target.protocol == call_proto.PROTOCOL_H323_NATIVE:
+                if (self.h323_native is not None
+                        and self.h323_native.make_call(target.address)):
+                    self.statusBar().showMessage(
+                        f"H.323 (нативный) -> {target.address}", 5000
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        "Не удалось инициировать нативный H.323-вызов (см. лог)",
+                        8000
+                    )
+                return
+
+            if target.protocol == call_proto.PROTOCOL_H323:
+                if self.h323.call(target.address):
+                    self.statusBar().showMessage(
+                        f"H.323 -> {target.address} (шлюз)", 5000
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        "H.323-шлюз недоступен (нет GStreamer/openh323, см. лог)",
+                        8000
+                    )
+                return
+
+            pid = self.engine.call(target.address)
             if pid is None:
-                self.statusBar().showMessage("Не удалось начать вызов (см. лог)", 8000)
+                self.statusBar().showMessage(
+                    "Не удалось начать вызов (см. лог)", 8000)
             else:
-                self.statusBar().showMessage(f"Вызов {pid} инициирован -> {uri}", 5000)
+                self.statusBar().showMessage(
+                    f"Вызов {pid} [{label}] инициирован -> {target.address}",
+                    5000
+                )
                 self._refresh_participants_list()
 
         def _on_accept(self) -> None:
@@ -1339,7 +1410,9 @@ else:  # pragma: no cover
             raise RuntimeError("PySide6 не установлен. Установите: pip install PySide6")
 
 
-def run_gui(config: Config, engine: SipEngine, h323: H323Gateway, auto_call: str | None = None) -> int:
+def run_gui(config: Config, engine: SipEngine, h323: H323Gateway,
+            auto_call: str | None = None, h323_native=None,
+            initial_protocol=None) -> int:
     """Запустить Qt-приложение. Возвращает код выхода."""
     log.info("GUI: проверка PySide6 (QT_AVAILABLE=%s)", QT_AVAILABLE)
     if not QT_AVAILABLE:
@@ -1365,7 +1438,7 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway, auto_call: str
     app.setOrganizationName("MCU")
 
     log.info("GUI: создание главного окна...")
-    window = MainWindow(config, engine, h323)
+    window = MainWindow(config, engine, h323, h323_native, initial_protocol)
     log.info("GUI: показ окна...")
     window.show()
     if auto_call:

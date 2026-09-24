@@ -73,6 +73,7 @@
       "default": "speaker"
     },
     "virtual_camera": false,
-    "virtual_camera_device": "/dev/video0"
+    "virtual_camera_device": "/dev/video0",
+    "default_call_protocol": "auto"
   }
 }

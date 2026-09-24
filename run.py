@@ -50,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--listen", help="адрес приёма вызовов, напр. 0.0.0.0:5060")
     p.add_argument("--display-name", help="имя комнаты/дисплея")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"], help="SIP-транспорт")
+    p.add_argument(
+        "--protocol", choices=["auto", "sip", "h323", "h323_native"], default=None,
+        help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
+    )
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--h323-socket", help="unix-сокет C++-хоста mcu_h323d (Вариант B, ADR-0002)")
@@ -154,8 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Импорт mcuclient.config...")
         from mcuclient.config import load_config, parse_listen
         log.info("Импорт mcuclient.h323_gateway...")
-        from mcuclient.h323_gateway import H323Gateway
         from mcuclient.h323_endpoint import H323Endpoint
+        from mcuclient.h323_gateway import H323Gateway
         from mcuclient.h323d_client import DEFAULT_SOCKET
         log.info("Импорт mcuclient.sip_engine (включает pjsua2)...")
         from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine
@@ -188,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["h323"]["enabled"] = True
     if args.h323_port:
         config.raw["h323"]["port"] = args.h323_port
+
+    # Протокол исходящего звонка: CLI-флаг важнее конфига.
+    _resolved_protocol = args.protocol or config.default_call_protocol
 
     # === ШАГ 2: движок ===
     try:
@@ -270,9 +277,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.headless:
         if args.call:
             import time
-            log.info("Headless-исходящий вызов: %s", args.call)
-            pid = engine.call(args.call)
-            log.info("Вызов инициирован: pid=%s", pid)
+
+            from mcuclient import call_proto
+            target = call_proto.resolve_call(
+                _resolved_protocol, args.call,
+                native_available=bool(getattr(h323_native, "available", False)),
+            )
+            if not target.ok:
+                log.error("Вызов отклонён: %s", target.error)
+                h323_native.stop()
+                h323.stop()
+                engine.stop()
+                return 3
+            log.info(
+                "Headless-исходящий вызов [%s]: %s",
+                call_proto.protocol_label(target.protocol), target.address,
+            )
+            pid = None
+            if target.protocol == call_proto.PROTOCOL_H323_NATIVE:
+                ok = h323_native.make_call(target.address)
+                log.info("H.323 (нативный) вызов: %s",
+                         "отправлен" if ok else "не удалось")
+            elif target.protocol == call_proto.PROTOCOL_H323:
+                ok = h323.call(target.address)
+                log.info("H.323 (шлюз) вызов: %s",
+                         "отправлен" if ok else "не удалось")
+            else:
+                pid = engine.call(target.address)
+                log.info("Вызов инициирован: pid=%s", pid)
             deadline = time.time() + max(1, args.call_wait)
             while time.time() < deadline:
                 # ВАЖНО: без libHandleEvents() PJSIP не обрабатывает входящие
@@ -314,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         from mcuclient.ui import run_gui
 
         log.info("Шаг 6/6: запуск GUI (run_gui)...")
-        code = run_gui(config, engine, h323, auto_call=args.auto_call)
+        code = run_gui(config, engine, h323, auto_call=args.auto_call,
+                       h323_native=h323_native, initial_protocol=_resolved_protocol)
         log.info("GUI завершился с кодом %s", code)
         return code
     except Exception:  # noqa: BLE001

@@ -110,6 +110,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "virtual_camera_device": "/dev/video0",
         "allow_recording": True,
         "recording_path": str(default_recording_dir()),
+        "default_call_protocol": "auto",
         "rtcp_poll_interval": 3.0,
         "layouts": {
             "available": ["speaker", "gallery_2x2", "gallery_3x3", "grid_auto"],
@@ -226,6 +227,12 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     features = raw["features"]
     _check_str("features.recording_path", features.get("recording_path"))
+    proto = str(features.get("default_call_protocol", "auto")).strip().lower()
+    if proto not in ("sip", "h323", "h323_native", "auto"):
+        raise ConfigError(
+            f"features.default_call_protocol: '{proto}' не поддерживается, "
+            "ожидается одно из ('auto', 'sip', 'h323', 'h323_native')"
+        )
     layouts = features.get("layouts")
     if not isinstance(layouts, dict):
         raise ConfigError("features.layouts должен быть объектом")
@@ -406,6 +413,11 @@ class Config:
     def virtual_camera_device(self) -> str:
         """Путь к виртуальному устройству (v4l2loopback/OBS Virtual Camera)."""
         return str(self.features.get("virtual_camera_device", "/dev/video0"))
+
+    @property
+    def default_call_protocol(self) -> str:
+        """Протокол исходящего вызова по умолчанию: auto/sip/h323/h323_native."""
+        return str(self.features.get("default_call_protocol", "auto"))
 
     @property
     def recording_path(self) -> str:

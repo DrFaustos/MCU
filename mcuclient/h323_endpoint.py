@@ -5,8 +5,9 @@ Python-биндингов, поэтому сам приём живёт в отд
 ``mcu_h323d`` (см. ``tools/h323d``), а этот модуль:
 
 * подключается к хосту через :class:`~mcuclient.h323d_client.H323dClient`;
-* превращает события хоста (call.incoming/connected/disconnected/media)
+* превращает события хоста (call.incoming/outgoing/connected/disconnected/media)
   в участников общего :class:`~mcuclient.models.Room`;
+* умеет инициировать исходящий H.323-вызов (``make_call``);
 * умеет работать в режиме self-test без хоста (register_incoming и т.п.).
 
 Разборная логика вынесена в чистые функции и тестируется без нативного
@@ -29,7 +30,7 @@ H323_DEFAULT_PORT = 1720
 
 @dataclass
 class H323CallInfo:
-    """Нормализованная информация о входящем H.323-вызове."""
+    """Нормализованная информация о H.323-вызове (входящем или исходящем)."""
 
     remote_uri: str
     remote_alias: str = ""
@@ -57,6 +58,7 @@ def state_from_h323(state_text: str) -> Optional[CallState]:
         "ringing": CallState.RINGING,
         "calling": CallState.CONNECTING,
         "connecting": CallState.CONNECTING,
+        "outgoing": CallState.CONNECTING,
         "connected": CallState.CONFIRMED,
         "callconnected": CallState.CONFIRMED,
         "established": CallState.CONFIRMED,
@@ -71,12 +73,15 @@ def call_info_from_event(event: Union[H323dEvent, Dict[str, Any]]) -> H323CallIn
     """Строит H323CallInfo из события хоста mcu_h323d.
 
     Принимает :class:`H323dEvent` или обычный dict с полями
-    token/alias/caller/ip/uri. Приоритет имени: alias, затем caller, затем ip.
+    token/alias/caller/ip/uri/address. Приоритет имени: alias, затем caller,
+    затем ip; для исходящих дополнительно учитывается ``address``.
     """
     fields: Dict[str, Any] = event.fields if isinstance(event, H323dEvent) else dict(event or {})
     alias = str(fields.get("alias", "") or "")
     if not alias:
         alias = str(fields.get("caller", "") or "")
+    if not alias:
+        alias = str(fields.get("address", "") or "")
     ip = str(fields.get("ip", "") or "")
     token = str(fields.get("token", "") or "")
     uri = str(fields.get("uri", "") or "") or alias_to_uri(alias, ip)
@@ -148,6 +153,46 @@ class H323Endpoint:
             self.answer(participant)
         return participant
 
+    def register_outgoing(
+        self, info: H323CallInfo, token: Optional[str] = None
+    ) -> Participant:
+        """Заводит исходящий H.323-вызов как участника комнаты."""
+        token = token or info.call_token or info.remote_uri
+        uri = info.remote_uri or alias_to_uri(info.remote_alias, info.remote_ip)
+        participant = Participant(id=self._next_id, remote_uri=uri)
+        participant.state = CallState.CONNECTING
+        self._next_id += 1
+        self._room.add(participant)
+        if token:
+            self._calls[token] = participant
+        log.info("H.323: исходящий вызов %s (участник %s)", uri, participant.id)
+        self._events.emit("call.outgoing", id=participant.id, uri=uri, proto="h323")
+        return participant
+
+    def make_call(self, address: str) -> bool:
+        """Инициировать исходящий H.323-вызов через хост mcu_h323d.
+
+        False — если адрес пуст или хост недоступен (нет соединения).
+        Участник появится в комнате по событию ``call.outgoing`` от хоста.
+        """
+        address = (address or "").strip()
+        if not address:
+            log.warning("H.323: пустой адрес исходящего вызова")
+            return False
+        if self._client is None:
+            log.warning(
+                "H.323: исходящий вызов невозможен — хост mcu_h323d не подключён "
+                "(сокет %s)",
+                self._socket_path,
+            )
+            return False
+        ok = self._client.make_call(address)
+        if ok:
+            log.info("H.323: команда исходящего вызова отправлена на %s", address)
+        else:
+            log.warning("H.323: не удалось отправить команду вызова на %s", address)
+        return ok
+
     def answer(self, participant: Participant) -> bool:
         """Подтверждает вызов (авто-ответ в режиме MCU)."""
         participant.state = CallState.CONFIRMED
@@ -172,10 +217,10 @@ class H323Endpoint:
     def on_event(self, event: Union[H323dEvent, str], fields: Optional[Dict[str, Any]] = None) -> None:
         """Мост событий хоста в модель комнаты.
 
-        Готовые события (call.incoming/connected/disconnected/media) из
-        mcu_h323d превращаются в участников и события UI. Неизвестные
-        события игнорируются. Повторный call.incoming с тем же токеном
-        не создаёт второго участника.
+        Готовые события (call.incoming/outgoing/connected/disconnected/media)
+        из mcu_h323d превращаются в участников и события UI. Неизвестные
+        события игнорируются. Повторный call.* с тем же токеном не создаёт
+        второго участника.
         """
         if isinstance(event, H323dEvent):
             name, data = event.event, event.fields
@@ -190,6 +235,12 @@ class H323Endpoint:
             p = self.register_incoming(info)
             if self._auto_answer:
                 p.state = CallState.CONFIRMED
+        elif name == "call.outgoing":
+            token = str(data.get("token", "") or "")
+            if token and token in self._calls:
+                return  # дубликат
+            info = call_info_from_event(data)
+            self.register_outgoing(info)
         elif name == "call.connected":
             token = str(data.get("token", "") or "")
             p = self._calls.get(token)

@@ -136,3 +136,20 @@ PJSIP — это **не MCU-микшер**, а SIP-стек с conference bridge
 * Нет `pjsua2` → движок в режиме-заглушке, GUI работает, вызовы недоступны.
 * Нет `PySide6` → `--headless` (серверный режим).
 * Нет GStreamer/H.323 → H.323 отключён, SIP работает штатно.
+
+## 10. Выбор протокола исходящего вызова
+
+Модуль `call_proto.py` — единственная точка выбора протокола звонка.
+`resolve_call(proto, uri, native_available)` возвращает `CallTarget` с
+ключом протокола и адресом:
+
+| Ключ | Путь вызова |
+|------|-------------|
+| `sip` | `SipEngine.call()` → pjsua2 |
+| `h323` | `H323Gateway.call()` → GStreamer/openh323 |
+| `h323_native` | `H323Endpoint.make_call()` → IPC в `mcu_h323d` (H323Plus) |
+
+GUI (`MainWindow`), CLI (`run.py --proto`) и конфиг
+(`features.default_call_protocol`) сходятся в этот модуль, поэтому логика
+маршрутизации не дублируется. Модуль не зависит от PJSIP/Qt/H323Plus и
+полностью покрыт юнит-тестами. См. `docs/CALL_PROTOCOL.md`.

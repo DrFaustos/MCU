@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcuclient"
-version = "0.2.24"
+version = "0.2.29"
 description = "Кроссплатформенный ВКС-клиент (SIP/H.323) уровня MCU: приём и исходящие вызовы, аудио+видео, управление битрейтом"
 readme = "README.md"
 requires-python = ">=3.10"
