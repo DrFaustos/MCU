@@ -68,7 +68,7 @@ jobs:
       - name: Shellcheck dev scripts (syntax)
         run: |
           for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/run_gui.sh \
-                   scripts/install_h323plus.sh; do
+                   scripts/install_h323plus.sh scripts/build_h323d.sh; do
             bash -n "$f" && echo "OK  $f" || { echo "FAIL $f"; exit 1; }
           done
 
@@ -91,4 +91,12 @@ jobs:
           test -f scripts/testbed/run_two_instance_video_test.sh || { echo "нет видео-стенда"; exit 1; }
           test -f scripts/testbed/two_instance_video_call.py || { echo "нет видео-раннера"; exit 1; }
           grep -q "exten => 700" scripts/testbed/asterisk/extensions.conf || { echo "нет маршрута 700 (H.323->SIP)"; exit 1; }
+          echo "OK"
+
+      - name: C++ host sources present (mcu_h323d, ADR-0002)
+        run: |
+          test -f tools/h323d/CMakeLists.txt || { echo "нет CMakeLists.txt хоста"; exit 1; }
+          test -f tools/h323d/main.cpp || { echo "нет main.cpp хоста"; exit 1; }
+          test -f tools/h323d/ipc.hpp || { echo "нет ipc.hpp хоста"; exit 1; }
+          grep -q "set_on_client_connected" tools/h323d/ipc.hpp || { echo "нет хука ready при подключении"; exit 1; }
           echo "OK"
