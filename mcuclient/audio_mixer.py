@@ -35,6 +35,15 @@ except Exception:  # noqa: BLE001
     _np = None
 
 
+def _clamp_int16(v: int) -> int:
+    """Clamps a Python int to the signed 16-bit range."""
+    if v > 32767:
+        return 32767
+    if v < -32768:
+        return -32768
+    return v
+
+
 class MixStrategy(str, Enum):
     """Strategy to combine several PCM streams into one."""
 
@@ -195,14 +204,16 @@ class AudioMixer:
             length = max(length, len(a))
         if length == 0:
             return b""
-        out = array.array("h", [0] * length)
+        # Accumulate in Python ints (arbitrary precision) so that summing
+        # several loud channels cannot overflow int16 before normalization.
+        acc = [0] * length
         for a in arrays:
             for i, v in enumerate(a):
-                out[i] += v
+                acc[i] += v
         d = max(1, divisor)
+        out = array.array("h", [0] * length)
         for i in range(length):
-            v = out[i] // d
-            out[i] = max(-32768, min(32767, v))
+            out[i] = _clamp_int16(acc[i] // d)
         return out.tobytes()
 
     def _sum_and_clip(self, buffers: Dict[int, bytes], ids: List[int]) -> bytes:
@@ -225,8 +236,13 @@ class AudioMixer:
             length = max(length, len(a))
         if length == 0:
             return b""
-        out = array.array("h", [0] * length)
+        # Accumulate in Python ints and clamp only at the end, matching the
+        # numpy path (which sums in int32 and clips once).
+        acc = [0] * length
         for a in arrays:
             for i, v in enumerate(a):
-                out[i] = max(-32768, min(32767, out[i] + v))
+                acc[i] += v
+        out = array.array("h", [0] * length)
+        for i in range(length):
+            out[i] = _clamp_int16(acc[i])
         return out.tobytes()

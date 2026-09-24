@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from .config import Config, compute_auto_grid
+from .config import Config
 from .log import get_logger
 from .media_devices import (
     DeviceInfo,
@@ -802,7 +802,7 @@ class SipEngine:
         if not PJSIP_AVAILABLE:
             self.events.emit("call.error", reason="pjsua2 недоступен")
             return None
-        
+
         def _try_make_call(use_null_audio: bool = False) -> Optional[int]:
             if use_null_audio and self._media.available:
                 try:
@@ -831,7 +831,7 @@ class SipEngine:
                 if not use_null_audio and _is_audio_device_error(exc, reason):
                     log.warning("Ошибка аудио при вызове, пробуем null-аудио: %s", reason)
                     return _try_make_call(use_null_audio=True)
-                
+
                 log.error("Ошибка исходящего вызова %s: %s", uri, reason)
                 log.exception("Трассировка исходящего вызова")
                 self.events.emit("call.error", reason=reason)
@@ -1530,7 +1530,7 @@ class SipEngine:
             room = getattr(self, 'room', None)
             if not room:
                 return []
-            
+
             active = []
             try:
                 participants = getattr(room, 'participants', {})
@@ -1553,7 +1553,7 @@ class SipEngine:
                 except Exception as exc:  # noqa: BLE001
                     log.debug("get_visible_participants/speaker: %s", exc)
                 return [speaker] if speaker else []
-            
+
             capacity = LAYOUT_CAPACITY.get(layout, 0)
             if capacity == 0:
                 return active

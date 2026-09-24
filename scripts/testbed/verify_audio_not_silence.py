@@ -9,7 +9,6 @@ Exit 0 только если все пороги пройдены; иначе 1 
 
 from __future__ import annotations
 
-import gc
 import json
 import sys
 import time

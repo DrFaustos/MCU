@@ -1,33 +1,30 @@
-"""Приём входящих H.323-вызовов через H323Plus (Этап 1, ADR-0002).
+"""Приём входящих H.323-вызовов через хост mcu_h323d (Этап 1, ADR-0002).
 
-H.323-«фронт» единого медиа-слоя. Не владеет медиа (это делает H323Plus),
-а принимает входящие Q.931-вызовы на порт 1720 и заводит участников в
-общий Room.
+H.323-«фронт» единого медиа-слоя. H323Plus — C++-библиотека без
+Python-биндингов, поэтому сам приём живёт в отдельном процессе
+``mcu_h323d`` (см. ``tools/h323d``), а этот модуль:
 
-Модуль импортируется и тестируется БЕЗ нативного H323Plus: нативные вызовы
-изолированы, разборная логика вынесена в чистые функции.
+* подключается к хосту через :class:`~mcuclient.h323d_client.H323dClient`;
+* превращает события хоста (call.incoming/connected/disconnected/media)
+  в участников общего :class:`~mcuclient.models.Room`;
+* умеет работать в режиме self-test без хоста (register_incoming и т.п.).
+
+Разборная логика вынесена в чистые функции и тестируется без нативного
+стека и без запущенного хоста.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Union
 
+from .h323d_client import H323dClient, H323dEvent
 from .log import get_logger
 from .models import CallState, EventBus, Participant, Room
 
 log = get_logger("h323")
 
 H323_DEFAULT_PORT = 1720
-
-H323_AVAILABLE = False
-_h323: Any = None
-try:  # pragma: no cover - зависит от нативной сборки
-    import h323plus as _h323  # type: ignore[import-not-found]
-
-    H323_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    _h323 = None
 
 
 @dataclass
@@ -70,8 +67,26 @@ def state_from_h323(state_text: str) -> Optional[CallState]:
     return mapping.get(key)
 
 
+def call_info_from_event(event: Union[H323dEvent, Dict[str, Any]]) -> H323CallInfo:
+    """Строит H323CallInfo из события хоста mcu_h323d.
+
+    Принимает :class:`H323dEvent` или обычный dict с полями
+    token/alias/caller/ip/uri. Приоритет имени: alias, затем caller, затем ip.
+    """
+    fields: Dict[str, Any] = event.fields if isinstance(event, H323dEvent) else dict(event or {})
+    alias = str(fields.get("alias", "") or "")
+    if not alias:
+        alias = str(fields.get("caller", "") or "")
+    ip = str(fields.get("ip", "") or "")
+    token = str(fields.get("token", "") or "")
+    uri = str(fields.get("uri", "") or "") or alias_to_uri(alias, ip)
+    return H323CallInfo(
+        remote_uri=uri, remote_alias=alias, remote_ip=ip, call_token=token
+    )
+
+
 class H323Endpoint:
-    """H.323-эндпоинт: слушает 1720 и заводит участников в комнату."""
+    """H.323-эндпоинт: подключается к mcu_h323d и ведёт участников комнаты."""
 
     def __init__(
         self,
@@ -81,24 +96,30 @@ class H323Endpoint:
         *,
         port: int = H323_DEFAULT_PORT,
         auto_answer: bool = True,
+        socket_path: str = "/tmp/mcu_h323d.sock",
     ) -> None:
         self._room = room
         self._events = events
         self._config = config
         self._port = int(port)
         self._auto_answer = bool(auto_answer)
-        self._endpoint: Any = None
+        self._socket_path = socket_path
+        self._client: Optional[H323dClient] = None
         self._next_id = 1
         self._calls: dict[str, Participant] = {}
 
     @property
     def available(self) -> bool:
-        """Доступен ли нативный H323Plus в этой сборке."""
-        return H323_AVAILABLE
+        """Подключён ли хост mcu_h323d (нативный H323Plus)."""
+        return self._client is not None and self._client.connected
 
     @property
     def port(self) -> int:
         return self._port
+
+    @property
+    def socket_path(self) -> str:
+        return self._socket_path
 
     def find_by_token(self, token: str) -> Optional[Participant]:
         """Ищет участника по call-токену H323Plus."""
@@ -148,41 +169,89 @@ class H323Endpoint:
             "call.state", id=participant.id, state="Disconnected", proto="h323"
         )
 
-    def start(self) -> bool:
-        """Поднимает H323Plus-эндпоинт на порту 1720.
+    def on_event(self, event: Union[H323dEvent, str], fields: Optional[Dict[str, Any]] = None) -> None:
+        """Мост событий хоста в модель комнаты.
 
-        False, если нативной библиотеки нет — вызывающий код продолжает
-        работу SIP-only, а не падает.
+        Готовые события (call.incoming/connected/disconnected/media) из
+        mcu_h323d превращаются в участников и события UI. Неизвестные
+        события игнорируются. Повторный call.incoming с тем же токеном
+        не создаёт второго участника.
         """
-        if not H323_AVAILABLE:
+        if isinstance(event, H323dEvent):
+            name, data = event.event, event.fields
+        else:
+            name, data = str(event), dict(fields or {})
+        if name == "call.incoming":
+            token = str(data.get("token", "") or "")
+            if token and token in self._calls:
+                return  # дубликат — уже зарегистрирован
+            info = call_info_from_event(data)
+            # Если авто-ответ на стороне хоста — участник сразу CONFIRMED.
+            p = self.register_incoming(info)
+            if self._auto_answer:
+                p.state = CallState.CONFIRMED
+        elif name == "call.connected":
+            token = str(data.get("token", "") or "")
+            p = self._calls.get(token)
+            if p is not None:
+                p.state = CallState.CONFIRMED
+                self._events.emit(
+                    "call.state", id=p.id, state="Connected", proto="h323"
+                )
+        elif name == "call.disconnected":
+            token = str(data.get("token", "") or "")
+            p = self._calls.get(token)
+            if p is not None:
+                self.disconnect(p)
+        elif name == "call.media":
+            token = str(data.get("token", "") or "")
+            p = self._calls.get(token)
+            if p is not None:
+                kind = str(data.get("kind", "") or "").lower()
+                codec = str(data.get("codec", "") or "")
+                if kind == "audio":
+                    p.audio_codec = codec
+                elif kind == "video":
+                    p.video_codec = codec
+        elif name == "ready":
+            try:
+                self._port = int(data.get("port", self._port))
+            except (TypeError, ValueError):
+                pass
+            log.info("H.323: хост готов, слушает порт %s", self._port)
+        elif name == "shutdown":
+            log.info("H.323: хост остановлен")
+        elif name == "error":
+            log.warning("H.323-хост: %s", data.get("message", ""))
+        # прочие события (pong и т.п.) — игнорируются
+
+    def handle_host_event(self, event: H323dEvent) -> None:
+        """Обработчик для :class:`H323dClient`."""
+        self.on_event(event)
+
+    def start(self) -> bool:
+        """Подключается к хосту mcu_h323d.
+
+        False, если хост не запущен — вызывающий код продолжает работу
+        SIP-only, а не падает (graceful degradation).
+        """
+        client = H323dClient(self._socket_path, on_event=self.handle_host_event)
+        if not client.connect():
             log.warning(
-                "H323Plus недоступен — приём H.323 выключен. "
-                "Соберите стек: scripts/install_h323plus.sh (ADR-0002)."
+                "H.323-хост (%s) недоступен — приём H.323 выключен. "
+                "Соберите и запустите tools/h323d (ADR-0002): "
+                "./scripts/build_h323d.sh && mcu_h323d --socket %s",
+                self._socket_path,
+                self._socket_path,
             )
             return False
-        try:  # pragma: no cover - требует нативной сборки
-            self._endpoint = _h323.H323EndPoint()
-            self._endpoint.SetLocalUserName("MCU", "MCU")
-            listener = _h323.H323ListenerTCP(self._endpoint, self._port)
-            if not self._endpoint.StartListener(listener):
-                log.error("H.323: не удалось слушать порт %s", self._port)
-                self._endpoint = None
-                return False
-            log.info("H.323: слушаю порт %s (единый медиа-слой)", self._port)
-            return True
-        except Exception:  # noqa: BLE001
-            log.exception("H.323: ошибка запуска эндпоинта")
-            self._endpoint = None
-            return False
+        self._client = client
+        return True
 
     def stop(self) -> None:
-        """Останавливает эндпоинт и снимает всех H.323-участников."""
+        """Снимает всех H.323-участников и отключается от хоста."""
         for p in list(self._calls.values()):
             self.disconnect(p)
-        if self._endpoint is not None:
-            try:  # pragma: no cover - требует нативной сборки
-                self._endpoint.RemoveListener(None)
-                self._endpoint.ClearAllCalls()
-            except Exception:  # noqa: BLE001
-                log.exception("H.323: ошибка остановки")
-            self._endpoint = None
+        if self._client is not None:
+            self._client.close()
+            self._client = None

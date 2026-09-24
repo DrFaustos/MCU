@@ -12,7 +12,7 @@ No native deps: testable with fakes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from .audio_mixer import AudioMixer, MixerConfig
 from .log import get_logger

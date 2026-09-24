@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
-import sys
 
 ASTERISK_CONF = "/tmp/mcu-asterisk/etc/asterisk.conf"
 

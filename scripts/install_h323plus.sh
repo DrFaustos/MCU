@@ -16,6 +16,14 @@
 #
 # Порядок сборки СТРОГО: PTLib -> H323Plus. Иначе H323Plus не находит PTLib.
 #
+# Про ASN.1: в форке willamowius сгенерированные ASN.1-заголовки (h225.h,
+# h245.h, h235.h, gccpdu.h и т.д.) уже лежат в include/ исходного дерева —
+# отдельная цель генерации не нужна. Скрипт лишь ПРОВЕРЯЕТ их наличие до
+# сборки, чтобы упасть рано и понятно, если дерево неполное/побитое.
+#
+# Про pkg-config: форк willamowius НЕ ставит h323plus.pc, поэтому скрипт
+# создаёт его сам — иначе `pkg-config --exists h323plus` всегда false.
+#
 # Использование:
 #   ./scripts/install_h323plus.sh                 # установка в /usr/local
 #   PREFIX=$HOME/.local ./scripts/install_h323plus.sh
@@ -50,20 +58,20 @@ install_deps() {
         log "apt-get: установка зависимостей"
         $SUDO apt-get update -qq
         $SUDO apt-get install -y \
-            build-essential git pkg-config bison flex \
+            build-essential git pkg-config bison flex cmake \
             libssl-dev libexpat1-dev \
             libasound2-dev libv4l-dev libldap2-dev libsasl2-dev \
             libsdl2-dev libavcodec-dev libavformat-dev libavutil-dev \
             libswscale-dev libx264-dev libx265-dev libvpx-dev
     elif command -v dnf >/dev/null 2>&1; then
         log "dnf: установка зависимостей"
-        $SUDO dnf install -y gcc-c++ make git pkg-config bison flex \
+        $SUDO dnf install -y gcc-c++ make git pkg-config bison flex cmake \
             openssl-devel expat-devel alsa-lib-devel libv4l-devel \
             openldap-devel cyrus-sasl-devel SDL2-devel ffmpeg-devel \
             x264-devel x265-devel libvpx-devel
     elif command -v pacman >/dev/null 2>&1; then
         log "pacman: установка зависимостей"
-        $SUDO pacman -Sy --noconfirm base-devel git pkgconf bison flex \
+        $SUDO pacman -Sy --noconfirm base-devel git pkgconf bison flex cmake \
             openssl expat alsa-lib v4l-utils libldap libsasl sdl2 \
             ffmpeg x264 x265 libvpx
     else
@@ -101,6 +109,19 @@ build_h323plus() {
             || git clone --depth 1 "${H323PLUS_REPO}" "${src}"
     fi
     cd "${src}"
+    # Санитарная проверка: ASN.1-заголовки должны быть в дереве исходников.
+    # Если их нет — дерево неполное, дальше идти бессмысленно.
+    local missing=0
+    for hdr in include/h225.h include/h245.h include/h235.h include/gccpdu.h; do
+        if [ ! -f "${hdr}" ]; then
+            log "ОШИБКА: нет ${hdr} — дерево H323Plus неполное"
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -gt 0 ]; then
+        log "Переклонируйте: rm -rf ${src}"
+        exit 1
+    fi
     log "configure H323Plus (PREFIX=${PREFIX})"
     # H323Plus ищет PTLib через PTBUILDDIR/PKGCONFIG. Передаём явно.
     ./configure --prefix="${PREFIX}" \
@@ -112,7 +133,29 @@ build_h323plus() {
     $SUDO make install >/dev/null
 }
 
-# --- 4. ldconfig -------------------------------------------------------------
+# --- 4. h323plus.pc (форк его не ставит) -------------------------------------
+install_pc_file() {
+    local pc_dir="${PREFIX}/lib/pkgconfig"
+    local pc="${pc_dir}/h323plus.pc"
+    local inc="${PREFIX}/include/openh323"
+    $SUDO mkdir -p "${pc_dir}"
+    log "Создаю ${pc}"
+    $SUDO tee "${pc}" >/dev/null <<EOF
+prefix=${PREFIX}
+exec_prefix=\${prefix}
+libdir=\${prefix}/lib
+includedir=${inc}
+
+Name: h323plus
+Description: H323Plus (willamowius fork) - H.323 stack on PTLib
+Version: ${H323PLUS_VERSION}
+Requires: ptlib
+Libs: -L\${libdir} -lh323_linux_x86_64_
+Cflags: -I\${includedir}
+EOF
+}
+
+# --- 5. ldconfig -------------------------------------------------------------
 refresh_ldconfig() {
     if [ "${PREFIX}" = "/usr/local" ] && command -v ldconfig >/dev/null 2>&1; then
         log "ldconfig"
@@ -120,31 +163,11 @@ refresh_ldconfig() {
     fi
 }
 
-
-# --- 6. Проверка видео-кодеков и итоговый отчёт ------------------------------
-report() {
-    log "---- Итог ----"
-    log "PREFIX=${PREFIX}"
-    log "LD_LIBRARY_PATH=${PREFIX}/lib"
-    log "PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig"
-    # Проверяем, что собрались библиотеки (имена могут отличаться).
-    local found=0
-    for lib in "${PREFIX}"/lib/libh323*.so* "${PREFIX}"/lib/libpt*.so*; do
-        [ -e "$lib" ] || continue
-        found=$((found + 1))
-        log "библиотека: $(basename "$lib")"
-    done
-    if [ "$found" -eq 0 ]; then
-        log "ПРЕДУПРЕЖДЕНИЕ: .so не найдены в ${PREFIX}/lib — проверьте сборку"
-    fi
-    log "Экспортируйте перед запуском MCU:"
-    log "  export LD_LIBRARY_PATH=${PREFIX}/lib:$LD_LIBRARY_PATH"
-    log "  export PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH"
-}
-
-# --- 5. Проверка -------------------------------------------------------------
+# --- 6. Проверка -------------------------------------------------------------
 verify() {
     log "Проверка установки"
+    local pkg_path="${PREFIX}/lib/pkgconfig"
+    export PKG_CONFIG_PATH="${pkg_path}:${PKG_CONFIG_PATH:-}"
     local ok=0
     if pkg-config --exists ptlib 2>/dev/null; then
         log "ptlib: $(pkg-config --modversion ptlib)"
@@ -160,15 +183,39 @@ verify() {
     fi
     if [ "${ok}" -eq 0 ]; then
         log "ОШИБКА: ни ptlib, ни h323plus не найдены через pkg-config."
-        log "Попробуйте: export PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH"
+        log "Попробуйте: export PKG_CONFIG_PATH=${pkg_path}:$PKG_CONFIG_PATH"
         exit 1
     fi
+}
+
+# --- 7. Проверка библиотек и итоговый отчёт ----------------------------------
+report() {
+    log "---- Итог ----"
+    log "PREFIX=${PREFIX}"
+    local ld_path="${PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+    local pc_path="${PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    log "LD_LIBRARY_PATH=${ld_path}"
+    log "PKG_CONFIG_PATH=${pc_path}"
+    # Проверяем, что собрались библиотеки (имена могут отличаться).
+    local found=0
+    for lib in "${PREFIX}"/lib/libh323*.so* "${PREFIX}"/lib/libpt*.so*; do
+        [ -e "$lib" ] || continue
+        found=$((found + 1))
+        log "библиотека: $(basename "$lib")"
+    done
+    if [ "$found" -eq 0 ]; then
+        log "ПРЕДУПРЕЖДЕНИЕ: .so не найдены в ${PREFIX}/lib — проверьте сборку"
+    fi
+    log "Экспортируйте перед запуском MCU:"
+    log "  export LD_LIBRARY_PATH=${PREFIX}/lib:\$LD_LIBRARY_PATH"
+    log "  export PKG_CONFIG_PATH=${PREFIX}/lib/pkgconfig:\$PKG_CONFIG_PATH"
 }
 
 install_deps
 build_ptlib
 build_h323plus
+install_pc_file
 refresh_ldconfig
 verify
 report
-log "Готово. Следующий шаг: Этап 1 — mcuclient/h323_endpoint.py (приём H.323)."
+log "Готово. Следующий шаг: ./scripts/build_h323d.sh (C++-хост H.323, Вариант B)."

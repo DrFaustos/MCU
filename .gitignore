@@ -100,3 +100,8 @@ __pycache__/
 
 # Локальное venv для сборки (PyInstaller + зависимости)
 .build-venv/
+
+# C++ host build artifacts (tools/h323d)
+tools/h323d/*.o
+tools/h323d/bin/
+tools/h323d/build/

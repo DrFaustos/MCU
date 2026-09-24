@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, List, Optional
 
 from .log import get_logger
-from .models import CallState, Participant
+from .models import CallState
 
 log = get_logger("call")
 

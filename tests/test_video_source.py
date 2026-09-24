@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import mcuclient.video_source as vs  # noqa: E402
 from mcuclient.video_source import (  # noqa: E402
     SourceInfo,
     VideoSourceSwitcher,
@@ -39,6 +40,8 @@ def test_stop_without_start_is_safe():
 
 
 def test_colorbar_frame_shape_and_rgb():
+    if not vs._HAVE_CAM:
+        return  # numpy недоступен — тест неприменим
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
     frame = sw._make_colorbar()
     assert frame.shape == (48, 64, 3)
@@ -102,6 +105,8 @@ def test_stop_is_idempotent():
 
 def test_colorbar_has_moving_bar():
     """Бегущая полоса должна менять положение при росте frames_sent."""
+    if not vs._HAVE_CAM:
+        return  # numpy недоступен — тест неприменим
     sw = VideoSourceSwitcher(device="/dev/null", width=200, height=40, fps=5)
     sw._frames_sent = 0
     f0 = sw._make_colorbar()
@@ -112,8 +117,6 @@ def test_colorbar_has_moving_bar():
 
 def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
     """Если cv2 нет и размеры не совпадают — _fit не должен падать."""
-    import mcuclient.video_source as vs
-
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
     if not vs._HAVE_CAM:
         return  # numpy недоступен — тест неприменим
@@ -129,8 +132,6 @@ def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
 
 
 def test_fit_passthrough_when_size_matches():
-    import mcuclient.video_source as vs
-
     if not vs._HAVE_CAM:
         return
     import numpy as np

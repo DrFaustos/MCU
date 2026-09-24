@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import platform
-import shutil
 import subprocess
 import threading
 from datetime import datetime
