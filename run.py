@@ -155,8 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         from mcuclient.config import load_config, parse_listen
         log.info("Импорт mcuclient.h323_gateway...")
         from mcuclient.h323_gateway import H323Gateway
-        from mcuclient.h323_endpoint import H323CallInfo, H323Endpoint
-        from mcuclient.h323_host import DEFAULT_SOCKET, H323HostClient
+        from mcuclient.h323_endpoint import H323Endpoint
+        from mcuclient.h323d_client import DEFAULT_SOCKET
         log.info("Импорт mcuclient.sip_engine (включает pjsua2)...")
         from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine
         log.info("Импорт завершён. PJSIP_AVAILABLE=%s", PJSIP_AVAILABLE)
@@ -198,13 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         # Этап 1 (ADR-0002): нативный H.323-эндпоинт (порт 1720) на H323Plus.
         # Работает, только если собран H323Plus; иначе start() вернёт False
         # и приём H.323 останется выключенным (SIP продолжает работать).
+        h323_socket = getattr(args, "h323_socket", None) or DEFAULT_SOCKET
         h323_native = H323Endpoint(
-            engine.room, engine.events, config, port=config.h323_port
+            engine.room, engine.events, config, port=config.h323_port,
+            socket_path=h323_socket,
         )
-        # Вариант B (ADR-0002): если рядом запущен C++-хост mcu_h323d,
-        # Python подключается к нему и получает реальные H.323-события.
-        h323_host_sock = getattr(args, "h323_socket", None) or DEFAULT_SOCKET
-        h323_host = H323HostClient(h323_host_sock) if (args.h323 or config.h323_enabled) else None
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         return 3
@@ -269,35 +267,6 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             log.exception("Ошибка запуска нативного H.323-эндпоинта")
 
-    # Вариант B: подключаемся к C++-хосту и транслируем его события в EventBus.
-    if h323_host is not None:
-        def _on_host_event(ev, _ep=h323_native, _bus=engine.events):
-            from mcuclient.h323_host import EVENT_MAP, event_to_bus_payload
-            bus_event = EVENT_MAP.get(ev.kind)
-            if not bus_event:
-                return
-            payload = event_to_bus_payload(ev)
-            if ev.kind == "call.incoming" and ev.uri:
-                _ep.register_incoming(
-                    H323CallInfo(
-                        remote_uri=ev.uri, remote_alias=ev.alias,
-                        remote_ip=ev.ip, call_token=ev.token,
-                    ),
-                    token=ev.token,
-                )
-            elif ev.kind in ("call.connected", "call.disconnected"):
-                payload["state"] = "Connected" if ev.kind == "call.connected" else "Disconnected"
-            _bus.emit(bus_event, **payload)
-        h323_host.on_event(_on_host_event)
-        if h323_host.connect():
-            log.info("H.323: подключён к хосту mcu_h323d (%s)", h323_host_sock)
-        else:
-            log.info(
-                "H.323: хост mcu_h323d не запущен (%s) — только SIP. "
-                "Запустите: tools/h323d/build/mcu_h323d --socket %s",
-                h323_host_sock, h323_host_sock,
-            )
-
     if args.headless:
         if args.call:
             import time
@@ -317,8 +286,6 @@ def main(argv: list[str] | None = None) -> int:
                     if getattr(p.state, "value", "") == "disconnected":
                         break
             try:
-                if h323_host is not None:
-                    h323_host.close()
                 h323_native.stop()
                 h323.stop()
                 engine.stop()
@@ -336,8 +303,6 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             pass
         finally:
-            if h323_host is not None:
-                h323_host.close()
             h323_native.stop()
             h323.stop()
             engine.stop()
@@ -356,8 +321,6 @@ def main(argv: list[str] | None = None) -> int:
         log.critical("GUI недоступен или упал:", exc_info=True)
         log.info("Запустите с --headless для серверного режима.")
         try:
-            if h323_host is not None:
-                h323_host.close()
             h323_native.stop()
             h323.stop()
             engine.stop()

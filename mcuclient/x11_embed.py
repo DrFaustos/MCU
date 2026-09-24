@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
-from typing import Optional
+from typing import Any, Optional
 
 from .log import get_logger
 
 log = get_logger("x11")
 
-_xlib = None
+_xlib: Any = None
 _X11_READY = False
 
 # Обработчик X-ошибок: без него любая BadWindow/BadMatch от Xlib аварийно

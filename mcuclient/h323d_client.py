@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, Optional
 from .log import get_logger
 
 log = get_logger("h323d")
+DEFAULT_SOCKET = "/tmp/mcu_h323d.sock"
 
 
 @dataclass

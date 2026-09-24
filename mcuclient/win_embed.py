@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from .log import get_logger
 
@@ -35,8 +35,8 @@ log = get_logger("win")
 
 _IS_WINDOWS = sys.platform.startswith("win")
 
-_user32 = None
-_kernel32 = None
+_user32: Any = None
+_kernel32: Any = None
 _WIN_READY = False
 
 # Константы Win32
@@ -63,8 +63,8 @@ def _load() -> bool:
     if not _IS_WINDOWS:
         return False
     try:
-        _user32 = ctypes.windll.user32
-        _kernel32 = ctypes.windll.kernel32
+        _user32 = getattr(ctypes, "windll").user32
+        _kernel32 = getattr(ctypes, "windll").kernel32
         _setup_signatures(_user32)
     except Exception as exc:  # noqa: BLE001
         log.debug("user32 недоступна: %s", exc)
