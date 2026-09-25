@@ -151,9 +151,30 @@ def _install_excepthooks() -> None:
     threading.excepthook = _thread_hook
 
 
+
+def _resolve_level(level: int) -> int:
+    """Учесть env-переключатели диагностики.
+
+    MCU_DEBUG=1 -> DEBUG; MCU_LOG_LEVEL=<name|int> -> явный уровень.
+    Нужно для сбора подробных логов без правки аргументов запуска.
+    """
+    env_level = os.environ.get("MCU_LOG_LEVEL")
+    if env_level:
+        val = env_level.strip()
+        if val.isdigit():
+            return int(val)
+        named = getattr(logging, val.upper(), None)
+        if isinstance(named, int):
+            return named
+    if os.environ.get("MCU_DEBUG") == "1":
+        return logging.DEBUG
+    return level
+
+
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """Настроить корневой логгер один раз и вернуть логгер приложения."""
     global _CONFIGURED
+    level = _resolve_level(level)
     root = logging.getLogger()
     if not _CONFIGURED:
         root.setLevel(level)

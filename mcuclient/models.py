@@ -104,6 +104,12 @@ class EventBus:
             self._subs.append(cb)
 
     def emit(self, event: str, **payload: Any) -> None:
+        # Диагностика: фиксируем КАЖДОЕ событие шины. Error-события —
+        # на уровне WARNING, остальные — DEBUG (видны при -v/MCU_DEBUG).
+        if event.endswith(".error") or event.endswith(".rejected"):
+            log.warning("event: %s payload=%s", event, payload)
+        else:
+            log.debug("event: %s payload=%s", event, payload)
         with self._lock:
             subs = list(self._subs)
         for cb in subs:
