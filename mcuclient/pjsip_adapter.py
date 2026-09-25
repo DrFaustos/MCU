@@ -100,12 +100,12 @@ def is_available() -> bool:
     return bool(PJSIP_AVAILABLE)
 
 
-def endpoint_ready(endpoint) -> bool:
+def endpoint_ready(endpoint: Any) -> bool:
     """Готов ли SIP-эндпоинт к работе (стек есть и эндпоинт создан)."""
     return PJSIP_AVAILABLE and endpoint is not None
 
 
-def account_ready(account) -> bool:
+def account_ready(account: Any) -> bool:
     """Готов ли SIP-аккаунт к операциям (стек есть и аккаунт создан)."""
     return PJSIP_AVAILABLE and account is not None
 
