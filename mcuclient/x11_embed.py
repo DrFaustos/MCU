@@ -79,8 +79,14 @@ def _load() -> bool:
         _xlib.XSync.argtypes = [dp, i]
         _xlib.XSync.restype = ctypes.c_int
     except Exception as exc:  # noqa: BLE001
-        log.debug("libX11 недоступна: %s", exc)
+        log.warning("libX11 недоступна: %s", exc)
         _xlib = None
+    import os as _os
+    log.info(
+        "x11: libX11=%s DISPLAY=%r XDG_SESSION_TYPE=%r",
+        _xlib is not None, _os.environ.get("DISPLAY"),
+        _os.environ.get("XDG_SESSION_TYPE"),
+    )
     return _xlib is not None
 
 
@@ -102,6 +108,9 @@ def _display():
     import os
     d = _xlib.XOpenDisplay(os.environ.get("DISPLAY", "").encode() or None)
     _display_handle = d or None
+    if not _display_handle:
+        log.warning("XOpenDisplay вернул NULL (DISPLAY=%r) — reparent невозможен",
+                    os.environ.get("DISPLAY"))
     return _display_handle
 
 
