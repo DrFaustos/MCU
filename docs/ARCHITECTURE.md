@@ -168,6 +168,8 @@ GUI (`MainWindow`), CLI (`run.py --proto`) и конфиг
 | `AbrService` | адаптивный битрейт по RTCP + фоновый опрос | `abr_service.py` |
 | `DeviceService` | перечисление устройств, refresh, watcher | `device_service.py` |
 | `VideoSourceService` | демонстрация экрана и коммутатор источников | `video_source_service.py` |
+| `VideoPreviewService` | локальное превью камеры и встраивание видео вызовов | `video_preview_service.py` |
+| `MediaControlService` | тумблеры камеры/микрофона, мут участников | `media_control_service.py` |
 
 Слой pjsua2 изолирован в `pjsip_adapter.py`: там импорт `pjsua2`, флаг
 `PJSIP_AVAILABLE`, `StubEndpoint` (реализует `EndpointProtocol`) и хелперы
