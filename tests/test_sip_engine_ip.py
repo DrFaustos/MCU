@@ -61,7 +61,8 @@ def test_process_events_noop_without_endpoint():
 
 def test_process_events_calls_libhandleevents():
     """При живом endpoint события прокачиваются через libHandleEvents (мс)."""
-    import mcuclient.sip_engine as se
+    import mcuclient.sip_engine as se  # noqa: F401
+    import mcuclient.pjsip_adapter as pa
 
     calls = []
 
@@ -71,8 +72,8 @@ def test_process_events_calls_libhandleevents():
 
     eng = SipEngine.__new__(SipEngine)
     eng._endpoint = _Endpoint()
-    old_avail = se.PJSIP_AVAILABLE
-    se.PJSIP_AVAILABLE = True
+    old_avail = pa.PJSIP_AVAILABLE
+    pa.PJSIP_AVAILABLE = True
     try:
         eng.process_events(0.5)
         assert calls == [500]
@@ -80,12 +81,13 @@ def test_process_events_calls_libhandleevents():
         eng.process_events(-3.0)
         assert calls[-1] == 0
     finally:
-        se.PJSIP_AVAILABLE = old_avail
+        pa.PJSIP_AVAILABLE = old_avail
 
 
 def test_process_events_swallows_endpoint_errors():
     """Ошибка внутри libHandleEvents не должна ронять цикл run.py."""
-    import mcuclient.sip_engine as se
+    import mcuclient.sip_engine as se  # noqa: F401
+    import mcuclient.pjsip_adapter as pa
 
     class _Endpoint:
         def libHandleEvents(self, ms):  # noqa: N802
@@ -93,9 +95,9 @@ def test_process_events_swallows_endpoint_errors():
 
     eng = SipEngine.__new__(SipEngine)
     eng._endpoint = _Endpoint()
-    old_avail = se.PJSIP_AVAILABLE
-    se.PJSIP_AVAILABLE = True
+    old_avail = pa.PJSIP_AVAILABLE
+    pa.PJSIP_AVAILABLE = True
     try:
         eng.process_events(0.1)  # не должно бросить
     finally:
-        se.PJSIP_AVAILABLE = old_avail
+        pa.PJSIP_AVAILABLE = old_avail

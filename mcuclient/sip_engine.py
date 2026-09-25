@@ -60,6 +60,9 @@ PJMEDIA_EAUD_MARKERS = (
 from .pjsip_adapter import (  # noqa: F401
     PJSIP_AVAILABLE,
     StubEndpoint as _StubEndpoint,
+    account_ready,
+    endpoint_ready,
+    is_available,
     pj as _pj,
 )
 
@@ -256,7 +259,7 @@ class SipEngine:
         # не увидит его в списке камер на старте.
         if self.config.virtual_camera_enabled:
             self.start_virtual_camera()
-        if PJSIP_AVAILABLE:
+        if is_available():
             self._start_pjsip()
         else:
             self._endpoint = _StubEndpoint.instance()
@@ -267,12 +270,12 @@ class SipEngine:
             "engine.started",
             listen=f"{self.config.sip_listen}:{self.config.sip_port}",
             room=self.room.name if self.room else "",
-            pjsip=PJSIP_AVAILABLE,
+            pjsip=is_available(),
         )
         log.info(
             "Движок запущен: %s:%d, комната '%s', pjsip=%s, шифрование=%s, раскладка=%s",
             self.config.sip_listen, self.config.sip_port,
-            self.room.name if self.room else "-", PJSIP_AVAILABLE,
+            self.room.name if self.room else "-", is_available(),
             "вкл" if self.config.require_encryption else "выкл",
             self._layout,
         )
@@ -296,7 +299,7 @@ class SipEngine:
             if self._vswitch.running:
                 self._vswitch.stop()
             self._detach_own_media()
-            if PJSIP_AVAILABLE and self._endpoint is not None:
+            if endpoint_ready(self._endpoint):
                 self._hangup_all()
                 # Дать pjsua2 обработать BYE и снять вызовы до разрушения lib.
                 time.sleep(0.3)
@@ -317,7 +320,7 @@ class SipEngine:
             log.info("Движок остановлен")
 
     def register_main_thread(self) -> None:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             return
         if not hasattr(self._endpoint, "libRegisterThread"):
             return
@@ -337,7 +340,7 @@ class SipEngine:
 
         :param timeout: сколько секунд ждать событий (0 — не блокироваться).
         """
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             return
         try:  # pragma: no cover
             self._endpoint.libHandleEvents(int(max(0.0, timeout) * 1000))
@@ -669,7 +672,7 @@ class SipEngine:
         import os as _os
         if _os.environ.get("MCU_NO_EMBED_VIDEO") == "1":
             return False
-        if not PJSIP_AVAILABLE:
+        if not is_available():
             return False
         # Берём XID, закешированный в момент onCallMediaState (окно тогда
         # валидно). Повторный getInfo() позже может упасть нативным assert
@@ -775,7 +778,7 @@ class SipEngine:
 
     def accept(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
-        if p and p._call is not None and PJSIP_AVAILABLE:
+        if p and p._call is not None and is_available():
             prm = _pj.CallOpParam(True)
             prm.statusCode = 200
             prm.opt.audioCount = 1
@@ -789,7 +792,7 @@ class SipEngine:
 
     def reject(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
-        if p and p._call is not None and PJSIP_AVAILABLE:
+        if p and p._call is not None and is_available():
             prm = _pj.CallOpParam()
             prm.statusCode = 486
             p._call.hangup(prm)  # pragma: no cover
@@ -799,7 +802,7 @@ class SipEngine:
         uri = normalize_uri(uri)
         if not uri:
             return None
-        if not PJSIP_AVAILABLE:
+        if not is_available():
             self.events.emit("call.error", reason="pjsua2 недоступен")
             return None
 
@@ -841,7 +844,7 @@ class SipEngine:
 
     def hangup(self, participant_id: int) -> None:
         p = self._get_participant(participant_id)
-        if p and p._call is not None and PJSIP_AVAILABLE:
+        if p and p._call is not None and is_available():
             try:  # pragma: no cover
                 prm = _pj.CallOpParam()
                 prm.statusCode = 200
@@ -915,7 +918,7 @@ class SipEngine:
         AccountInfo не отдаёт videoConfig, поэтому храним исходный AccountConfig
         и вызываем account.modify() с обновлённым defaultCaptureDevice.
         """
-        if not (PJSIP_AVAILABLE and self._account is not None):
+        if not account_ready(self._account):
             return False
         acfg = getattr(self, "_acc_cfg", None)
         vcfg = getattr(acfg, "videoConfig", None) if acfg is not None else None
@@ -954,7 +957,7 @@ class SipEngine:
 
         Возвращает число вызовов, которым устройство назначено.
         """
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             return 0
         if not getattr(self, "_video_supported", False):
             return 0
@@ -997,7 +1000,7 @@ class SipEngine:
         self._capture_bindings.clear()
 
     def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             self.events.emit("media.preview", active=False, error="pjsip_unavailable")
             return False
         if not self._video_supported:
@@ -1134,7 +1137,7 @@ class SipEngine:
         сбор идёт через libRegisterThread, а решение ABR применяется в этом же
         потоке (config.set_video_bitrate потокобезопасен для наших целей).
         """
-        if not PJSIP_AVAILABLE or not self._abr_enabled:
+        if not is_available() or not self._abr_enabled:
             return
         if self._rtcp_poller is not None and self._rtcp_poller.is_alive():
             return
@@ -1241,7 +1244,7 @@ class SipEngine:
         Если реальные устройства недоступны — включается null-аудио, чтобы
         соединение всё равно устанавливалось.
         """
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             self.events.emit("media.reconnect", target="audio", ok=False,
                              error="pjsip_unavailable")
             return False
@@ -1261,7 +1264,7 @@ class SipEngine:
         Если камер нет — не ошибка: видео просто не передаётся, звонок идёт.
         """
         self.refresh_devices()
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             self.events.emit("media.reconnect", target="video", ok=False,
                              error="pjsip_unavailable")
             return False
@@ -1313,7 +1316,7 @@ class SipEngine:
         Ищем устройство PJSIP по имени, соответствующему конфигу
         (обычно «OBS Virtual Camera»), и делаем его источником захвата.
         """
-        if not (PJSIP_AVAILABLE and self._endpoint is not None):
+        if not endpoint_ready(self._endpoint):
             return
         want = self.config.virtual_camera_device  # напр. /dev/video0
         try:
@@ -1375,7 +1378,7 @@ class SipEngine:
         return self._screen_share_enabled
 
     def _apply_media_state(self, participant: Optional[Participant] = None) -> None:
-        if not PJSIP_AVAILABLE:
+        if not is_available():
             return
         targets = [participant] if participant else list(
             (self.room.participants.values() if self.room else [])
@@ -1463,7 +1466,7 @@ class SipEngine:
         if p is None:
             return False
         p.is_muted = bool(muted)
-        if PJSIP_AVAILABLE and p._call is not None:
+        if is_available() and p._call is not None:
             try:  # pragma: no cover
                 if hasattr(p._call, "setMute"):
                     p._call.setMute(muted)
@@ -1624,7 +1627,7 @@ class SipEngine:
         content = normalize_message(text)
         if content is None:
             return False
-        if not PJSIP_AVAILABLE:
+        if not is_available():
             self.events.emit("chat.error", reason="pjsua2 недоступен")
             return False
         p = self._get_participant(participant_id)
@@ -1705,4 +1708,4 @@ class SipEngine:
 
     @property
     def pjsip_available(self) -> bool:
-        return PJSIP_AVAILABLE
+        return is_available()

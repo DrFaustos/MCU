@@ -91,6 +91,25 @@ class StubEndpoint:
         pass
 
 
+def is_available() -> bool:
+    """Доступен ли нативный стек pjsua2 в данный момент.
+
+    Единственная точка правды для кода приложения: вместо разбросанных
+    проверок ``PJSIP_AVAILABLE`` вызывающий спрашивает адаптер.
+    """
+    return bool(PJSIP_AVAILABLE)
+
+
+def endpoint_ready(endpoint) -> bool:
+    """Готов ли SIP-эндпоинт к работе (стек есть и эндпоинт создан)."""
+    return PJSIP_AVAILABLE and endpoint is not None
+
+
+def account_ready(account) -> bool:
+    """Готов ли SIP-аккаунт к операциям (стек есть и аккаунт создан)."""
+    return PJSIP_AVAILABLE and account is not None
+
+
 def create_endpoint() -> EndpointProtocol:
     """Возвращает pjsua2.Endpoint либо StubEndpoint (если pjsua2 нет)."""
     if PJSIP_AVAILABLE and pj is not None:
