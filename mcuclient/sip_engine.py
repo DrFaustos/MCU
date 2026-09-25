@@ -201,6 +201,9 @@ class SipEngine:
         self._calls = CallManager(self._registry, self.events, _pj)
         self._running = False
         self._video_supported = False
+        # Передача видео (независимо от захвата/превью): мут видео
+        # на своём тайле шлёт recv-only, не трогая локальное превью.
+        self._video_send_enabled = True
         self._capture_bindings: list = []
         self._vpreview = VideoPreviewService(
             self.events,
@@ -839,6 +842,18 @@ class SipEngine:
     def set_microphone_enabled(self, enabled: bool) -> bool:
         return self._mediacontrol.set_microphone_enabled(enabled)
 
+    def set_video_send_enabled(self, enabled: bool) -> bool:
+        """Включить/выключить ПЕРЕДАЧУ видео, не трогая захват/превью."""
+        self._video_send_enabled = bool(enabled)
+        self._apply_media_state()
+        self.events.emit("media.video_send", enabled=self._video_send_enabled)
+        log.info("Передача видео: %s", "вкл" if self._video_send_enabled else "выкл")
+        return self._video_send_enabled
+
+    @property
+    def video_send_enabled(self) -> bool:
+        return self._video_send_enabled
+
     def list_video_devices(self) -> List[dict]:
         return self._media.list_video_devices()
 
@@ -1121,7 +1136,10 @@ class SipEngine:
         # Меняем НАПРАВЛЕНИЕ видео через CHANGE_DIR: это шлёт re-INVITE, и
         # удалённая сторона корректно убирает наш видеопоток (при STOP_TRANSMIT
         # без пересогласования у собеседника «замирал» последний кадр).
-        want_send = bool(self._vsource.screen_share_enabled or self.media_state.camera_enabled)
+        want_send = bool(
+            self._vsource.screen_share_enabled
+            or (self.media_state.camera_enabled and self._video_send_enabled)
+        )
         op = getattr(_pj, "PJSUA_CALL_VID_STRM_CHANGE_DIR", None)
         dir_send = getattr(_pj, "PJMEDIA_DIR_ENCODING_DECODING", 3)
         dir_recv = getattr(_pj, "PJMEDIA_DIR_DECODING", 2)

@@ -112,6 +112,7 @@ if QT_AVAILABLE:
         mute_audio_clicked = QtCore.Signal(int, bool)
         mute_video_clicked = QtCore.Signal(int, bool)
         hangup_clicked = QtCore.Signal(int)
+        local_clicked = QtCore.Signal()
 
         def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
             super().__init__(parent)
@@ -120,6 +121,12 @@ if QT_AVAILABLE:
             self._engine = None
             self._is_local = False
             self._build_ui()
+
+        def mousePressEvent(self, event):  # noqa: N802
+            # Клик по своему тайлу — вкл/выкл превью камеры.
+            if self._is_local:
+                self.local_clicked.emit()
+            super().mousePressEvent(event)
 
         def resizeEvent(self, event):  # noqa: N802
             super().resizeEvent(event)
@@ -311,7 +318,9 @@ if QT_AVAILABLE:
                 self.mute_audio_clicked.emit(self.participant_id, self.mute_audio_btn.isChecked())
 
         def _on_mute_video(self) -> None:
-            if self.participant_id is not None:
+            if self._is_local:
+                self.mute_video_clicked.emit(-1, self.mute_video_btn.isChecked())
+            elif self.participant_id is not None:
                 self.mute_video_clicked.emit(self.participant_id, self.mute_video_btn.isChecked())
 
         def _on_hangup(self) -> None:
@@ -718,6 +727,19 @@ if QT_AVAILABLE:
                 "color:#7fd1a0; font-size:11px; font-weight:bold;"
             )
             tile.setEnabled(True)
+            tile.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            # Кнопка мута видео = выключена ли ПЕРЕДАЧА.
+            _send = bool(getattr(self.engine, "video_send_enabled", True))
+            tile.mute_video_btn.setChecked(not _send)
+            _icons.set_button_icon(tile.mute_video_btn, "cam_off" if not _send else "cam")
+            if not self.engine.local_preview_active:
+                # Превью не запущено — заглушка (клик по тайлу включает).
+                tile.video_label.show()
+                tile.video_label.setText(
+                    "Камера выключена" if not self.engine.media_state.camera_enabled
+                    else "Нажмите, чтобы показать камеру"
+                )
+                return
             try:
                 if self.engine.attach_local_preview(tile.video_inner):
                     tile._native_attached = True
@@ -738,6 +760,16 @@ if QT_AVAILABLE:
                         tile.video_label.setText("Своя камера — отдельное окно")
                 except Exception:  # noqa: BLE001
                     pass
+
+        def _sync_local_tile_send(self) -> None:
+            """Синхронизировать кнопку мута видео на локальном тайле."""
+            send = bool(getattr(self.engine, "video_send_enabled", True))
+            for tile in self._tile_pool:
+                if getattr(tile, "_is_local", False):
+                    tile.mute_video_btn.setChecked(not send)
+                    _icons.set_button_icon(
+                        tile.mute_video_btn, "cam_off" if not send else "cam"
+                    )
 
         def _schedule_local_preview_attach(self, attempt: int = 0) -> None:
             """Встроить локальное превью в тайл с несколькими попытками.
@@ -772,6 +804,7 @@ if QT_AVAILABLE:
                 tile.mute_audio_clicked.connect(self._on_tile_mute_audio)
                 tile.mute_video_clicked.connect(self._on_tile_mute_video)
                 tile.hangup_clicked.connect(self._on_tile_hangup)
+                tile.local_clicked.connect(self._on_local_tile_click)
                 self._tile_pool.append(tile)
 
         def _schedule_grid_rebuild(self, delay_ms: int = 50) -> None:
@@ -830,21 +863,14 @@ if QT_AVAILABLE:
                     self.video_grid_layout.takeAt(0)
                 self._tiles.clear()
 
-                # Формируем список ячеек: участники + пустые.
-                # Первым — локальный тайл (своя камера), как в Zoom/Teams.
-                cells = []
-                if self.engine.local_preview_active:
-                    cells.append(self._LOCAL_SENTINEL)
-                if not visible and not cells:
-                    cells = [None]
-                    rows, cols = 1, 1
-                else:
-                    for p in visible:
-                        cells.append(p)
-                    while len(cells) < rows * cols:
-                        cells.append(None)
-                    while len(cells) > rows * cols:
-                        cols += 1
+                # Первым — локальный тайл «Вы» (всегда), затем участники.
+                cells = [self._LOCAL_SENTINEL]
+                for p in visible:
+                    cells.append(p)
+                while len(cells) > rows * cols:
+                    cols += 1
+                while len(cells) < rows * cols:
+                    cells.append(None)
 
                 self._ensure_tile_pool(len(cells))
 
@@ -905,6 +931,15 @@ if QT_AVAILABLE:
             self._refresh_participants_list()
 
         def _on_tile_mute_video(self, pid: int, muted: bool) -> None:
+            if pid == -1:
+                # Свой тайл: гасим только ПЕРЕДАЧУ, превью остаётся.
+                self.engine.set_video_send_enabled(not muted)
+                self.statusBar().showMessage(
+                    "Передача видео выключена (себя видно)" if muted
+                    else "Передача видео включена",
+                    4000,
+                )
+                return
             self.engine.mute_participant_video(pid, muted)
             self._refresh_tiles()
             self._refresh_participants_list()
@@ -1105,6 +1140,21 @@ if QT_AVAILABLE:
                     self._schedule_local_preview_attach()
             except Exception:  # noqa: BLE001
                 pass
+
+        def _on_local_tile_click(self) -> None:
+            """Клик по своему тайлу: вкл/выкл превью камеры."""
+            if self.engine.local_preview_active:
+                self.engine.stop_local_preview()
+            else:
+                dev_id = self.camera_combo.currentData()
+                if dev_id is None or dev_id < 0:
+                    self.device_status.setText("Видеоустройства недоступны")
+                    return
+                if not self.engine.start_local_preview(int(dev_id)):
+                    self.device_status.setText("Не удалось включить превью (см. лог)")
+                    return
+                self._schedule_local_preview_attach()
+            self._schedule_grid_rebuild()
 
         def _on_preview_toggle(self, checked: bool) -> None:
             if checked:
@@ -1320,7 +1370,6 @@ if QT_AVAILABLE:
                         # См. комментарий выше: перестройку сетки откладываем,
                         # чтобы не трогать нативные виджеты во время обработки
                         # события (access violation на Windows).
-                        self._ensure_local_preview()
                         self._schedule_grid_rebuild()
                     self.statusBar().showMessage(f"Вызов {pid}: {state}", 5000)
                 elif event == "call.error":
@@ -1398,6 +1447,8 @@ if QT_AVAILABLE:
                 elif event in {"participant.muted", "participant.video_muted"}:
                     self._refresh_tiles()
                     self._refresh_participants_list()
+                elif event == "media.video_send":
+                    self._sync_local_tile_send()
             except Exception as e:
                 log.exception("Ошибка в _handle_event для события %s: %s", event, e)
 
