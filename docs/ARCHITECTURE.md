@@ -153,3 +153,23 @@ GUI (`MainWindow`), CLI (`run.py --proto`) и конфиг
 (`features.default_call_protocol`) сходятся в этот модуль, поэтому логика
 маршрутизации не дублируется. Модуль не зависит от PJSIP/Qt/H323Plus и
 полностью покрыт юнит-тестами. См. `docs/CALL_PROTOCOL.md`.
+
+## 11. Декомпозиция SipEngine на сервисы
+
+`SipEngine` был монолитом; в ходе поэтапного рефакторинга часть
+ответственностей вынесена в отдельные сервисы. Движок остаётся фасадом:
+публичный API сохранён, внутри делегирует в сервисы.
+
+| Сервис | Ответственность | Модуль |
+|--------|-----------------|--------|
+| `LayoutService` | раскладки видео, сетка, видимые участники | `layout_service.py` |
+| `ChatService` | текстовый чат (SIP MESSAGE, RFC 3428) | `chat_service.py` |
+| `RecorderService` | запись конференции (FFmpeg) и аудио вызова (WAV) | `recorder_service.py` |
+| `AbrService` | адаптивный битрейт по RTCP + фоновый опрос | `abr_service.py` |
+| `DeviceService` | перечисление устройств, refresh, watcher | `device_service.py` |
+| `VideoSourceService` | демонстрация экрана и коммутатор источников | `video_source_service.py` |
+
+Слой pjsua2 изолирован в `pjsip_adapter.py`: там импорт `pjsua2`, флаг
+`PJSIP_AVAILABLE`, `StubEndpoint` (реализует `EndpointProtocol`) и хелперы
+`is_available()`/`endpoint_ready()`/`account_ready()`. Логика приложения
+не ветвится по `PJSIP_AVAILABLE` напрямую — только через адаптер.
