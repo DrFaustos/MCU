@@ -59,7 +59,7 @@ def _engine(tmp_path):
 def test_start_stop_audio_recording_events(tmp_path):
     e = _engine(tmp_path)
     # Подменяем pjsua2-рекордер и регистрируем фейковый вызов.
-    e._audio_recorder.bind_pj(_FakePj())
+    e._recording._audio_recorder.bind_pj(_FakePj())
     call = _FakeCall()
     part = e._registry.register(call, "sip:a", CallState.CONFIRMED)
     seen = []
@@ -75,7 +75,7 @@ def test_start_stop_audio_recording_events(tmp_path):
     assert "file" in audio_events[0] and audio_events[0]["enabled"] is True
     assert "file" in audio_events[1] and audio_events[1]["enabled"] is False
     # C1: поток отключён от рекордера при остановке.
-    assert call.media.stopped_to is e._audio_recorder._recorder or call.media.stopped_to is not None
+    assert call.media.stopped_to is e._recording._audio_recorder._recorder or call.media.stopped_to is not None
 
 
 def test_start_audio_recording_unknown_participant(tmp_path):
@@ -86,7 +86,7 @@ def test_start_audio_recording_unknown_participant(tmp_path):
 def test_engine_stop_halts_audio_recording(tmp_path):
     """C3: engine.stop() не должен оставлять активную аудио-запись."""
     e = _engine(tmp_path)
-    e._audio_recorder.bind_pj(_FakePj())
+    e._recording._audio_recorder.bind_pj(_FakePj())
     call = _FakeCall()
     part = e._registry.register(call, "sip:a", CallState.CONFIRMED)
     assert e.start_audio_recording(part.id) is True

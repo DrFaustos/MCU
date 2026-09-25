@@ -18,10 +18,9 @@ from .media_devices import (
 from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
 from .rtcp_metrics import RtcpCollector
 from .call_manager import CallManager, normalize_uri
-from .audio_recorder import AudioRecorder
+from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
-from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
 from .layout_service import LayoutService
 from .video_source import SourceInfo, VideoSourceSwitcher
@@ -229,8 +228,15 @@ class SipEngine:
         )
 
         rec_dir = config.features.get("recording_path", "./recordings")
-        self._recorder = ConferenceRecorder(output_dir=rec_dir)
-        self._audio_recorder = AudioRecorder(output_dir=rec_dir, pj_module=_pj)
+        self._recording = RecorderService(
+            self.events,
+            output_dir=rec_dir,
+            pj_module=_pj,
+            allow_recording=bool(config.features.get("allow_recording", True)),
+            get_participant=self._get_participant,
+            register_media_port=self.register_media_port,
+            unregister_media_port=self.unregister_media_port,
+        )
         self._media = MediaManager(_pj, None, null_audio=config.null_audio)
         video_cfg = config.video
         self._abr = AdaptiveBitrateController(
@@ -294,10 +300,8 @@ class SipEngine:
         if not self._running:
             return
         try:
-            if self._recorder.is_recording:
-                self._recorder.stop_recording()
-            if self._audio_recorder.is_recording:
-                self._audio_recorder.stop_recording()
+            self._recording.stop_conference_recording()
+            self._recording.stop_audio_recording_silent()
             if self._video_preview is not None:
                 self.stop_local_preview()
             if self._screen_sharer.is_running:
@@ -1518,56 +1522,26 @@ class SipEngine:
         return self._layout.visible_participants(getattr(self, "room", None))
 
     def toggle_recording(self) -> bool:
-        if not self.config.features.get("allow_recording", True):
-            log.warning("Запись отключена в конфигурации")
-            return False
-        result = self._recorder.toggle_recording()
-        self.events.emit(
-            "media.recording",
-            enabled=self._recorder.is_recording,
-            file=str(self._recorder.current_file) if self._recorder.current_file else None,
-        )
-        return result
+        return self._recording.toggle_recording()
 
     @property
     def is_recording(self) -> bool:
-        return self._recorder.is_recording
+        return self._recording.is_recording
 
     @property
     def recording_file(self) -> Optional[str]:
-        f = self._recorder.current_file
-        return str(f) if f else None
+        return self._recording.recording_file
 
     def start_audio_recording(self, participant_id: int) -> bool:
         """Записать аудио конкретного вызова в WAV (через pjsua2)."""
-        p = self._get_participant(participant_id)
-        if p is None or p._call is None:
-            return False
-        ok = self._audio_recorder.start_recording(p._call)
-        if ok:
-            self.register_media_port(self._audio_recorder)
-        self.events.emit(
-            "media.recording.audio",
-            enabled=self._audio_recorder.is_recording,
-            file=str(self._audio_recorder.current_file) if self._audio_recorder.current_file else None,
-        )
-        return ok
+        return self._recording.start_audio_recording(participant_id)
 
     def stop_audio_recording(self) -> bool:
-        f = self._audio_recorder.current_file
-        ok = self._audio_recorder.stop_recording()
-        self.unregister_media_port(self._audio_recorder)
-        # W3: payload симметричен start — всегда есть enabled и file.
-        self.events.emit(
-            "media.recording.audio",
-            enabled=self._audio_recorder.is_recording,
-            file=str(f) if f else None,
-        )
-        return ok
+        return self._recording.stop_audio_recording()
 
     @property
     def is_audio_recording(self) -> bool:
-        return self._audio_recorder.is_recording
+        return self._recording.is_audio_recording
 
     # --- текстовый чат (SIP MESSAGE, RFC 3428) ---
     @property
