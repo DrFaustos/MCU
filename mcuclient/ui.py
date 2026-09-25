@@ -113,6 +113,7 @@ if QT_AVAILABLE:
         mute_video_clicked = QtCore.Signal(int, bool)
         hangup_clicked = QtCore.Signal(int)
         local_clicked = QtCore.Signal()
+        local_camera_selected = QtCore.Signal(int)
 
         def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
             super().__init__(parent)
@@ -165,6 +166,13 @@ if QT_AVAILABLE:
             self.video_holder.set_child(self.video_inner)
             self.video_holder.on_child_resize = self._on_video_resized
             layout.addWidget(self.video_holder, stretch=1)
+
+            # Селектор камеры — виден только на своём тайле «Вы».
+            self.camera_combo = QtWidgets.QComboBox()
+            self.camera_combo.setToolTip("Камера для превью и передачи видео")
+            self.camera_combo.setVisible(False)
+            self.camera_combo.currentIndexChanged.connect(self._on_camera_changed)
+            layout.addWidget(self.camera_combo)
 
             self.name_label = QtWidgets.QLabel("—")
             self.name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -226,6 +234,7 @@ if QT_AVAILABLE:
             # Тайл переиспользуется под другого участника — сбросим состояние видео.
             if self.participant_id != p.id:
                 self.detach_native_video()
+            self.hide_camera_combo()
             if self._is_local:
                 self._is_local = False
                 self.name_label.setStyleSheet("color:#c0c8d0; font-size:11px;")
@@ -312,6 +321,31 @@ if QT_AVAILABLE:
             self._native_attached = False
             if not self.video_label.isVisible():
                 self.video_label.show()
+
+        def _on_camera_changed(self, index: int) -> None:
+            if not self._is_local:
+                return
+            dev = self.camera_combo.itemData(index)
+            if dev is not None and int(dev) >= 0:
+                self.local_camera_selected.emit(int(dev))
+
+        def fill_cameras(self, devices, current) -> None:
+            """Заполнить список камер локального тайла (сохраняя выбор)."""
+            blocker = QtCore.QSignalBlocker(self.camera_combo)
+            self.camera_combo.clear()
+            for d in devices:
+                mark = " (виртуальное)" if d.get("synthetic") else ""
+                self.camera_combo.addItem(f"{d['name']}{mark}", d["id"])
+            if current is not None:
+                for i in range(self.camera_combo.count()):
+                    if str(self.camera_combo.itemData(i)) == str(current):
+                        self.camera_combo.setCurrentIndex(i)
+                        break
+            del blocker
+            self.camera_combo.setVisible(True)
+
+        def hide_camera_combo(self) -> None:
+            self.camera_combo.setVisible(False)
 
         def _on_mute_audio(self) -> None:
             if self.participant_id is not None:
@@ -728,6 +762,16 @@ if QT_AVAILABLE:
             )
             tile.setEnabled(True)
             tile.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            # Селектор камеры прямо в тайле «Вы».
+            try:
+                _devs = self.engine.list_video_devices()
+                _cur = getattr(self.engine.media_state, "camera_id", None)
+                if _devs:
+                    tile.fill_cameras(_devs, _cur)
+                else:
+                    tile.hide_camera_combo()
+            except Exception:  # noqa: BLE001
+                tile.hide_camera_combo()
             # Кнопка мута видео = выключена ли ПЕРЕДАЧА.
             _send = bool(getattr(self.engine, "video_send_enabled", True))
             tile.mute_video_btn.setChecked(not _send)
@@ -805,6 +849,7 @@ if QT_AVAILABLE:
                 tile.mute_video_clicked.connect(self._on_tile_mute_video)
                 tile.hangup_clicked.connect(self._on_tile_hangup)
                 tile.local_clicked.connect(self._on_local_tile_click)
+                tile.local_camera_selected.connect(self._on_local_tile_camera)
                 self._tile_pool.append(tile)
 
         def _schedule_grid_rebuild(self, delay_ms: int = 50) -> None:
@@ -1140,6 +1185,29 @@ if QT_AVAILABLE:
                     self._schedule_local_preview_attach()
             except Exception:  # noqa: BLE001
                 pass
+
+        def _on_local_tile_camera(self, dev_id: int) -> None:
+            """Смена камеры из селектора в своём тайле."""
+            self.engine.set_video_device(int(dev_id))
+            # Держим правый комбобокс в согласии (без рекурсии).
+            try:
+                blocker = QtCore.QSignalBlocker(self.camera_combo)
+                for i in range(self.camera_combo.count()):
+                    if str(self.camera_combo.itemData(i)) == str(dev_id):
+                        self.camera_combo.setCurrentIndex(i)
+                        break
+                del blocker
+            except Exception:  # noqa: BLE001
+                pass
+            if self.engine.local_preview_active:
+                try:
+                    self.engine.stop_local_preview()
+                    self.engine.start_local_preview(int(dev_id))
+                    self._schedule_local_preview_attach()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._schedule_grid_rebuild()
+            self.device_status.setText(f"Камера (тайл): {dev_id}")
 
         def _on_local_tile_click(self) -> None:
             """Клик по своему тайлу: вкл/выкл превью камеры."""
