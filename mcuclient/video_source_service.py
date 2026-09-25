@@ -118,6 +118,14 @@ class VideoSourceService:
     def current_video_source(self) -> str:
         return self._vswitch.current_source().kind
 
+    def set_on_frame(self, callback) -> None:
+        """Подписаться на кадры коммутатора (RGB, в его потоке)."""
+        self._vswitch.on_frame = callback
+
+    @property
+    def frames_sent(self) -> int:
+        return self._vswitch.frames_sent
+
     def select_virtual_device(self) -> None:
         """Назначить виртуальное устройство (v4l2loopback) камерой для звонков.
 

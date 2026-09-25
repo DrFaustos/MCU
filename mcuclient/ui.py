@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import queue
+import threading
 import signal
 import sys
 import traceback
@@ -482,6 +483,17 @@ if QT_AVAILABLE:
 
             self.engine.set_answer_dispatch(self._request_answer)
 
+            # Единый источник: кадры из коммутатора -> тайл «Вы».
+            self._vs_latest = None
+            self._vs_lock = threading.Lock()
+            self._vs_timer = QtCore.QTimer(self)
+            self._vs_timer.setInterval(33)  # ~30 fps
+            self._vs_timer.timeout.connect(self._paint_vsource_frame)
+            try:
+                self.engine.set_vsource_on_frame(self._on_vsource_frame)
+            except Exception:  # noqa: BLE001
+                pass
+
             self._event_poll = QtCore.QTimer(self)
             self._event_poll.setInterval(50)
             self._event_poll.timeout.connect(self._drain_events)
@@ -776,6 +788,13 @@ if QT_AVAILABLE:
             _send = bool(getattr(self.engine, "video_send_enabled", True))
             tile.mute_video_btn.setChecked(not _send)
             _icons.set_button_icon(tile.mute_video_btn, "cam_off" if not _send else "cam")
+            if self.engine.virtual_camera_running:
+                # Единый источник: кадры коммутатора уже пишутся в виртуальную
+                # камеру; рисуем тот же поток в тайле «Вы».
+                tile.video_label.show()
+                tile.video_label.setText("")
+                self._vs_timer.start()
+                return
             if not self.engine.local_preview_active:
                 # Превью не запущено — заглушка (клик по тайлу включает).
                 tile.video_label.show()
@@ -804,6 +823,50 @@ if QT_AVAILABLE:
                         tile.video_label.setText("Своя камера — отдельное окно")
                 except Exception:  # noqa: BLE001
                     pass
+
+        def _on_vsource_frame(self, frame) -> None:
+            """Кадр из потока коммутатора: только сохранить (без Qt)."""
+            try:
+                with self._vs_lock:
+                    self._vs_latest = frame
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _paint_vsource_frame(self) -> None:
+            """Отрисовать последний кадр коммутатора в тайле «Вы»."""
+            if not self.engine.virtual_camera_running:
+                self._vs_timer.stop()
+                return
+            with self._vs_lock:
+                frame = self._vs_latest
+                self._vs_latest = None
+            if frame is None:
+                return
+            tile = None
+            for t in self._tile_pool:
+                if getattr(t, "_is_local", False):
+                    tile = t
+                    break
+            if tile is None:
+                return
+            try:
+                h, w = frame.shape[:2]
+                # .copy() — QImage не владеет буфером numpy; без копии
+                # возможен use-after-free после выхода из функции.
+                img = QtGui.QImage(
+                    frame.data, w, h, 3 * w, QtGui.QImage.Format.Format_RGB888
+                ).copy()
+                tile.video_label.setPixmap(
+                    QtGui.QPixmap.fromImage(img).scaled(
+                        tile.video_label.size(),
+                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                        QtCore.Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                tile.video_label.show()
+                tile._native_attached = True
+            except Exception:  # noqa: BLE001
+                pass
 
         def _sync_local_tile_send(self) -> None:
             """Синхронизировать кнопку мута видео на локальном тайле."""
@@ -1189,6 +1252,9 @@ if QT_AVAILABLE:
         def _on_local_tile_camera(self, dev_id: int) -> None:
             """Смена камеры из селектора в своём тайле."""
             self.engine.set_video_device(int(dev_id))
+            if self.engine.virtual_camera_running:
+                self.engine.set_video_source("camera", int(dev_id))
+                return
             # Держим правый комбобокс в согласии (без рекурсии).
             try:
                 blocker = QtCore.QSignalBlocker(self.camera_combo)
@@ -1210,7 +1276,18 @@ if QT_AVAILABLE:
             self.device_status.setText(f"Камера (тайл): {dev_id}")
 
         def _on_local_tile_click(self) -> None:
-            """Клик по своему тайлу: вкл/выкл превью камеры."""
+            """Клик по своему тайлу: вкл/выкл источник камеры."""
+            if self.engine.virtual_camera_available:
+                dev_id = self.camera_combo.currentData()
+                if dev_id is None or dev_id < 0:
+                    dev_id = None
+                active = self.engine.current_video_source() == "camera"
+                if not self.engine.virtual_camera_running:
+                    self.engine.start_virtual_camera("camera", dev_id)
+                else:
+                    self.engine.set_video_source("off" if active else "camera", dev_id)
+                self._schedule_grid_rebuild()
+                return
             if self.engine.local_preview_active:
                 self.engine.stop_local_preview()
             else:

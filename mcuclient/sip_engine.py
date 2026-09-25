@@ -1120,6 +1120,14 @@ class SipEngine:
     def current_video_source(self) -> str:
         return self._vsource.current_video_source()
 
+    def set_vsource_on_frame(self, callback) -> None:
+        """Подписаться на кадры виртуального источника (единый поток)."""
+        self._vsource.set_on_frame(callback)
+
+    @property
+    def vsource_frames_sent(self) -> int:
+        return self._vsource.frames_sent
+
     def set_screen_share_enabled(self, enabled: bool) -> bool:
         return self._vsource.set_screen_share_enabled(enabled)
 
