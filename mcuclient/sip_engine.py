@@ -23,6 +23,7 @@ from .call_registry import CallRegistry
 from .chat import ChatHistory, normalize_message
 from .recorder import ConferenceRecorder
 from .screen_share import ScreenSharer
+from .layout_service import LayoutService
 from .video_source import SourceInfo, VideoSourceSwitcher
 from . import video_embed
 
@@ -241,7 +242,7 @@ class SipEngine:
             current_kbps=int(video_cfg.get("bitrate_kbps", 1500)),
         )
         self._abr_enabled = True
-        self._layout: str = config.default_layout
+        self._layout = LayoutService(config, self.events)
         self._chat = ChatHistory()
         self._device_watcher: Optional[threading.Thread] = None
         self._device_watch_stop = threading.Event()
@@ -277,7 +278,7 @@ class SipEngine:
             self.config.sip_listen, self.config.sip_port,
             self.room.name if self.room else "-", is_available(),
             "вкл" if self.config.require_encryption else "выкл",
-            self._layout,
+            self._layout.layout,
         )
         if self.config.virtual_camera_enabled:
             self._select_virtual_device()
@@ -1500,70 +1501,16 @@ class SipEngine:
 
     @property
     def layout(self) -> str:
-        return self._layout
+        return self._layout.layout
 
     def set_layout(self, layout: str) -> str:
-        available = self.config.available_layouts
-        if layout not in available:
-            log.warning("Раскладка '%s' недоступна, используем '%s'", layout, self._layout)
-            return self._layout
-        self._layout = layout
-        self.events.emit("layout.changed", layout=layout)
-        log.info("Раскладка изменена: %s", layout)
-        return self._layout
+        return self._layout.set_layout(layout)
 
     def get_layout_grid(self) -> tuple[int, int]:
-        try:
-            from .config import LAYOUT_GRID, compute_auto_grid
-            layout = getattr(self, '_layout', 'speaker')
-            grid = LAYOUT_GRID.get(layout, (1, 1))
-            if layout == "grid_auto":
-                room = getattr(self, 'room', None)
-                if room is not None:
-                    count = getattr(room, 'count', 1)
-                    return compute_auto_grid(count)
-            return grid
-        except Exception as exc:  # noqa: BLE001 — раскладка всегда должна вернуть сетку
-            log.debug("get_layout_grid: %s", exc)
-            return (1, 1)
+        return self._layout.grid(getattr(self, "room", None))
 
     def get_visible_participants(self) -> List[Participant]:
-        try:
-            from .config import LAYOUT_CAPACITY
-            room = getattr(self, 'room', None)
-            if not room:
-                return []
-
-            active = []
-            try:
-                participants = getattr(room, 'participants', {})
-                if isinstance(participants, dict):
-                    active = [p for p in participants.values() if getattr(p, 'state', None) == CallState.CONFIRMED]
-            except Exception as exc:  # noqa: BLE001
-                log.debug("get_visible_participants/active: %s", exc)
-                active = []
-
-            layout = getattr(self, '_layout', 'speaker')
-            if layout == "speaker":
-                speaker = None
-                try:
-                    for p in active:
-                        if getattr(p, 'is_speaking', False):
-                            speaker = p
-                            break
-                    if not speaker and active:
-                        speaker = active[0]
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("get_visible_participants/speaker: %s", exc)
-                return [speaker] if speaker else []
-
-            capacity = LAYOUT_CAPACITY.get(layout, 0)
-            if capacity == 0:
-                return active
-            return active[:capacity]
-        except Exception as exc:  # noqa: BLE001 — список всегда возвращаем
-            log.debug("get_visible_participants: %s", exc)
-            return []
+        return self._layout.visible_participants(getattr(self, "room", None))
 
     def toggle_recording(self) -> bool:
         if not self.config.features.get("allow_recording", True):
