@@ -15,8 +15,8 @@ from .media_devices import (
     build_state,
     enumerate_devices,
 )
-from .adaptive_bitrate import AbrConfig, AdaptiveBitrateController
-from .rtcp_metrics import RtcpCollector
+from .adaptive_bitrate import AbrConfig
+from .abr_service import AbrService
 from .call_manager import CallManager, normalize_uri
 from .recorder_service import RecorderService
 from .call_registry import CallRegistry
@@ -239,15 +239,21 @@ class SipEngine:
         )
         self._media = MediaManager(_pj, None, null_audio=config.null_audio)
         video_cfg = config.video
-        self._abr = AdaptiveBitrateController(
-            AbrConfig(
-                min_kbps=max(64, int(video_cfg.get("bitrate_kbps", 1500) // 4)),
+        start_kbps = int(video_cfg.get("bitrate_kbps", 1500))
+        self._abr = AbrService(
+            self.events,
+            abr_config=AbrConfig(
+                min_kbps=max(64, start_kbps // 4),
                 max_kbps=max(512, int(config.bandwidth_kbps)),
-                start_kbps=int(video_cfg.get("bitrate_kbps", 1500)),
+                start_kbps=start_kbps,
             ),
-            current_kbps=int(video_cfg.get("bitrate_kbps", 1500)),
+            current_kbps=start_kbps,
+            pj_module=_pj,
+            poll_interval=float(config.features.get("rtcp_poll_interval", 3.0)),
+            get_calls=self._active_calls,
+            apply_bitrate=self.config.set_video_bitrate,
+            register_thread=self._register_pjsip_thread,
         )
-        self._abr_enabled = True
         self._layout = LayoutService(config, self.events)
         self._chat = ChatService(
             self.events,
@@ -257,10 +263,6 @@ class SipEngine:
         )
         self._device_watcher: Optional[threading.Thread] = None
         self._device_watch_stop = threading.Event()
-        self._rtcp = RtcpCollector(_pj)
-        self._rtcp_poller: Optional[threading.Thread] = None
-        self._rtcp_poll_stop = threading.Event()
-        self._rtcp_poll_interval = float(config.features.get('rtcp_poll_interval', 3.0))
 
     def start(self) -> None:
         if self._running:
@@ -1139,69 +1141,30 @@ class SipEngine:
         log.info("Наблюдение за устройствами запущено (интервал %.1fs)", interval)
 
     def _start_rtcp_poller(self) -> None:
-        """Фоновый поток: периодически снимает RTCP-метрики активных вызовов.
-
-        Без этого ABR никогда не получает реальные потери/джиттер и остаётся
-        декоративным: report_rtcp_metrics приходилось вызывать вручную.
-        Поток НЕ трогает pjsua2 напрямую из чужого потока без регистрации —
-        сбор идёт через libRegisterThread, а решение ABR применяется в этом же
-        потоке (config.set_video_bitrate потокобезопасен для наших целей).
-        """
-        if not is_available() or not self._abr_enabled:
+        """Запустить фоновый опрос RTCP (через AbrService)."""
+        if not is_available():
             return
-        if self._rtcp_poller is not None and self._rtcp_poller.is_alive():
-            return
-        self._rtcp_poll_stop.clear()
-        interval = max(0.5, self._rtcp_poll_interval)
-
-        def _loop() -> None:
-            try:
-                if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
-                    self._endpoint.libRegisterThread("rtcp-poll")
-            except Exception:  # noqa: BLE001
-                pass
-            while not self._rtcp_poll_stop.wait(interval):
-                try:
-                    self.poll_rtcp()
-                except Exception:  # noqa: BLE001
-                    log.debug("rtcp poll: ошибка", exc_info=True)
-
-        self._rtcp_poller = threading.Thread(
-            target=_loop, name="mcu-rtcp-poll", daemon=True
-        )
-        self._rtcp_poller.start()
-        log.info("Опрос RTCP для ABR запущен (интервал %.1fs)", interval)
+        self._abr.start_poller()
 
     def _stop_rtcp_poller(self) -> None:
-        self._rtcp_poll_stop.set()
-        poller = self._rtcp_poller
-        if poller is not None and poller.is_alive():
-            poller.join(timeout=1.0)
-        self._rtcp_poller = None
+        self._abr.stop_poller()
 
-    def poll_rtcp(self) -> Optional[int]:
-        """Снять RTCP-метрики со всех активных вызовов и применить ABR.
-
-        Возвращает новый целевой битрейт или None, если статистики ещё нет.
-        """
-        if not self._abr_enabled:
-            return None
-        calls = [
+    def _active_calls(self) -> list:
+        """Активные pjsua2-вызовы для сбора RTCP-метрик."""
+        return [
             p._call
             for p in (self.room.participants.values() if self.room else [])
             if getattr(p, "_call", None) is not None
         ]
-        if not calls:
-            return None
-        sample = self._rtcp.sample_calls(calls)
-        if sample is None:
-            return None
-        new = self.report_rtcp_metrics(sample.loss_fraction, sample.jitter_ms)
-        log.debug(
-            "RTCP: потери %.1f%%, джиттер %.0f мс -> битрейт %d кбит/с",
-            sample.loss_fraction * 100.0, sample.jitter_ms, new,
-        )
-        return new
+
+    def _register_pjsip_thread(self, name: str) -> None:
+        """Зарегистрировать текущий поток в pjlib (если есть эндпоинт)."""
+        if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
+            self._endpoint.libRegisterThread(name)
+
+    def poll_rtcp(self) -> Optional[int]:
+        """Снять RTCP-метрики и применить ABR (через AbrService)."""
+        return self._abr.poll()
 
     def _stop_device_watcher(self) -> None:
         self._device_watch_stop.set()
@@ -1441,35 +1404,18 @@ class SipEngine:
 
     @property
     def abr_enabled(self) -> bool:
-        return self._abr_enabled
+        return self._abr.enabled
 
     def set_abr_enabled(self, enabled: bool) -> bool:
-        self._abr_enabled = bool(enabled)
-        self.events.emit("media.abr", enabled=self._abr_enabled)
-        return self._abr_enabled
+        return self._abr.set_enabled(enabled)
 
     @property
     def target_video_bitrate_kbps(self) -> int:
         return self._abr.target_kbps
 
     def report_rtcp_metrics(self, loss_fraction: float, jitter_ms: float) -> int:
-        """Скормить RTCP-метрики; при изменении применяет новый битрейт.
-
-        Возвращает актуальный целевой битрейт (кбит/с).
-        """
-        if not self._abr_enabled:
-            return self._abr.target_kbps
-        decision = self._abr.update(loss_fraction, jitter_ms)
-        if decision.changed:
-            self.config.set_video_bitrate(decision.kbps)
-            self.events.emit(
-                "media.bitrate.video",
-                kbps=decision.kbps,
-                adaptive=True,
-                direction=decision.direction,
-                reason=decision.reason,
-            )
-        return self._abr.target_kbps
+        """Скормить RTCP-метрики; при изменении применяет новый битрейт."""
+        return self._abr.report_metrics(loss_fraction, jitter_ms)
 
     def mute_participant(self, participant_id: int, muted: bool) -> bool:
         p = self._get_participant(participant_id)
