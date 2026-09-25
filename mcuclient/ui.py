@@ -729,6 +729,15 @@ if QT_AVAILABLE:
                         pass
             except Exception:  # noqa: BLE001
                 pass
+            if not tile._native_attached:
+                # Фолбэк: X11-встраивание не удалось (Wayland/XWayland).
+                # Показываем нативное окно PJSIP отдельно, чтобы кадр
+                # всё равно был виден пользователю.
+                try:
+                    if self.engine.restart_local_preview_window():
+                        tile.video_label.setText("Своя камера — отдельное окно")
+                except Exception:  # noqa: BLE001
+                    pass
 
         def _schedule_local_preview_attach(self, attempt: int = 0) -> None:
             """Встроить локальное превью в тайл с несколькими попытками.
@@ -746,6 +755,13 @@ if QT_AVAILABLE:
                 if not done and attempt < 8:
                     QtCore.QTimer.singleShot(250, lambda: self._schedule_local_preview_attach(attempt + 1))
                 else:
+                    if not done:
+                        # Все попытки встроить не удались — показываем
+                        # отдельным нативным окном (фолбэк).
+                        try:
+                            self.engine.restart_local_preview_window()
+                        except Exception:  # noqa: BLE001
+                            pass
                     self._schedule_grid_rebuild()
             QtCore.QTimer.singleShot(50 if attempt == 0 else 0, _try)
 
@@ -1099,14 +1115,18 @@ if QT_AVAILABLE:
                     return
                 if self.engine.start_local_preview(int(dev_id)):
                     self.preview_btn.setText("⏹ Остановить тест камеры")
-                    self.device_status.setText("Превью камеры открыто в отдельном окне")
+                    self.device_status.setText("Превью камеры открыто")
+                    # Показать локальный тайл «Вы» и встроить превью.
+                    self._schedule_grid_rebuild()
+                    self._schedule_local_preview_attach()
                 else:
                     self.preview_btn.setChecked(False)
-                    self.device_status.setText("Не удалось запустить превью камеры")
+                    self.device_status.setText("Не удалось запустить превью камеры (см. лог)")
             else:
                 self.engine.stop_local_preview()
                 self.preview_btn.setText("Тест камеры")
                 self.device_status.setText("Превью камеры остановлено")
+                self._schedule_grid_rebuild()
 
         def _request_answer(self, participant_id: int) -> None:
             # Вызывается из потока pjsua2 — только в очередь, без Qt.
@@ -1333,6 +1353,7 @@ if QT_AVAILABLE:
                         self.statusBar().showMessage("Превью камеры: вкл", 3000)
                     else:
                         self.statusBar().showMessage(f"Превью камеры: выкл ({payload.get('error', '')})", 5000)
+                    self._schedule_grid_rebuild()
                 elif event == "media.mic_test":
                     self.statusBar().showMessage(f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000)
                 elif event == "engine.started":

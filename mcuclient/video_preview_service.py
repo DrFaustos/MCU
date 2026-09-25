@@ -21,6 +21,11 @@ from .log import get_logger
 log = get_logger("vpreview")
 
 
+def _err_text(exc: BaseException) -> str:
+    """Непустое описание ошибки (у pjsua2.Error из SWIG str() пустой)."""
+    return str(exc).strip() or exc.__class__.__name__
+
+
 class VideoPreviewService:
     """Локальное превью камеры и встраивание видео участников."""
 
@@ -48,13 +53,26 @@ class VideoPreviewService:
         self._preview_xid: Optional[int] = None
         self._preview_dev: int = -1
         self._embedded_xids: dict = {}
+        # Отдельное нативное окно PJSIP (фолбэк, когда X11-встраивание
+        # невозможно): держим флаг, чтобы не «мигать» настройкой.
+        self._native_window = False
 
     # --- локальное превью ---
     @property
     def active(self) -> bool:
         return self._preview is not None
 
-    def start(self, dev_id: Optional[int] = None) -> bool:
+    @property
+    def preview_dev(self) -> int:
+        return self._preview_dev
+
+    def _make_preview(self, target: int) -> None:
+        """Создать VideoPreview для устройства (с освобождением старого)."""
+        self._preview = self._pj.VideoPreview(int(target))
+        self._preview_dev = int(target)
+        self._preview_xid = None
+
+    def start(self, dev_id: Optional[int] = None, show_window: bool = False) -> bool:
         if not self._endpoint_ready():
             self._events.emit("media.preview", active=False, error="pjsip_unavailable")
             return False
@@ -74,42 +92,63 @@ class VideoPreviewService:
                     self._events.emit("media.preview", active=False, error="no_devices")
                     return False
                 target = devices[0]["id"]
+            target = int(target)
             if self._set_video_device is not None:
                 self._set_video_device(target)
             # VideoPreview(dev) привязывает устройство при создании: при смене
-            # камеры превью пересоздаём.
-            if self._preview is not None and int(self._preview_dev) != int(target):
-                try:
-                    self._preview.stop()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._preview = None
-                self._preview_xid = None
+            # камеры превью пересоздаём. Если устройство то же — переиспользуем
+            # объект (частые create/stop на одном dev ломали нативное окно).
+            if self._preview is not None and int(self._preview_dev) != target:
+                self._release_preview()
             if self._preview is None:
-                self._preview = self._pj.VideoPreview(int(target))
-                self._preview_dev = int(target)
+                self._make_preview(target)
+            self._native_window = bool(show_window)
             prm = self._pj.VideoPreviewOpParam()
             # show=False: PJSIP не показывает окно сам, встраиваем через X11.
-            prm.show = False
+            # show=True: фолбэк — отдельное нативное окно (Wayland и пр.).
+            prm.show = bool(show_window)
             self._preview.start(prm)
-            log.info("Локальное превью камеры запущено (dev=%s, show=False)", target)
-            self._events.emit("media.preview", active=True)
+            log.info(
+                "Локальное превью камеры запущено (dev=%s, show=%s)",
+                target, bool(show_window),
+            )
+            self._events.emit("media.preview", active=True, native_window=self._native_window)
             return True
         except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось запустить превью камеры: %s", exc)
-            self._events.emit("media.preview", active=False, error=str(exc))
+            # log.exception, а не warning: у pjsua2.Error str(exc) пустой,
+            # и без трассировки причина не видна.
+            log.exception("Не удалось запустить превью камеры")
+            self._events.emit("media.preview", active=False, error=_err_text(exc))
             return False
+
+    def _release_preview(self) -> None:
+        """Остановить и отпустить текущий VideoPreview (best-effort)."""
+        pv, self._preview = self._preview, None
+        if pv is not None:
+            try:  # pragma: no cover
+                pv.stop()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Ошибка остановки превью: %s", _err_text(exc))
+        self._preview_xid = None
+        self._preview_dev = -1
+        self._native_window = False
+
+    def restart_show_window(self) -> bool:
+        """Перезапустить превью отдельным нативным окном (фолбэк).
+
+        Нужно, когда X11-встраивание невозможно (Wayland/XWayland):
+        показываем окно PJSIP (show=True) вместо потери кадра.
+        """
+        dev = self._preview_dev
+        if self._preview is None or dev < 0:
+            return False
+        self._release_preview()
+        return self.start(int(dev), show_window=True)
 
     def stop(self) -> None:
         if self._preview is None:
             return
-        try:  # pragma: no cover
-            self._preview.stop()
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Ошибка остановки превью: %s", exc)
-        self._preview = None
-        self._preview_xid = None
-        self._preview_dev = -1
+        self._release_preview()
         self._events.emit("media.preview", active=False)
         log.info("Локальное превью камеры остановлено")
 
@@ -118,13 +157,15 @@ class VideoPreviewService:
             return None
         try:
             return video_embed.native_handle(self._preview.getVideoWindow())
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.debug("preview_xid: %s", _err_text(exc))
             return None
 
     def attach(self, widget) -> bool:
         """Встроить окно локального превью в тайл (X11 reparent)."""
         xid = self.preview_xid()
         if not xid:
+            log.info("attach_local_preview: XID превью ещё не готов")
             return False
         try:  # pragma: no cover
             parent = int(widget.winId())
@@ -132,8 +173,11 @@ class VideoPreviewService:
             if ok:
                 self._preview_xid = xid
                 log.info("Локальное превью встроено в тайл (xid=%s)", xid)
+            else:
+                log.info("attach_local_preview: embed_window вернул False (xid=%s)", xid)
             return ok
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.info("attach_local_preview: ошибка встраивания: %s", _err_text(exc))
             return False
 
     def resize(self, width: int, height: int) -> None:

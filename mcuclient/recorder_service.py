@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .audio_recorder import AudioRecorder
 from .log import get_logger
@@ -33,7 +33,7 @@ class RecorderService:
         output_dir: str = "./recordings",
         pj_module=None,
         allow_recording: bool = True,
-        get_participant: Optional[Callable[[int], object]] = None,
+        get_participant: Optional[Callable[[int], Any]] = None,
         register_media_port: Optional[Callable[[object], None]] = None,
         unregister_media_port: Optional[Callable[[object], None]] = None,
     ) -> None:

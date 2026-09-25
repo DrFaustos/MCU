@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .chat import ChatHistory, normalize_message
 from .log import get_logger
@@ -25,7 +25,7 @@ class ChatService:
         *,
         pj_module=None,
         is_available: Optional[Callable[[], bool]] = None,
-        get_participant: Optional[Callable[[int], object]] = None,
+        get_participant: Optional[Callable[[int], Any]] = None,
     ) -> None:
         self._events = events
         self._pj = pj_module

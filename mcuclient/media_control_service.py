@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .log import get_logger
 
@@ -26,7 +26,7 @@ class MediaControlService:
         events,
         *,
         media_state,
-        get_participant: Optional[Callable[[int], object]] = None,
+        get_participant: Optional[Callable[[int], Any]] = None,
         apply_media_state: Optional[Callable[[], None]] = None,
         disable_screen_share: Optional[Callable[[], None]] = None,
         get_room=None,

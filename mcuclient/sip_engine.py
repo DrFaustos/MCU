@@ -23,6 +23,7 @@ from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
 from .media_control_service import MediaControlService
+from .call_service import CallService
 from .video_source_service import VideoSourceService
 from .video_preview_service import VideoPreviewService
 from .layout_service import LayoutService
@@ -279,6 +280,23 @@ class SipEngine:
             get_room=lambda: self.room,
             pj_module=_pj,
             is_available=is_available,
+        )
+        self._callsvc = CallService(
+            self.events,
+            pj_module=_pj,
+            is_available=is_available,
+            get_participant=self._get_participant,
+            register_participant=self._register_participant,
+            drop_participant=self._drop_participant,
+            get_call_class=lambda: self._CallClass,
+            get_account=lambda: self._account,
+            video_supported=lambda: self._video_supported,
+            video_call_enabled=lambda: self.config.video_call_enabled,
+            media=self._media,
+            normalize_uri=normalize_uri,
+            error_reason=_pj_error_reason,
+            is_audio_error=_is_audio_device_error,
+            remember_call=lambda pid, c: self._live_calls.__setitem__(pid, c),
         )
 
     def start(self) -> None:
@@ -772,81 +790,16 @@ class SipEngine:
             log.exception("Ошибка обработки входящего вызова")
 
     def accept(self, participant_id: int) -> None:
-        p = self._get_participant(participant_id)
-        if p and p._call is not None and is_available():
-            prm = _pj.CallOpParam(True)
-            prm.statusCode = 200
-            prm.opt.audioCount = 1
-            prm.opt.videoCount = (
-                1 if (self._video_supported and self.config.video_call_enabled) else 0
-            )
-            p._call.answer(prm)  # pragma: no cover
-            p.state = CallState.CONFIRMED
-            log.info("Вызов принят: %s", p.remote_uri)
-            self.events.emit("call.confirmed", id=p.id)
+        self._callsvc.accept(participant_id)
 
     def reject(self, participant_id: int) -> None:
-        p = self._get_participant(participant_id)
-        if p and p._call is not None and is_available():
-            prm = _pj.CallOpParam()
-            prm.statusCode = 486
-            p._call.hangup(prm)  # pragma: no cover
-        self._drop_participant(participant_id)
+        self._callsvc.reject(participant_id)
 
     def call(self, uri: str) -> Optional[int]:
-        uri = normalize_uri(uri)
-        if not uri:
-            return None
-        if not is_available():
-            self.events.emit("call.error", reason="pjsua2 недоступен")
-            return None
-
-        def _try_make_call(use_null_audio: bool = False) -> Optional[int]:
-            if use_null_audio and self._media.available:
-                try:
-                    mgr = self._media.aud_mgr()
-                    if mgr and hasattr(mgr, "setNullDev"):
-                        mgr.setNullDev()
-                        log.info("makeCall: переключено на null-аудио из-за ошибки устройства")
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Не удалось включить null-аудио: %s", exc)
-
-            try:  # pragma: no cover
-                call = self._CallClass(self._account)
-                prm = _pj.CallOpParam(True)
-                prm.opt.audioCount = 1
-                prm.opt.videoCount = (
-                    1 if (self._video_supported and self.config.video_call_enabled) else 0
-                )
-                call.makeCall(uri, prm)
-                participant = self._register_participant(call, uri, state=CallState.CONNECTING)
-                self._live_calls[participant.id] = call
-                self.events.emit("call.outgoing", id=participant.id, remote=uri)
-                return participant.id
-            except Exception as exc:  # noqa: BLE001
-                reason = _pj_error_reason(exc)
-                # Если ошибка аудиоустройства и мы ещё не пробовали null-аудио, пробуем снова
-                if not use_null_audio and _is_audio_device_error(exc, reason):
-                    log.warning("Ошибка аудио при вызове, пробуем null-аудио: %s", reason)
-                    return _try_make_call(use_null_audio=True)
-
-                log.error("Ошибка исходящего вызова %s: %s", uri, reason)
-                log.exception("Трассировка исходящего вызова")
-                self.events.emit("call.error", reason=reason)
-                return None
-
-        return _try_make_call(use_null_audio=False)
+        return self._callsvc.call(uri)
 
     def hangup(self, participant_id: int) -> None:
-        p = self._get_participant(participant_id)
-        if p and p._call is not None and is_available():
-            try:  # pragma: no cover
-                prm = _pj.CallOpParam()
-                prm.statusCode = 200
-                p._call.hangup(prm)
-            except Exception:  # noqa: BLE001
-                log.debug("Ошибка завершения вызова (уже завершён)")
-        self._drop_participant(participant_id)
+        self._callsvc.hangup(participant_id)
 
     def register_media_port(self, port: object) -> None:
         """Зарегистрировать собственный media-порт для отключения в stop()."""
@@ -986,8 +939,14 @@ class SipEngine:
                 pass
         self._capture_bindings.clear()
 
-    def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
-        return self._vpreview.start(dev_id)
+    def start_local_preview(self, dev_id: Optional[int] = None,
+                             show_window: bool = False) -> bool:
+        """Запустить локальное превью. show_window=True — отдельное окно."""
+        return self._vpreview.start(dev_id, show_window=show_window)
+
+    def restart_local_preview_window(self) -> bool:
+        """Показать превью отдельным окном (фолбэк без X11-встраивания)."""
+        return self._vpreview.restart_show_window()
 
     def stop_local_preview(self) -> None:
         self._vpreview.stop()
