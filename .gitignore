@@ -105,3 +105,4 @@ __pycache__/
 tools/h323d/*.o
 tools/h323d/bin/
 tools/h323d/build/
+.build-venv2/
