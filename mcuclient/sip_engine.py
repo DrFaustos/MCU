@@ -22,9 +22,8 @@ from .call_manager import CallManager, normalize_uri
 from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
-from .screen_share import ScreenSharer
+from .video_source_service import VideoSourceService
 from .layout_service import LayoutService
-from .video_source import SourceInfo, VideoSourceSwitcher
 from . import video_embed
 
 log = get_logger("sip")
@@ -214,18 +213,17 @@ class SipEngine:
         # stop() отключает лишь их и не трогает чужие (внешние player/recorder).
         self._media_ports: list = []
 
-        self._screen_sharer = ScreenSharer(
+        self._vsource = VideoSourceService(
+            self.events,
             fps=config.video.get("fps", 15),
-            target_width=config.video.get("width", 1280),
-            target_height=config.video.get("height", 720),
-        )
-        self._screen_share_enabled = False
-        # Встроенный коммутатор источников (единое виртуальное устройство).
-        self._vswitch = VideoSourceSwitcher(
-            device=config.virtual_camera_device,
             width=config.video.get("width", 1280),
             height=config.video.get("height", 720),
-            fps=config.video.get("fps", 20),
+            switch_fps=config.video.get("fps", 20),
+            device=config.virtual_camera_device,
+            toggle_camera=self.media_state.toggle_camera,
+            apply_media_state=self._apply_media_state,
+            set_video_device=self.set_video_device,
+            list_video_devices=self.list_video_devices,
         )
 
         rec_dir = config.features.get("recording_path", "./recordings")
@@ -308,10 +306,8 @@ class SipEngine:
             self._recording.stop_audio_recording_silent()
             if self._video_preview is not None:
                 self.stop_local_preview()
-            if self._screen_sharer.is_running:
-                self._screen_sharer.stop()
-            if self._vswitch.running:
-                self._vswitch.stop()
+            self._vsource.stop_screen_share_silent()
+            self._vsource.stop_virtual_camera_silent()
             self._detach_own_media()
             if endpoint_ready(self._endpoint):
                 self._hangup_all()
@@ -1220,78 +1216,38 @@ class SipEngine:
     # --- встроенный коммутатор источников (единое виртуальное устройство) ---
     @property
     def virtual_camera_available(self) -> bool:
-        return self._vswitch.available
+        return self._vsource.virtual_camera_available
 
     @property
     def virtual_camera_running(self) -> bool:
-        return self._vswitch.running
+        return self._vsource.virtual_camera_running
 
     def _select_virtual_device(self) -> None:
-        """Назначить виртуальное устройство (v4l2loopback) камерой для звонков.
-
-        Ищем устройство PJSIP по имени, соответствующему конфигу
-        (обычно «OBS Virtual Camera»), и делаем его источником захвата.
-        """
+        """Назначить виртуальное устройство (v4l2loopback) камерой для звонков."""
         if not endpoint_ready(self._endpoint):
             return
-        want = self.config.virtual_camera_device  # напр. /dev/video0
-        try:
-            devs = self.list_video_devices()
-        except Exception:  # noqa: BLE001
-            return
-        target = None
-        for d in devs:
-            name = str(d.get("name", ""))
-            if "OBS" in name or "Virtual" in name or "v4l2loopback" in name:
-                target = d["id"]
-                break
-        if target is None and devs:
-            # фолбэк: id=0 обычно и есть виртуальная камера
-            target = devs[0]["id"]
-        if target is not None:
-            self.set_video_device(int(target))
-            log.info("Камера звонка -> виртуальное устройство id=%s (%s)", target, want)
+        self._vsource.select_virtual_device()
 
     def start_virtual_camera(self, kind: str = "camera", device: int | None = None) -> bool:
         """Запустить коммутатор: источник -> виртуальное устройство."""
-        src = SourceInfo(kind, kind, device=device)
-        ok = self._vswitch.start(src)
-        self.events.emit("media.vsource", active=self._vswitch.running, kind=kind)
-        return ok
+        return self._vsource.start_virtual_camera(kind, device)
 
     def stop_virtual_camera(self) -> None:
-        self._vswitch.stop()
-        self.events.emit("media.vsource", active=False, kind="off")
+        self._vsource.stop_virtual_camera()
 
     def set_video_source(self, kind: str, device: int | None = None) -> None:
         """Сменить источник на лету (устройство звонка не меняется)."""
-        self._vswitch.set_source(SourceInfo(kind, kind, device=device))
-        self.events.emit("media.vsource", active=self._vswitch.running, kind=kind)
+        self._vsource.set_video_source(kind, device)
 
     def current_video_source(self) -> str:
-        return self._vswitch.current_source().kind
+        return self._vsource.current_video_source()
 
     def set_screen_share_enabled(self, enabled: bool) -> bool:
-        if enabled and not self._screen_share_enabled:
-            if self._screen_sharer.start():
-                self._screen_share_enabled = True
-                self.media_state.toggle_camera(False)
-                log.info("Демонстрация экрана: вкл (виртуальная камера активна)")
-            else:
-                log.error("Не удалось запустить демонстрацию экрана")
-                self.events.emit("media.screen_share", enabled=False, error="start_failed")
-                return False
-        elif not enabled and self._screen_share_enabled:
-            self._screen_sharer.stop()
-            self._screen_share_enabled = False
-            log.info("Демонстрация экрана: выкл")
-        self._apply_media_state()
-        self.events.emit("media.screen_share", enabled=self._screen_share_enabled)
-        return self._screen_share_enabled
+        return self._vsource.set_screen_share_enabled(enabled)
 
     @property
     def screen_share_enabled(self) -> bool:
-        return self._screen_share_enabled
+        return self._vsource.screen_share_enabled
 
     def _apply_media_state(self, participant: Optional[Participant] = None) -> None:
         if not is_available():
@@ -1302,7 +1258,7 @@ class SipEngine:
         # Меняем НАПРАВЛЕНИЕ видео через CHANGE_DIR: это шлёт re-INVITE, и
         # удалённая сторона корректно убирает наш видеопоток (при STOP_TRANSMIT
         # без пересогласования у собеседника «замирал» последний кадр).
-        want_send = bool(self._screen_share_enabled or self.media_state.camera_enabled)
+        want_send = bool(self._vsource.screen_share_enabled or self.media_state.camera_enabled)
         op = getattr(_pj, "PJSUA_CALL_VID_STRM_CHANGE_DIR", None)
         dir_send = getattr(_pj, "PJMEDIA_DIR_ENCODING_DECODING", 3)
         dir_recv = getattr(_pj, "PJMEDIA_DIR_DECODING", 2)
