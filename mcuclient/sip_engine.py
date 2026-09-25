@@ -22,6 +22,7 @@ from .call_manager import CallManager, normalize_uri
 from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
+from .media_control_service import MediaControlService
 from .video_source_service import VideoSourceService
 from .video_preview_service import VideoPreviewService
 from .layout_service import LayoutService
@@ -268,6 +269,16 @@ class SipEngine:
             pj_module=_pj,
             is_available=is_available,
             get_participant=self._get_participant,
+        )
+        self._mediacontrol = MediaControlService(
+            self.events,
+            media_state=self.media_state,
+            get_participant=self._get_participant,
+            apply_media_state=self._apply_media_state,
+            disable_screen_share=lambda: self.set_screen_share_enabled(False),
+            get_room=lambda: self.room,
+            pj_module=_pj,
+            is_available=is_available,
         )
 
     def start(self) -> None:
@@ -870,18 +881,10 @@ class SipEngine:
             self.hangup(pid)
 
     def set_camera_enabled(self, enabled: bool) -> bool:
-        state = self.media_state.toggle_camera(enabled)
-        if state:
-            self.set_screen_share_enabled(False)
-        self._apply_media_state()
-        self.events.emit("media.camera", enabled=state)
-        return state
+        return self._mediacontrol.set_camera_enabled(enabled)
 
     def set_microphone_enabled(self, enabled: bool) -> bool:
-        state = self.media_state.toggle_microphone(enabled)
-        self._apply_media_state()
-        self.events.emit("media.microphone", enabled=state)
-        return state
+        return self._mediacontrol.set_microphone_enabled(enabled)
 
     def list_video_devices(self) -> List[dict]:
         return self._media.list_video_devices()
@@ -1218,41 +1221,13 @@ class SipEngine:
         return self._abr.report_metrics(loss_fraction, jitter_ms)
 
     def mute_participant(self, participant_id: int, muted: bool) -> bool:
-        p = self._get_participant(participant_id)
-        if p is None:
-            return False
-        p.is_muted = bool(muted)
-        if is_available() and p._call is not None:
-            try:  # pragma: no cover
-                if hasattr(p._call, "setMute"):
-                    p._call.setMute(muted)
-                else:
-                    prm = _pj.CallOpParam(not muted)
-                    p._call.setHold(prm)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Не удалось применить мут: %s", exc)
-        self.events.emit(
-            "participant.muted", id=participant_id, muted=p.is_muted, uri=p.remote_uri
-        )
-        log.info("Участник %s: мут=%s", p.remote_uri, p.is_muted)
-        return True
+        return self._mediacontrol.mute_participant(participant_id, muted)
 
     def mute_participant_video(self, participant_id: int, muted: bool) -> bool:
-        p = self._get_participant(participant_id)
-        if p is None:
-            return False
-        p.is_video_muted = bool(muted)
-        self.events.emit(
-            "participant.video_muted",
-            id=participant_id, muted=p.is_video_muted, uri=p.remote_uri,
-        )
-        return True
+        return self._mediacontrol.mute_participant_video(participant_id, muted)
 
     def mute_all_participants(self, muted: bool) -> None:
-        if not self.room:
-            return
-        for pid in list(self.room.participants):
-            self.mute_participant(pid, muted)
+        self._mediacontrol.mute_all_participants(muted)
 
     @property
     def layout(self) -> str:
