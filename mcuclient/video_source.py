@@ -318,21 +318,31 @@ class VideoSourceSwitcher:
                     except Exception as exc:  # noqa: BLE001
                         log.debug("Источник %s: ошибка кадра: %s", src.kind, exc)
 
+                    sent = False
                     if frame is not None:
                         frame = self._fit(frame)
                         if frame is not None:
                             cam.send(frame)
+                            sent = True
                             self._frames_sent += 1
                             if callable(self.on_frame):
                                 try:
                                     self.on_frame(frame)
                                 except Exception:  # noqa: BLE001
                                     pass
-                    cam.sleep_until_next_frame()
-                    # Дополнительная пауза только если источник был быстрее кадра.
-                    dt = time.time() - t0
-                    if dt < period * 0.5:
-                        time.sleep(max(0.0, period - dt))
+                    # sleep_until_next_frame опирается на внутренний таймер
+                    # pyvirtualcam, который инициализируется только ПОСЛЕ
+                    # первого send(). Без кадра он None -> падение
+                    # "NoneType + float". Поэтому вызываем только после send.
+                    if sent:
+                        cam.sleep_until_next_frame()
+                        dt = time.time() - t0
+                        if dt < period * 0.5:
+                            time.sleep(max(0.0, period - dt))
+                    else:
+                        # Кадр не получен (камера занята/нет устройства) —
+                        # держим ритм сами и не завершаем поток.
+                        time.sleep(period)
         except Exception as exc:  # noqa: BLE001
             self._last_error = str(exc)
             log.error("Коммутатор видео остановлен из-за ошибки: %s", exc)
