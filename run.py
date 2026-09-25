@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--display-name", help="имя комнаты/дисплея")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"], help="SIP-транспорт")
     p.add_argument(
-        "--protocol", choices=["auto", "sip", "h323", "h323_native"], default=None,
+        "--protocol", "--proto", choices=["auto", "sip", "h323", "h323_native"], default=None,
         help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
     )
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
