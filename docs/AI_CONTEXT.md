@@ -1,0 +1,191 @@
+# Контекст для ИИ-агента (handoff)
+
+Документ для нового ИИ-агента/разработчика: **где смотреть внесённые изменения,
+какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
+до того, как трогать код. Обновлять при значимых изменениях.
+
+Дата последнего обновления: **2026-09-26**, версия проекта **0.2.32**.
+
+---
+
+## 1. Куда смотреть в первую очередь
+
+| Что | Где |
+|-----|-----|
+| Текущий статус, журнал изменений | [STATUS.md](STATUS.md) |
+| Архитектура и слои | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Декомпозиция SipEngine на сервисы | [ARCHITECTURE.md](ARCHITECTURE.md), §11 |
+| Выбор протокола звонка | [CALL_PROTOCOL.md](CALL_PROTOCOL.md) |
+| H.323 (нативный хост) | [H323_STATUS.md](H323_STATUS.md), [ADR-0002](ADR-0002-h323plus-unified-media.md) |
+| Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
+| Контракт остановки движка | [STOP_CONTRACT.md](STOP_CONTRACT.md) |
+| Два клиента / стенд | [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md) |
+| Видео/камеры | [VIDEO_STATUS.md](VIDEO_STATUS.md) |
+| История коммитов | `git log --oneline` |
+
+**Всегда начинать с:** `git log --oneline -20`, `git status -sb`, `python3 tests/_runner.py`.
+
+---
+
+## 2. Что сделано в сессии 2026-09-25/26 (главное)
+
+### 2.1. Распил `SipEngine` на сервисы (фасад)
+
+`SipEngine` (~1700 строк → ~1300) стал фасадом; логика вынесена в `mcuclient/*_service.py`.
+Все сервисы — с **внедрением зависимостей (DI)** и тестами без pjsua2.
+
+| Сервис | Файл | Коммит |
+|--------|------|--------|
+| LayoutService (раскладки) | `layout_service.py` | `3067be3` |
+| ChatService (SIP MESSAGE) | `chat_service.py` | `7f29c62` |
+| RecorderService (запись) | `recorder_service.py` | `7589d5b` |
+| AbrService (ABR/RTCP) | `abr_service.py` | `57999a9` |
+| DeviceService (устройства) | `device_service.py` | `fd494b7` |
+| VideoSourceService (экран/vcam) | `video_source_service.py` | `c39ccff` |
+| VideoPreviewService (превью/embed) | `video_preview_service.py` | `33ba36a` |
+| MediaControlService (камера/mic/мут) | `media_control_service.py` | `63ccf61` |
+| CallService (жизненный цикл вызовов) | `call_service.py` | `b535db2` |
+
+### 2.2. Изоляция pjsua2
+
+- `mcuclient/pjsip_adapter.py` — единственная точка импорта `pjsua2`:
+  `PJSIP_AVAILABLE`, `pj`, `StubEndpoint`, `create_endpoint()`,
+  `@runtime_checkable EndpointProtocol` (libCreate/libInit/libStart/libDestroy/
+  libRegisterThread/libHandleEvents), хелперы `is_available()`, `endpoint_ready()`,
+  `account_ready()`.
+- `SipEngine` больше **не ветвится напрямую по `PJSIP_AVAILABLE`** — использует хелперы.
+
+### 2.3. Выбор протокола звонка
+
+- `mcuclient/call_proto.py`: `auto/sip/h323/h323_native`, `resolve_call`.
+- GUI: список «Протокол»; CLI: `--protocol` (алиас `--proto`).
+- Конфиг: `features.default_call_protocol` (валидация).
+- См. `docs/CALL_PROTOCOL.md`.
+
+### 2.4. Диагностическое логирование
+
+- `EventBus.emit` логирует **каждое** событие шины: `*.error`/`*.rejected` → WARNING, остальные → DEBUG.
+- Env-переключатели в `mcuclient/log.py`: `MCU_DEBUG=1` → DEBUG, `MCU_LOG_LEVEL=<name|int>`.
+- При запуске `-v` также DEBUG.
+
+### 2.5. Сборка: debug-бинарники
+
+- `packaging/_debug_hook.py` — runtime-hook PyInstaller выставляет `MCU_DEBUG=1`.
+- `build.py --debug` → `MCU-Client-debug` (консольный, подробные логи).
+- CI (`.github/workflows/release.yml`) собирает debug для Windows
+  (`MCU-Client-debug.exe`) и Linux (`MCU-Client-debug`).
+
+### 2.6. Локальный тайл «Вы» и единый источник видео
+
+1. **Тайл «Вы» присутствует всегда.** Без превью — заглушка («Нажмите, чтобы
+   показать камеру» / «Камера выключена»).
+2. **Превью включается кликом по тайлу.** Отдельная кнопка «Тест камеры» скрыта;
+   авто-превью при звонке убрано.
+3. **Мут видео на своём тайле = только передача.** Удалённые видят «нет видео»,
+   локально камера остаётся видна (`set_video_send_enabled`, id=-1).
+4. **Селектор камеры прямо в тайле** (под видео), синхронизирован с правой панелью.
+5. **Единый источник через v4l2loopback:** камера читается ОДИН раз коммутатором
+   `VideoSourceSwitcher` и пишется в `/dev/videoN`; PJSIP читает виртуальную камеру.
+   Кадры коммутатора рисуются в тайле «Вы» (`on_frame` → QImage).
+
+Ключевые точки: `mcuclient/video_source.py` (`VideoSourceSwitcher`),
+`mcuclient/video_source_service.py`, `mcuclient/ui.py` (`_setup_local_tile`,
+`_on_local_tile_click`, `_on_vsource_frame`, `_paint_vsource_frame`),
+`mcuclient/sip_engine.py` (`set_video_send_enabled`, `set_vsource_on_frame`).
+
+Конфиг: `features.virtual_camera` (по умолчанию **false**),
+`features.virtual_camera_device` (`/dev/video0`).
+
+---
+
+## 3. Грабли и известные проблемы (важно!)
+
+### 3.1. `sleep_until_next_frame` без кадра (исправлено, `31f3767`)
+`pyvirtualcam.Camera.sleep_until_next_frame()` опирается на внутренний таймер,
+который `None` до первого `send()`. Вызов без кадра → `unsupported operand
+type(s) for +: 'NoneType' and 'float'` и смерть потока коммутатора.
+**Фикс:** sleep только после успешного `send`; иначе `time.sleep(period)`.
+
+### 3.2. QImage из numpy без копии (исправлено)
+`QtGui.QImage(frame.data, ...)` не владеет буфером numpy. Нужен `.copy()`,
+иначе use-after-free после выхода из функции.
+
+### 3.3. Сборка требует ДВЕ группы зависимостей
+`pjsua2` есть в **системном** python (`.egg` в `/usr/local/lib/...`), а
+numpy/cv2/pyvirtualcam/mss — в `.build-venv`. Для сборки с полным стеком
+создан `.build-venv2` (venv с `--system-site-packages` + доустановлены
+numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
+Сборка: `.build-venv2/bin/python build.py [--debug]`. Идёт долго (~5 мин на два
+бинарника) — запускать в фоне (`nohup ... &`), опрашивать лог.
+
+### 3.4. `PJSIP_AVAILABLE` в тестах
+Тесты, подменяющие флаг, должны менять его в `mcuclient.pjsip_adapter`
+(`import mcuclient.pjsip_adapter as pa; pa.PJSIP_AVAILABLE = True`), а не в
+`sip_engine` — иначе `is_available()` не увидит подмену.
+
+### 3.5. Тесты подменяют приватные поля
+Ряд тестов ходит в приватные поля сервисов (`engine._recording._audio_recorder`
+и т.п.). При переименовании полей ищите использования в `tests/`.
+
+### 3.6. Временная диагностика
+Подробное логирование событий — временное (по просьбе владельца), накладные
+расходы только при DEBUG.
+
+---
+
+## 4. Как проверять (обязательный минимум)
+
+ 
+
+**Перед коммитом:** `python3 tests/_runner.py` → `N passed, 0 failed`;
+`git status -sb` — чисто; не оставлять одноразовые `scripts/_*.py`.
+
+---
+
+## 5. Соглашения проекта
+
+- **Язык:** код, логи, комментарии, докстринги — **по-русски** (кроме технических
+  идентификаторов).
+- **DI:** сервисы принимают зависимости явно (колбэки), не тянут pjsua2/Qt.
+- **Тесты:** `tests/test_*.py`, раннер `tests/_runner.py` (не pytest — своих
+  фикстур нет; использовать `SimpleNamespace`/фейки).
+- **Одноразовые патч-скрипты:** создавать в `scripts/_*.py`, после применения
+  **удалять** и коммитить отдельно.
+- **Не рефакторить несвязанное**; маленькие сфокусированные правки.
+
+---
+
+## 6. Незакрытые задачи / развилки
+
+- **CallService без E2E:** вынос вызовов сделан, но реальный звонок не проверялся
+  без собранного pjsua2. При изменениях в `call_service.py`/`call_manager.py`
+  проверяйте хотя бы stub-тесты.
+- **Единый источник и реальная камера:** на части UVC камера занята, `colorbar`
+  работает, а `camera` отдаёт 0 кадров (OpenCV не может открыть при индексе).
+  Проверять на целевом железе.
+- **Wayland:** встраивание видео в тайл через X11 может не работать — есть фолбэк
+  на отдельное окно (`restart_local_preview_window`).
+- **Windows-сборка:** известны падения; смотреть `mcu-client.log` рядом с бинарником.
+- **H.323:** нативный приём только через `mcu_h323d` (см. H323_STATUS); E2E с
+  реальным терминалом не прогонялся.
+
+---
+
+## 7. Журнал ключевых коммитов (сессия)
+
+ 
+
+---
+
+## 8. Пометки из памяти предыдущих агентов
+
+- Проект **pre-alpha**, стабильных релизов нет; цель — **MCU (сервер+клиент),
+  ВКС**, интероп с аппаратными терминалами по SIP/H.323.
+- Были ложные «отчёты о готовности» без артефактов — **всегда проверять факты**:
+  читать файлы, гонять тесты, смотреть `git log`/`diff`, а не верить тексту.
+- **Web-клиент** — только как второй клиент поверх headless-сервера, не вместо
+  нативного (см. `docs/ADR-0001-web-client.md`). Браузер не говорит SIP/H.323.
+- Претензии reviewer: монолитный `SipEngine` (закрыто распилом), реэкспорт
+  `sip_engine` из `__init__` (убран), `PJSIP_AVAILABLE` вне адаптера (перенесён),
+  порядок `MediaManager`→`libStart` (зафиксирован тестом), `_StubEndpoint` без
+  Protocol (добавлен `EndpointProtocol`).

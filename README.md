@@ -16,6 +16,9 @@
 > могут меняться без предупреждения.
 >
 > Актуальный статус: см. [docs/STATUS.md](docs/STATUS.md).
+>
+> 🤖 **ИИ-агенту/новому разработчику:** начинать с
+> [docs/AI_CONTEXT.md](docs/AI_CONTEXT.md) — контекст, грабли, журнал изменений.
 
 ## Возможности
 
@@ -158,8 +161,18 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
     ├── config.example.json
     ├── mcuclient/                 # основной пакет
     │   ├── config.py              # загрузка/валидация config.json
-    │   ├── sip_engine.py          # SIP на pjsua2
+    │   ├── sip_engine.py          # SIP на pjsua2 (фасад над сервисами)
+    │   ├── pjsip_adapter.py       # единственная точка импорта pjsua2
     │   ├── call_proto.py         # выбор протокола звонка (SIP/H.323)
+    │   ├── call_service.py        # жизненный цикл вызовов
+    │   ├── layout_service.py      # раскладки видео
+    │   ├── chat_service.py        # текстовый чат (SIP MESSAGE)
+    │   ├── recorder_service.py    # запись конференции/аудио
+    │   ├── abr_service.py         # адаптивный битрейт (RTCP)
+    │   ├── device_service.py      # устройства + watcher
+    │   ├── video_source_service.py# демонстрация экрана/vcam
+    │   ├── video_preview_service.py # превью/встраивание видео
+    │   ├── media_control_service.py # камера/микрофон/мут
     │   ├── h323_gateway.py        # шлюз H.323 (GStreamer, опционально)
     │   ├── h323_endpoint.py       # приём/исходящие H.323 (хост mcu_h323d)
     │   ├── media_devices.py       # камера/микрофон, вкл/выкл
@@ -167,6 +180,7 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
     │   ├── recorder.py            # запись конференции (FFmpeg)
     │   └── ui.py                  # Qt-интерфейс (PySide6)
     ├── packaging/                 # AppImage / Flatpak / desktop-файлы
+    ├── docs/AI_CONTEXT.md        # контекст для ИИ-агентов
     ├── docs/ARCHITECTURE.md
     └── tests/
 
