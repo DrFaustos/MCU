@@ -116,7 +116,7 @@ def ensure_pyinstaller() -> None:
 
 
 def build_binary(console: bool = False, name: str | None = None,
-                 onedir: bool = False) -> Path:
+                 onedir: bool = False, runtime_hook: Path | None = None) -> Path:
     exe_name = name or (f"{APP_NAME}-console" if console else APP_NAME)
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -132,8 +132,10 @@ def build_binary(console: bool = False, name: str | None = None,
         "--hidden-import", "pyvirtualcam",
         "--hidden-import", "numpy",
         "--hidden-import", "cv2",
-        "run.py",
     ]
+    if runtime_hook is not None:
+        cmd += ["--runtime-hook", str(runtime_hook)]
+    cmd.append("run.py")
 
     if sys.platform == "win32":
         if VERSION_FILE.exists():
@@ -224,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
     want_appimage = "--appimage" in args
     allow_no_pjsip = "--allow-no-pjsip" in args
     want_console = "--console" in args
+    want_debug = "--debug" in args
     onedir = "--onedir" in args
 
     log("[+] Начало сборки MCU Client...")
@@ -244,6 +247,14 @@ def main(argv: list[str] | None = None) -> None:
         console_bin = build_binary(console=True, onedir=onedir)
         if console_bin.exists():
             log(f"    Отладочный файл: {console_bin.resolve()}")
+
+    if want_debug:
+        log("[+] Отдельная DEBUG-сборка (MCU_DEBUG=1, консоль)...")
+        hook = ROOT / "packaging" / "_debug_hook.py"
+        debug_bin = build_binary(console=True, name=f"{APP_NAME}-debug",
+                                 onedir=onedir, runtime_hook=hook)
+        if debug_bin.exists():
+            log(f"    DEBUG-файл: {debug_bin.resolve()}")
 
 
 if __name__ == "__main__":

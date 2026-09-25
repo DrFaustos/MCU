@@ -35,11 +35,11 @@ jobs:
       # --console собирает ДВА файла: MCU-Client.exe (windowed) и
       # MCU-Client-console.exe (с консолью) — консольный нужен для
       # диагностики нативного падения, которое в windowed-сборке не видно.
-      - name: Build executable (windowed + console)
+      - name: Build executable (windowed + console + debug)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --console
+        run: python build.py --console --debug
 
       # .cmd-обёртка: запускает консольную сборку, сохраняет ВЕСЬ вывод
       # (stdout+stderr, включая нативные сообщения) в out.txt и НЕ закрывает
@@ -55,6 +55,7 @@ jobs:
           path: |
             dist/MCU-Client.exe
             dist/MCU-Client-console.exe
+            dist/MCU-Client-debug.exe
             dist/run-console.cmd
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
@@ -93,11 +94,11 @@ jobs:
           sudo -E ./scripts/install_pjsua2.sh "$(which python)"
           python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable
+      - name: Build executable (release + debug)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py
+        run: python build.py --debug
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -105,6 +106,7 @@ jobs:
           name: MCU-Client-Linux
           path: |
             dist/MCU-Client
+            dist/MCU-Client-debug
 
   release:
     needs: [build-windows, build-linux]
