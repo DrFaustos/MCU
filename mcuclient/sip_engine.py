@@ -17,6 +17,7 @@ from .media_devices import (
 )
 from .adaptive_bitrate import AbrConfig
 from .abr_service import AbrService
+from .device_service import DeviceService
 from .call_manager import CallManager, normalize_uri
 from .recorder_service import RecorderService
 from .call_registry import CallRegistry
@@ -238,6 +239,9 @@ class SipEngine:
             unregister_media_port=self.unregister_media_port,
         )
         self._media = MediaManager(_pj, None, null_audio=config.null_audio)
+        self._devices = DeviceService(
+            self.media_state, self.events, media=self._media,
+        )
         video_cfg = config.video
         start_kbps = int(video_cfg.get("bitrate_kbps", 1500))
         self._abr = AbrService(
@@ -261,8 +265,6 @@ class SipEngine:
             is_available=is_available,
             get_participant=self._get_participant,
         )
-        self._device_watcher: Optional[threading.Thread] = None
-        self._device_watch_stop = threading.Event()
 
     def start(self) -> None:
         if self._running:
@@ -1117,28 +1119,7 @@ class SipEngine:
         return False
 
     def _start_device_watcher(self, interval: float = 2.0) -> None:
-        """Фоновый поток: периодически ищет подключённые/отключённые устройства.
-
-        Без этого список устройств фиксируется один раз при старте, и камера,
-        подключённая позже, не появляется в UI. Поток не трогает pjsua2 —
-        только перечисляет устройства и эмитит событие media.devices.
-        """
-        if self._device_watcher is not None and self._device_watcher.is_alive():
-            return
-        self._device_watch_stop.clear()
-
-        def _loop() -> None:
-            while not self._device_watch_stop.wait(interval):
-                try:
-                    self.refresh_devices(touch_pjsua=False)
-                except Exception:  # noqa: BLE001
-                    log.debug("device watcher: ошибка refresh", exc_info=True)
-
-        self._device_watcher = threading.Thread(
-            target=_loop, name="mcu-device-watch", daemon=True
-        )
-        self._device_watcher.start()
-        log.info("Наблюдение за устройствами запущено (интервал %.1fs)", interval)
+        self._devices.start_watcher(interval)
 
     def _start_rtcp_poller(self) -> None:
         """Запустить фоновый опрос RTCP (через AbrService)."""
@@ -1167,49 +1148,11 @@ class SipEngine:
         return self._abr.poll()
 
     def _stop_device_watcher(self) -> None:
-        self._device_watch_stop.set()
-        watcher = self._device_watcher
-        if watcher is not None and watcher.is_alive():
-            watcher.join(timeout=1.0)
-        self._device_watcher = None
+        self._devices.stop_watcher()
 
     def refresh_devices(self, touch_pjsua: bool = True) -> dict:
-        """Перечитать РЕАЛЬНЫЕ устройства и обновить состояние.
-
-        Возвращает словарь со списками камер/микрофонов и флагом changed.
-        Вызывается из UI по кнопке «Обновить» и watcher-потоком, чтобы
-        подхватить подключённую/отключённую камеру или микрофон.
-        """
-        try:
-            cameras, mics = enumerate_devices()
-        except Exception:  # noqa: BLE001
-            log.exception("Ошибка перечисления устройств")
-            cameras, mics = [], []
-        before = (
-            tuple(c.id for c in self.media_state.cameras),
-            tuple(m.id for m in self.media_state.microphones),
-        )
-        self.media_state.refresh(cameras, mics)
-        after = (
-            tuple(c.id for c in self.media_state.cameras),
-            tuple(m.id for m in self.media_state.microphones),
-        )
-        changed = before != after
-        # ВАЖНО: pjsua2 VidDevManager.refreshDevs() ПОВРЕЖДАЕТ память
-        # (corrupted size vs. prev_size -> Aborted) в этой сборке PJSIP 2.16.
-        # Поэтому его не вызываем. Список устройств PJSIP всё равно
-        # перечитывается через list_video_devices() (getDevCount/getDevInfo),
-        # а OS-устройства — через enumerate_devices().
-        _ = touch_pjsua  # параметр оставлен для совместимости
-        payload = {
-            "changed": changed,
-            "cameras": [{"id": c.id, "name": c.name, "driver": c.driver} for c in cameras],
-            "microphones": [{"id": m.id, "name": m.name, "driver": m.driver} for m in mics],
-        }
-        self.events.emit("media.devices", **payload)
-        log.info("Устройства обновлены: камер=%d, микрофонов=%d, changed=%s",
-                 len(cameras), len(mics), changed)
-        return payload
+        """Перечитать РЕАЛЬНЫЕ устройства и обновить состояние."""
+        return self._devices.refresh(touch_pjsua)
 
     def reconnect_audio(self) -> bool:
         """Переинициализировать аудиоустройства PJSIP (после сбоя/подключения).
@@ -1263,16 +1206,16 @@ class SipEngine:
         return ok
 
     def list_known_cameras(self) -> List[DeviceInfo]:
-        return list(self.media_state.cameras)
+        return self._devices.known_cameras()
 
     def list_known_microphones(self) -> List[DeviceInfo]:
-        return list(self.media_state.microphones)
+        return self._devices.known_microphones()
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
-        return self._media.open_mic_monitor(dev_id)
+        return self._devices.open_mic_monitor(dev_id)
 
     def read_mic_level(self) -> float:
-        return self._media.read_mic_level()
+        return self._devices.read_mic_level()
 
     # --- встроенный коммутатор источников (единое виртуальное устройство) ---
     @property
