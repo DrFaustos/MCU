@@ -23,8 +23,8 @@ from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
 from .video_source_service import VideoSourceService
+from .video_preview_service import VideoPreviewService
 from .layout_service import LayoutService
-from . import video_embed
 
 log = get_logger("sip")
 
@@ -199,11 +199,17 @@ class SipEngine:
         self._calls = CallManager(self._registry, self.events, _pj)
         self._running = False
         self._video_supported = False
-        self._video_preview = None
-        self._local_preview_xid: Optional[int] = None
-        self._local_preview_dev: int = -1
         self._capture_bindings: list = []
-        self._embedded_xids: Dict[int, int] = {}
+        self._vpreview = VideoPreviewService(
+            self.events,
+            pj_module=_pj,
+            endpoint_ready=lambda: endpoint_ready(self._endpoint),
+            video_supported=lambda: self._video_supported,
+            media_state=self.media_state,
+            list_video_devices=self.list_video_devices,
+            set_video_device=self.set_video_device,
+            get_video_xid=self._registry.get_video_xid,
+        )
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
         self._CallClass = None  # подкласс pj.Call
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
@@ -304,8 +310,7 @@ class SipEngine:
         try:
             self._recording.stop_conference_recording()
             self._recording.stop_audio_recording_silent()
-            if self._video_preview is not None:
-                self.stop_local_preview()
+            self._vpreview.stop()
             self._vsource.stop_screen_share_silent()
             self._vsource.stop_virtual_camera_silent()
             self._detach_own_media()
@@ -670,49 +675,18 @@ class SipEngine:
         return self._registry.get_video_window(participant_id)
 
     def attach_video_window(self, participant_id: int, widget) -> bool:
-        """Встроить нативное окно видео PJSIP в тайл (X11 reparent).
-
-        ``VideoWindow.setWindow`` в pjsua2 работает только на Android, а
-        ``Show(True)`` на невалидном окне роняет процесс нативным assert.
-        Поэтому используем X11: берём нативный XID окна PJSIP
-        (``getInfo().winHandle.handle.window``) и переподчиняем его виджету
-        Qt через reparent нативного окна (см. mcuclient/video_embed.py).
-        Работает на X11/XWayland (XReparentWindow) и на Windows (SetParent).
-        """
-        import os as _os
-        if _os.environ.get("MCU_NO_EMBED_VIDEO") == "1":
-            return False
+        """Встроить нативное окно видео PJSIP в тайл (X11 reparent)."""
         if not is_available():
             return False
-        # Берём XID, закешированный в момент onCallMediaState (окно тогда
-        # валидно). Повторный getInfo() позже может упасть нативным assert
-        # `pjsua_vid_win_get_info: wid >= 0 && wid < 16`.
-        xid = self._registry.get_video_xid(participant_id)
-        if not xid:
-            return False
-        try:  # pragma: no cover
-            parent = int(widget.winId())
-        except Exception:  # noqa: BLE001
-            return False
-        w = max(1, widget.width())
-        h = max(1, widget.height())
-        ok = video_embed.embed_window(xid, parent, w, h)
-        if ok:
-            self._embedded_xids[participant_id] = xid
-            log.info("Видео вызова %s встроено в тайл (xid=%s)", participant_id, xid)
-        return ok
+        return self._vpreview.attach_call_window(participant_id, widget)
 
     def detach_embedded_video(self, participant_id: int) -> None:
         """Убрать встроенное видео участника (камера выключена/вызов завершён)."""
-        xid = self._embedded_xids.pop(participant_id, None)
-        if xid:
-            video_embed.unmap_window(xid)
+        self._vpreview.detach_call_window(participant_id)
 
     def resize_embedded_video(self, participant_id: int, width: int, height: int) -> None:
         """Подогнать встроенное видео под размер тайла."""
-        xid = self._embedded_xids.get(participant_id)
-        if xid:
-            video_embed.resize_window(xid, max(1, width), max(1, height))
+        self._vpreview.resize_call_window(participant_id, width, height)
 
     def show_video_window(self, participant_id: int) -> bool:
         """Совместимость: нативное окно показывает PJSIP (autoShowIncoming)."""
@@ -1010,98 +984,25 @@ class SipEngine:
         self._capture_bindings.clear()
 
     def start_local_preview(self, dev_id: Optional[int] = None) -> bool:
-        if not endpoint_ready(self._endpoint):
-            self.events.emit("media.preview", active=False, error="pjsip_unavailable")
-            return False
-        if not self._video_supported:
-            self.events.emit("media.preview", active=False, error="video_unsupported")
-            return False
-        try:  # pragma: no cover
-            target = dev_id
-            if target is None and self.media_state.camera_id is not None:
-                try:
-                    target = int(self.media_state.camera_id)
-                except (TypeError, ValueError):
-                    target = None
-            if target is None:
-                devices = self.list_video_devices()
-                if not devices:
-                    self.events.emit("media.preview", active=False, error="no_devices")
-                    return False
-                target = devices[0]["id"]
-            self.set_video_device(target)
-            # ВАЖНО: VideoPreview(dev) привязывает устройство при создании.
-            # Если превью уже открыто, а устройство сменилось — пересоздаём,
-            # иначе показывается старая камера (switchDev для capture не работает).
-            if self._video_preview is not None and int(getattr(self, "_local_preview_dev", -1)) != int(target):
-                try:
-                    self._video_preview.stop()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._video_preview = None
-                self._local_preview_xid = None
-            if self._video_preview is None:
-                self._video_preview = _pj.VideoPreview(int(target))
-                self._local_preview_dev = int(target)
-            prm = _pj.VideoPreviewOpParam()
-            # ВАЖНО: show=False — PJSIP НЕ показывает своё окно сам. Мы встраиваем
-            # его в тайл через X11 reparent (иначе появляется отдельное окно,
-            # которое не убирается). XID при этом доступен.
-            prm.show = False
-            self._video_preview.start(prm)
-            log.info("Локальное превью камеры запущено (dev=%s, show=False)", target)
-            self.events.emit("media.preview", active=True)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Не удалось запустить превью камеры: %s", exc)
-            self.events.emit("media.preview", active=False, error=str(exc))
-            return False
+        return self._vpreview.start(dev_id)
 
     def stop_local_preview(self) -> None:
-        if self._video_preview is None:
-            return
-        try:  # pragma: no cover
-            self._video_preview.stop()
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Ошибка остановки превью: %s", exc)
-        self._video_preview = None
-        self._local_preview_xid = None
-        self._local_preview_dev = -1
-        self.events.emit("media.preview", active=False)
-        log.info("Локальное превью камеры остановлено")
+        self._vpreview.stop()
 
     @property
     def local_preview_active(self) -> bool:
-        return self._video_preview is not None
+        return self._vpreview.active
 
     def local_preview_xid(self) -> Optional[int]:
         """Нативный XID окна локального превью (или None)."""
-        if self._video_preview is None:
-            return None
-        try:
-            return video_embed.native_handle(self._video_preview.getVideoWindow())
-        except Exception:  # noqa: BLE001
-            return None
+        return self._vpreview.preview_xid()
 
     def attach_local_preview(self, widget) -> bool:
         """Встроить окно локального превью в тайл (X11 reparent)."""
-        xid = self.local_preview_xid()
-        if not xid:
-            return False
-        try:  # pragma: no cover
-            parent = int(widget.winId())
-            ok = video_embed.embed_window(xid, parent, max(1, widget.width()), max(1, widget.height()))
-            if ok:
-                self._local_preview_xid = xid
-                log.info("Локальное превью встроено в тайл (xid=%s)", xid)
-            return ok
-        except Exception:  # noqa: BLE001
-            return False
+        return self._vpreview.attach(widget)
 
     def resize_local_preview(self, width: int, height: int) -> None:
-        xid = getattr(self, "_local_preview_xid", None)
-        if xid:
-            video_embed.resize_window(xid, max(1, width), max(1, height))
+        self._vpreview.resize(width, height)
 
     def list_audio_devices(self) -> List[dict]:
         return self._media.list_audio_devices()
