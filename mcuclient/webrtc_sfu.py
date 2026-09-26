@@ -68,6 +68,13 @@ class MediaBus:
         self._video: Dict[str, Any] = {}
         self._audio: Dict[str, List[bytes]] = {}
         self._audio_last: Dict[str, tuple] = {}
+        # Счётчики версий: растут при каждой публикации. Трек-зритель
+        # сравнивает версию и НЕ шлёт повторно тот же кадр.
+        self._video_seq: Dict[str, int] = {}
+        self._audio_seq: Dict[str, int] = {}
+        # Кэш конвертированного кадра на последнюю версию: одна
+        # конвертация на N зрителей (pid -> (seq, obj)).
+        self._shared: Dict[str, tuple] = {}
         self._audio_limit = max(1, int(audio_buffer))
         self._video_subs: Dict[str, List[Callable[[str, Any, int, int], None]]] = {}
         self._audio_subs: Dict[str, List[Callable[[str, bytes, int, int], None]]] = {}
@@ -76,6 +83,7 @@ class MediaBus:
     def publish_video(self, pid: str, rgb: Any, width: int, height: int) -> None:
         with self._lock:
             self._video[pid] = rgb
+            self._video_seq[pid] = self._video_seq.get(pid, 0) + 1
             # Кадр получают подписчики ЭТОГО публикатора (браузер B подписан
             # на A, чтобы видеть видео A). Ретрансляция — на уровне подписки.
             subs = list(self._video_subs.get(pid, ()))
@@ -92,6 +100,7 @@ class MediaBus:
             if len(buf) > self._audio_limit:
                 del buf[: len(buf) - self._audio_limit]
             self._audio_last[pid] = (pcm, int(rate), int(channels))
+            self._audio_seq[pid] = self._audio_seq.get(pid, 0) + 1
             subs = list(self._audio_subs.get(pid, ()))
         for cb in subs:
             try:
@@ -122,6 +131,9 @@ class MediaBus:
             self._video.pop(pid, None)
             self._audio.pop(pid, None)
             self._audio_last.pop(pid, None)
+            self._video_seq.pop(pid, None)
+            self._audio_seq.pop(pid, None)
+            self._shared.pop(pid, None)
             self._video_subs.pop(pid, None)
             self._audio_subs.pop(pid, None)
 
@@ -133,6 +145,28 @@ class MediaBus:
         """Последний аудио-кадр публикатора: (pcm, rate, channels) или None."""
         with self._lock:
             return self._audio_last.get(pid)
+
+    def video_version(self, pid: str) -> int:
+        """Номер последней опубликованной видео-версии (0 — не было)."""
+        with self._lock:
+            return self._video_seq.get(pid, 0)
+
+    def audio_version(self, pid: str) -> int:
+        """Номер последней опубликованной аудио-версии (0 — не было)."""
+        with self._lock:
+            return self._audio_seq.get(pid, 0)
+
+    def shared_frame(self, pid: str, seq: int, factory):
+        """Кэш конвертированного кадра на версию: factory зовётся один раз
+        на (pid, seq), результат переиспользуют все зрители."""
+        with self._lock:
+            cached = self._shared.get(pid)
+            if cached is not None and cached[0] == seq:
+                return cached[1]
+        obj = factory()
+        with self._lock:
+            self._shared[pid] = (seq, obj)
+        return obj
 
     def publishers(self) -> List[str]:
         with self._lock:

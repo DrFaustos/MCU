@@ -451,10 +451,16 @@ def _make_video_track(mod: Any, bus: Any, pid: str, fps: int = 30) -> Any:
         kind = "video"
 
         async def recv(self) -> Any:
+            # latest-wins: отдаём кадр, только когда публикатор выдал новый.
+            # Иначе на 30 к/с слали бы дубликаты (лишний энкод и трафик).
             while True:
-                rgb = bus.latest_video(pid)
-                if rgb is not None:
-                    return _to_av_frame(mod, rgb)
+                seq = bus.video_version(pid)
+                if seq != getattr(self, "_last_seq", -1):
+                    rgb = bus.latest_video(pid)
+                    if rgb is not None:
+                        self._last_seq = seq
+                        return bus.shared_frame(
+                            pid, seq, lambda: _to_av_frame(mod, rgb))
                 await asyncio.sleep(1.0 / max(1, fps))
 
     return _OutVideo()
@@ -473,13 +479,17 @@ def _make_audio_track(mod: Any, bus: Any, pid: str, rate: int = 48000) -> Any:
         kind = "audio"
 
         async def recv(self) -> Any:
+            # latest-wins: не шлём один и тот же аудио-кадр повторно.
             while True:
-                item = bus.latest_audio(pid)
-                if item is not None:
-                    pcm, sample_rate, channels = item
-                    frame = _pcm_to_audio_frame(mod, pcm, sample_rate, channels)
-                    if frame is not None:
-                        return frame
+                seq = bus.audio_version(pid)
+                if seq != getattr(self, "_last_seq", -1):
+                    item = bus.latest_audio(pid)
+                    if item is not None:
+                        pcm, sample_rate, channels = item
+                        frame = _pcm_to_audio_frame(mod, pcm, sample_rate, channels)
+                        if frame is not None:
+                            self._last_seq = seq
+                            return frame
                 await asyncio.sleep(0.02)
 
     return _OutAudio()
