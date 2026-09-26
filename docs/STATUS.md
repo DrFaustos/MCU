@@ -212,6 +212,19 @@ stdlib). Все обращения к pjsua2 сериализованы в од�
 файлам). Всего 539 passed. Документация: `docs/WEB_CONTROL.md`,
 ARCHITECTURE §12, README.
 
+### 2026-09-26 — Web-панель: TLS (HTTPS) — опционально, по умолчанию выкл.
+
+Добавлен режим HTTPS для web-панели (`mcuclient/tls_utils.py`): если
+`cert_file`/`key_file` пусты — генерируется самоподписанный сертификат через
+`openssl` в `~/.local/share/mcu-client/tls/`. Включается `--web-tls` (CLI),
+`features.web.tls` (config) или галочкой **«TLS (HTTPS)»** в GUI (переключение
+на лету перезапускает сервер). По умолчанию **выключено**, чтобы браузер не
+спотыкался о самоподписанный сертификат.
+
+Проверено вживую: `--web-tls` → `https://127.0.0.1:PORT/api/status` отвечает,
+обычный HTTP на том же порту не отвечает. Тесты: `test_web_tls.py`,
+`test_ui_web_slots.py`. Всего 550 passed.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

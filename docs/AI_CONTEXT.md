@@ -122,6 +122,9 @@
 * Тесты: `test_web_server.py`, `test_web_http.py` (реальный сокет),
   `test_web_config.py`, `test_web_properties.py`.
 
+* TLS (HTTPS) — опционально, по умолчанию **выключен**: `--web-tls`,
+  `features.web.tls`, галочка в GUI. Пустые `cert_file`/`key_file` ->
+  самоподписанный сертификат через `mcuclient/tls_utils.py`.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 

@@ -76,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--web-host", help="адрес web-панели (по умолчанию 0.0.0.0)")
     p.add_argument("--web-port", type=int, help="порт web-панели (по умолчанию 8080)")
     p.add_argument("--web-token", help="токен авторизации web-панели (иначе env MCU_WEB_TOKEN)")
+    p.add_argument("--web-tls", dest="web_tls", action="store_true", default=None,
+                   help="включить HTTPS для web-панели (по умолчанию HTTP)")
+    p.add_argument("--no-web-tls", dest="web_tls", action="store_false",
+                   help="выключить HTTPS (перекрывает config)")
+    p.add_argument("--web-cert", help="путь к TLS-сертификату (PEM)")
+    p.add_argument("--web-key", help="путь к TLS-ключу (PEM)")
 
     # --- камера / видео ---
     p.add_argument("--list-video-devices", action="store_true",
@@ -214,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
         web_cfg["port"] = args.web_port
     if args.web_token:
         web_cfg["auth_token"] = args.web_token
+    if args.web_tls is not None:
+        web_cfg["tls"] = bool(args.web_tls)
+    if args.web_cert:
+        web_cfg["cert_file"] = args.web_cert
+    if args.web_key:
+        web_cfg["key_file"] = args.web_key
     if args.web and not args.headless:
         # GUI и web одновременно допустимы, но чаще web — для headless.
         log.info("Web-панель запрошена вместе с GUI")

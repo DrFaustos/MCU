@@ -457,6 +457,8 @@ if QT_AVAILABLE:
             self.h323 = h323
             self.h323_native = h323_native
             self._initial_protocol = call_proto.normalize_protocol(initial_protocol)
+            # Встроенная web-панель: создаём лениво, запускаем по галочке.
+            self._web_server = None
             self._tiles: dict[int, ParticipantTile] = {}
             # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
             # время обработки событий вызова приводил к access violation на Windows).
@@ -735,6 +737,34 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.bandwidth, 3, 1)
             qlayout.addWidget(self.bandwidth_label, 3, 2)
             right.addWidget(quality)
+
+            web_box = QtWidgets.QGroupBox("Web-панель управления")
+            wlayout = QtWidgets.QGridLayout(web_box)
+            self.web_enable = QtWidgets.QCheckBox("Включить web-панель")
+            self.web_enable.setToolTip(
+                "Поднять встроенный HTTP-сервер: браузер управляет сессией "
+                "(участники, вызовы, муты, раскладка, запись, чат)."
+            )
+            self.web_enable.setChecked(bool(self.config.web_enabled))
+            self.web_enable.toggled.connect(self._on_web_toggle)
+            wlayout.addWidget(self.web_enable, 0, 0, 1, 2)
+
+            self.web_tls = QtWidgets.QCheckBox("TLS (HTTPS)")
+            self.web_tls.setToolTip(
+                "Шифровать web-панель (https). По умолчанию выключено: обычный "
+                "HTTP без предупреждений браузера. При включении генерируется "
+                "самоподписанный сертификат (браузер покажет предупреждение)."
+            )
+            self.web_tls.setChecked(bool(self.config.web.get("tls", False)))
+            self.web_tls.toggled.connect(self._on_web_tls_toggle)
+            wlayout.addWidget(self.web_tls, 1, 0, 1, 2)
+
+            self.web_url_label = QtWidgets.QLabel("выключена")
+            self.web_url_label.setStyleSheet("color:#7a8592; font-size:11px;")
+            self.web_url_label.setWordWrap(True)
+            wlayout.addWidget(self.web_url_label, 2, 0, 1, 2)
+            right.addWidget(web_box)
+
             right.addStretch()
             right_scroll.setWidget(right_host)
 
@@ -1614,6 +1644,66 @@ if QT_AVAILABLE:
                 pass
             try:
                 self._event_poll.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        # --- встроенная web-панель -------------------------------------
+        def _on_web_toggle(self, checked: bool) -> None:
+            """Галочка «Включить web-панель»: лениво поднять/остановить сервер."""
+            if checked:
+                self._start_web_server()
+            else:
+                self._stop_web_server()
+            self._update_web_label()
+
+        def _on_web_tls_toggle(self, checked: bool) -> None:
+            """Переключение HTTP/HTTPS. Если сервер запущен — перезапускаем."""
+            self.config.raw.setdefault("features", {}).setdefault("web", {})["tls"] = bool(checked)
+            if self._web_server is not None and self._web_server.running:
+                ok = self._web_server.restart(tls=bool(checked))
+                if not ok:
+                    self.statusBar().showMessage(
+                        "Не удалось перезапустить web-панель с TLS (см. лог)", 5000
+                    )
+            self._update_web_label()
+
+        def _start_web_server(self) -> None:
+            if self._web_server is not None and self._web_server.running:
+                return
+            try:
+                from mcuclient.web_server import make_web_server
+                if self._web_server is None:
+                    self._web_server = make_web_server(self.config, self.engine, self.h323)
+                # TLS берём из галочки (она источник истины в GUI).
+                self._web_server.tls = bool(self.web_tls.isChecked())
+                if self._web_server.start():
+                    self.statusBar().showMessage(f"Web-панель: {self._web_server.url}", 5000)
+                else:
+                    self.statusBar().showMessage("Web-панель не запустилась (порт занят?)", 5000)
+            except Exception as exc:  # noqa: BLE001 — GUI не должен падать
+                log.exception("Ошибка запуска web-панели")
+                self.statusBar().showMessage(f"Web-панель: ошибка — {exc}", 5000)
+
+        def _stop_web_server(self) -> None:
+            if self._web_server is None:
+                return
+            try:
+                self._web_server.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки web-панели")
+            self.statusBar().showMessage("Web-панель остановлена", 3000)
+
+        def _update_web_label(self) -> None:
+            if self._web_server is not None and self._web_server.running:
+                self.web_url_label.setText(
+                    f"Адрес: {self._web_server.url}"
+                    + ("  (TLS, самоподписанный — браузер предупредит)" if self._web_server.tls else "")
+                )
+            else:
+                self.web_url_label.setText("выключена")
+
+            try:
+                if self._web_server is not None:
+                    self._web_server.stop()
             except Exception:  # noqa: BLE001
                 pass
             self.engine.stop()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +70,9 @@ class EngineDispatcher:
             if self._started:
                 return
             self._started = True
+            # Поток создаём заново: после stop() прежний уже завершился,
+            # а объект диспетчера может переиспользоваться (рестарт web-сервера).
+            self._thread = threading.Thread(target=self._run, name="mcu-web-engine", daemon=True)
             self._thread.start()
 
     def _run(self) -> None:
@@ -108,8 +112,10 @@ class EngineDispatcher:
         return box.get("result")
 
     def stop(self) -> None:
-        if not self._started:
-            return
+        with self._lock:
+            if not self._started:
+                return
+            self._started = False
         self._queue.put(None)
 
 
@@ -633,19 +639,31 @@ class WebServer:
 
     def __init__(self, engine: Any, config: Any = None, h323: Any = None,
                  host: str = "0.0.0.0", port: int = 8080,
-                 auth_token: Optional[str] = None) -> None:
+                 auth_token: Optional[str] = None,
+                 tls: bool = False, certfile: Optional[str] = None,
+                 keyfile: Optional[str] = None) -> None:
+        self._engine = engine
+        self._config = config
+        self._h323 = h323
         self.session = WebSession(engine, config, h323)
         self.host = host
         self.port = int(port)
         self.auth_token = auth_token
+        self.tls = bool(tls)
+        self.certfile = certfile
+        self.keyfile = keyfile
         self.events = _EventHub(engine)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     @property
+    def scheme(self) -> str:
+        return "https" if self.tls else "http"
+
+    @property
     def url(self) -> str:
         host = "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
-        return f"http://{host}:{self.port}/"
+        return f"{self.scheme}://{host}:{self.port}/"
 
     @property
     def running(self) -> bool:
@@ -662,6 +680,14 @@ class WebServer:
         # Порт 0 значит «любой свободный»: узнаём фактический, иначе self.port
         # останется 0 и клиенты по нему не подключатся.
         self.port = httpd.server_address[1]
+        if self.tls:
+            try:
+                context = _make_ssl_context(self.certfile, self.keyfile)
+            except Exception as exc:  # noqa: BLE001
+                log.error("TLS включён, но контекст не создан: %s", exc)
+                httpd.server_close()
+                return False
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         httpd.daemon_threads = True
         # Пробрасываем зависимости в хендлер через атрибуты сервера.
         httpd.session = self.session          # type: ignore[attr-defined]
@@ -687,6 +713,26 @@ class WebServer:
         self.session.close()
         log.info("Web-панель остановлена")
 
+    def restart(self, *, tls: Optional[bool] = None, host: Optional[str] = None,
+                port: Optional[int] = None) -> bool:
+        """Перезапустить сервер (например, при переключении HTTP/HTTPS).
+
+        После stop() рабочий поток движка закрывается, поэтому создаём новый
+        WebSession/EngineDispatcher. Возвращает True, если сервер поднялся.
+        """
+        was_running = self._httpd is not None
+        if was_running:
+            self.stop()
+        if tls is not None:
+            self.tls = bool(tls)
+        if host is not None:
+            self.host = host
+        if port is not None:
+            self.port = int(port)
+        # Свежая сессия: старый dispatcher остановлен в stop().
+        self.session = WebSession(self._engine, self._config, self._h323)
+        return self.start()
+
     def __enter__(self) -> "WebServer":
         self.start()
         return self
@@ -695,18 +741,64 @@ class WebServer:
         self.stop()
 
 
-def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[WebServer]:
-    """Собрать WebServer из конфига (секция ``features.web``)."""
+def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
+    """Собрать WebServer из конфига БЕЗ проверки enabled.
+
+    Нужен GUI: сервер создаётся сразу, но запускается по галочке пользователя
+    (и тогда же можно переключить HTTP/HTTPS через :meth:`WebServer.restart`).
+    """
     web_cfg = (getattr(config, "features", {}) or {}).get("web", {}) if config is not None else {}
-    if not web_cfg.get("enabled", False):
-        return None
     token = web_cfg.get("auth_token") or os.environ.get("MCU_WEB_TOKEN") or None
     return WebServer(
         engine, config, h323,
         host=str(web_cfg.get("host", "0.0.0.0")),
         port=int(web_cfg.get("port", 8080)),
         auth_token=token,
+        tls=bool(web_cfg.get("tls", False)),
+        certfile=web_cfg.get("cert_file") or None,
+        keyfile=web_cfg.get("key_file") or None,
     )
 
 
-__all__ = ["WebServer", "WebSession", "EngineDispatcher", "ApiError", "build_web_server"]
+def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[WebServer]:
+    """Собрать WebServer из конфига (секция ``features.web``)."""
+    web_cfg = (getattr(config, "features", {}) or {}).get("web", {}) if config is not None else {}
+    if not web_cfg.get("enabled", False):
+        return None
+    token = web_cfg.get("auth_token") or os.environ.get("MCU_WEB_TOKEN") or None
+    tls = bool(web_cfg.get("tls", False))
+    certfile = web_cfg.get("cert_file") or None
+    keyfile = web_cfg.get("key_file") or None
+    return WebServer(
+        engine, config, h323,
+        host=str(web_cfg.get("host", "0.0.0.0")),
+        port=int(web_cfg.get("port", 8080)),
+        auth_token=token,
+        tls=tls,
+        certfile=certfile,
+        keyfile=keyfile,
+    )
+
+
+
+# TLS-хелперы — в отдельном модуле (единый источник, тестируется без сокетов).
+from .tls_utils import ensure_self_signed as _ensure_self_signed, make_ssl_context as _make_ssl_ctx
+
+
+def ensure_self_signed_cert(certfile=None, keyfile=None, host="localhost"):
+    """Совместимая обёртка: вернуть пути (cert, key), при нужде сгенерировать."""
+    cert, key = _ensure_self_signed(
+        cert_dir=Path(certfile).parent if certfile else None, host=host,
+    )
+    return str(cert), str(key)
+
+
+def _make_ssl_context(certfile, keyfile):
+    """Собрать серверный SSLContext (TLS 1.2+), сгенерировав cert при нужде."""
+    if certfile and keyfile and Path(certfile).is_file() and Path(keyfile).is_file():
+        return _make_ssl_ctx(Path(certfile), Path(keyfile))
+    cert, key = ensure_self_signed_cert(certfile, keyfile)
+    return _make_ssl_ctx(Path(cert), Path(key))
+
+
+__all__ = ["WebServer", "WebSession", "EngineDispatcher", "ApiError", "build_web_server", "make_web_server", "ensure_self_signed_cert"]

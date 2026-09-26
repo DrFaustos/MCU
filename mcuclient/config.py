@@ -126,6 +126,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             # Пусто — без авторизации (только для доверенной локальной сети).
             # Можно задать строку или env MCU_WEB_TOKEN.
             "auth_token": "",
+            # TLS (HTTPS). По умолчанию ВЫКЛЮЧЕН: браузер иначе ругается на
+            # самоподписанный сертификат. Включается в GUI/CLI/config.
+            # cert_file/key_file пусто -> самоподписанный через openssl.
+            "tls": False,
+            "cert_file": "",
+            "key_file": "",
         },
     },
 }
@@ -264,6 +270,10 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         token = web.get("auth_token", "")
         if not isinstance(token, str):
             raise ConfigError("features.web.auth_token: ожидалась строка")
+        _check_bool("features.web.tls", web.get("tls", False))
+        for key in ("cert_file", "key_file"):
+            if not isinstance(web.get(key, ""), str):
+                raise ConfigError(f"features.web.{key}: ожидалась строка")
 
     return raw
 
