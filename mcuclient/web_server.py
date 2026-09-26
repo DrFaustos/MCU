@@ -193,11 +193,13 @@ class WebSession:
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
         self._frame_listener = None
-        # WebRTC-ingest: браузер публикует камеру/микрофон в MCU.
-        # Кадры веб-видео идут в тот же FrameHub (видно на странице).
-        self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub))
-        # Конференция веб-участников (вход по имени, как в BBB).
+        # Конференция веб-участников (вход по имени, как в BBB): создаём ДО
+        # WebRTCManager, чтобы передать менеджеру шину медиа для fan-out.
         self.conference = Conference(on_change=self._conference_changed)
+        # WebRTC-ingest (publish) + fan-out (viewer): браузер шлёт свои треки
+        # в MCU и/или принимает треки других участников с шины.
+        self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
+                                    bus=self.conference.bus)
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -423,15 +425,22 @@ class WebSession:
         log.debug("Конференция: участников=%d", self.conference.count())
 
     # -- WebRTC-ingest -----------------------------------------------------
-    def webrtc_offer(self, sdp: str, sdp_type: str = "offer") -> Dict[str, Any]:
+    def webrtc_offer(self, sdp: str, sdp_type: str = "offer",
+                     role: str = "publish",
+                     subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
         """Обработать SDP-offer браузера, вернуть answer.
 
+        :param role: ``publish`` (браузер шлёт медиа) или ``viewer``
+            (браузер принимает видео других участников — fan-out).
+        :param subscribe: id публикаторов для ``role=viewer``.
         :raises ApiError: 503, если aiortc не установлен; 400 при битом SDP.
         """
         if not self.webrtc.available:
             raise ApiError("WebRTC недоступен: не установлен aiortc", status=503)
         try:
-            return self.webrtc.handle_offer(sdp, sdp_type or "offer")
+            return self.webrtc.handle_offer(sdp, sdp_type or "offer",
+                                            role=role or "publish",
+                                            subscribe=subscribe)
         except WebRTCError as exc:
             raise ApiError(str(exc), status=400) from exc
 
@@ -716,7 +725,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/audio_device":
             return s.set_audio_device(data.get("device"))
         if path == "/api/webrtc/offer":
-            return s.webrtc_offer(str(data.get("sdp", "")), str(data.get("type", "offer")))
+            sub = data.get("subscribe")
+            if not isinstance(sub, list):
+                sub = None
+            return s.webrtc_offer(str(data.get("sdp", "")), str(data.get("type", "offer")),
+                                  role=str(data.get("role", "publish")), subscribe=sub)
         if path == "/api/webrtc/close":
             return s.webrtc_close(str(data.get("session", "")))
         if path == "/api/conference/join":

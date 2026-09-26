@@ -1,6 +1,8 @@
 """WebRTC-приём (ingest): браузер публикует камеру/микрофон в MCU.
 
-Полноценный SFU (раздача потока всем участникам, TURN) — отдельный этап.
+Есть и **раздача** (fan-out): браузер-зритель подписывается на видео других
+участников (`role=viewer`, `subscribe=[id,...]`) и получает их треки.
+Полноценный SFU (TURN, симулкаст, джиттер-буферы) — отдельный этап.
 Этот модуль закрывает **первую половину** задачи: браузер через
 ``RTCPeerConnection`` шлёт свои аудио/видео-треки в приложение, а те попадают
 в существующие приёмники (FrameHub/тайл «Вы», аудио-приёмник). Так веб-участник
@@ -52,6 +54,7 @@ class SessionInfo:
 
     id: str
     state: str = "new"
+    role: str = "publish"
     video_frames: int = 0
     audio_frames: int = 0
     created_at: float = field(default_factory=time.time)
@@ -178,8 +181,12 @@ class WebRTCManager:
     def __init__(self, sink: Any = None,
                  aiortc_module: Optional[Any] = None,
                  ice_servers: Optional[List[str]] = None,
-                 offer_timeout: float = 15.0) -> None:
+                 offer_timeout: float = 15.0,
+                 bus: Any = None) -> None:
         self._sink = sink
+        # Шина медиа: источник кадров для зрителей (fan-out).
+        self._bus = bus
+        self._viewer_tracks: Dict[str, List[Any]] = {}
         self._aiortc = aiortc_module if aiortc_module is not None else _default_aiortc()
         self._ice_servers = list(ice_servers or [])
         self._offer_timeout = float(offer_timeout)
@@ -228,9 +235,16 @@ class WebRTCManager:
         return fut.result(timeout=self._offer_timeout)
 
     # -- публичный API -----------------------------------------------------
-    def handle_offer(self, sdp: str, sdp_type: str = "offer") -> Dict[str, Any]:
+    def handle_offer(self, sdp: str, sdp_type: str = "offer",
+                     role: str = "publish",
+                     subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
         """Обработать SDP-offer браузера и вернуть answer.
 
+        :param role: ``publish`` — браузер шлёт свои треки в MCU;
+            ``viewer`` — браузер принимает треки других участников
+            (fan-out): для каждого id из ``subscribe`` добавляется исходящий
+            видео-трек, берущий кадры с шины медиа.
+        :param subscribe: список id публикаторов (для ``role=viewer``).
         :returns: ``{"sdp": str, "type": "answer", "session": id}``.
         :raises WebRTCError: при отсутствии aiortc, пустом/битом SDP, таймауте.
         """
@@ -238,23 +252,40 @@ class WebRTCManager:
         if not sdp or not isinstance(sdp, str) or "v=" not in sdp:
             raise WebRTCError("Некорректный SDP (пусто или нет строки 'v=')")
         try:
-            return self._run(self._handle_offer(sdp, sdp_type))
+            return self._run(self._handle_offer(sdp, sdp_type, role,
+                                                list(subscribe or [])))
         except WebRTCError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise WebRTCError(f"Не удалось обработать offer: {exc}") from exc
 
-    async def _handle_offer(self, sdp: str, sdp_type: str) -> Dict[str, Any]:
+    async def _handle_offer(self, sdp: str, sdp_type: str, role: str = "publish",
+                            subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
         mod = self._aiortc
         self._counter += 1
         sid = f"web-{self._counter}"
         info = SessionInfo(id=sid)
+        info.role = role
         pc = mod.RTCPeerConnection(self._pc_config())
         relay = _MediaRelay(info, self._sink)
         with self._lock:
             self._sessions[sid] = info
             self._pc[sid] = pc
             self._relays[sid] = relay
+
+        # Fan-out: для зрителя добавляем исходящие треки с шины.
+        out_tracks: List[Any] = []
+        if role == "viewer" and self._bus is not None:
+            for pid in (subscribe or []):
+                track = _make_video_track(mod, self._bus, pid)
+                if track is not None:
+                    try:
+                        pc.addTrack(track)
+                        out_tracks.append(track)
+                    except Exception:  # noqa: BLE001
+                        log.debug("Не удалось добавить трек %s", pid, exc_info=True)
+        with self._lock:
+            self._viewer_tracks[sid] = out_tracks
 
         @pc.on("track")
         def _on_track(track: Any) -> None:  # noqa: ANN401
@@ -296,7 +327,7 @@ class WebRTCManager:
         with self._lock:
             return [
                 {
-                    "id": s.id, "state": s.state,
+                    "id": s.id, "state": s.state, "role": s.role,
                     "video_frames": s.video_frames, "audio_frames": s.audio_frames,
                     "created_at": s.created_at, "remote": s.remote,
                 }
@@ -316,6 +347,8 @@ class WebRTCManager:
         pc = self._pc.pop(sid, None)
         relay = self._relays.pop(sid, None)
         info = self._sessions.pop(sid, None)
+        with self._lock:
+            self._viewer_tracks.pop(sid, None)
         if relay is not None:
             await relay.close()
         if pc is not None:
@@ -360,6 +393,38 @@ async def _wait_ice_complete(pc: Any, timeout: float) -> None:
         await asyncio.wait_for(done.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         log.warning("ICE gathering не завершился за %.1f c — отдаём текущий SDP", timeout)
+
+
+def _to_av_frame(mod: Any, rgb: Any) -> Any:
+    """RGB numpy -> av.VideoFrame (или исходный объект для фейка/тестов)."""
+    try:
+        av = __import__("av")
+        return av.VideoFrame.from_ndarray(rgb, format="rgb24")
+    except Exception:  # noqa: BLE001 — тесты/фейки без av
+        return rgb
+
+
+def _make_video_track(mod: Any, bus: Any, pid: str, fps: int = 30) -> Any:
+    """Исходящий видео-трек зрителя: кадры публикатора ``pid`` с шины.
+
+    Опрашивает ``bus.latest_video(pid)`` (latest-wins) с частотой ``fps``.
+    Если у aiortc нет ``VideoStreamTrack`` (тесты/фейк) — None.
+    """
+    base = getattr(mod, "VideoStreamTrack", None)
+    if base is None:
+        return None
+
+    class _OutVideo(base):  # type: ignore[misc, valid-type]
+        kind = "video"
+
+        async def recv(self) -> Any:
+            while True:
+                rgb = bus.latest_video(pid)
+                if rgb is not None:
+                    return _to_av_frame(mod, rgb)
+                await asyncio.sleep(1.0 / max(1, fps))
+
+    return _OutVideo()
 
 
 def make_frame_hub_sink(frame_hub: Any) -> Any:
