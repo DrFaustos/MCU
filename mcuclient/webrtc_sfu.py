@@ -67,6 +67,7 @@ class MediaBus:
         self._lock = threading.Lock()
         self._video: Dict[str, Any] = {}
         self._audio: Dict[str, List[bytes]] = {}
+        self._audio_last: Dict[str, tuple] = {}
         self._audio_limit = max(1, int(audio_buffer))
         self._video_subs: Dict[str, List[Callable[[str, Any, int, int], None]]] = {}
         self._audio_subs: Dict[str, List[Callable[[str, bytes, int, int], None]]] = {}
@@ -90,6 +91,7 @@ class MediaBus:
             buf.append(pcm)
             if len(buf) > self._audio_limit:
                 del buf[: len(buf) - self._audio_limit]
+            self._audio_last[pid] = (pcm, int(rate), int(channels))
             subs = list(self._audio_subs.get(pid, ()))
         for cb in subs:
             try:
@@ -119,12 +121,18 @@ class MediaBus:
         with self._lock:
             self._video.pop(pid, None)
             self._audio.pop(pid, None)
+            self._audio_last.pop(pid, None)
             self._video_subs.pop(pid, None)
             self._audio_subs.pop(pid, None)
 
     def latest_video(self, pid: str) -> Any:
         with self._lock:
             return self._video.get(pid)
+
+    def latest_audio(self, pid: str):
+        """Последний аудио-кадр публикатора: (pcm, rate, channels) или None."""
+        with self._lock:
+            return self._audio_last.get(pid)
 
     def publishers(self) -> List[str]:
         with self._lock:

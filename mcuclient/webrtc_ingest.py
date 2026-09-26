@@ -114,9 +114,14 @@ class _MediaRelay:
     поэтому задача создаётся в running loop.
     """
 
-    def __init__(self, info: SessionInfo, sink: Any) -> None:
+    def __init__(self, info: SessionInfo, sink: Any, bus: Any = None,
+                 publish_id: Optional[str] = None) -> None:
         self._info = info
         self._sink = sink
+        # Шина медиа: сюда публикуем принятые кадры, чтобы их получили
+        # зрители (fan-out). publish_id — id участника конференции.
+        self._bus = bus
+        self._publish_id = publish_id or info.id
         self._tasks: List[asyncio.Task] = []
 
     def attach(self, track: Any) -> None:
@@ -144,19 +149,23 @@ class _MediaRelay:
             log.debug("Трек %s сессии %s завершён", kind, self._info.id)
 
     def _emit_video(self, frame: Any) -> None:
-        sink = self._sink
-        if sink is None or not hasattr(sink, "on_video_frame"):
-            return
         rgb = _frame_rgb(frame)
         height, width = _frame_shape(rgb)
-        sink.on_video_frame(rgb, width, height)
+        # 1) локальный приёмник (FrameHub — превью на странице).
+        sink = self._sink
+        if sink is not None and hasattr(sink, "on_video_frame"):
+            sink.on_video_frame(rgb, width, height)
+        # 2) шина медиа -> зрители (fan-out).
+        if self._bus is not None:
+            self._bus.publish_video(self._publish_id, rgb, width, height)
 
     def _emit_audio(self, frame: Any) -> None:
-        sink = self._sink
-        if sink is None or not hasattr(sink, "on_audio_pcm"):
-            return
         pcm, rate, channels = _audio_pcm(frame)
-        sink.on_audio_pcm(pcm, rate, channels)
+        sink = self._sink
+        if sink is not None and hasattr(sink, "on_audio_pcm"):
+            sink.on_audio_pcm(pcm, rate, channels)
+        if self._bus is not None:
+            self._bus.publish_audio(self._publish_id, pcm, rate, channels)
 
     async def close(self) -> None:
         for task in self._tasks:
@@ -237,7 +246,8 @@ class WebRTCManager:
     # -- публичный API -----------------------------------------------------
     def handle_offer(self, sdp: str, sdp_type: str = "offer",
                      role: str = "publish",
-                     subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
+                     subscribe: Optional[List[str]] = None,
+                     participant: Optional[str] = None) -> Dict[str, Any]:
         """Обработать SDP-offer браузера и вернуть answer.
 
         :param role: ``publish`` — браузер шлёт свои треки в MCU;
@@ -253,21 +263,26 @@ class WebRTCManager:
             raise WebRTCError("Некорректный SDP (пусто или нет строки 'v=')")
         try:
             return self._run(self._handle_offer(sdp, sdp_type, role,
-                                                list(subscribe or [])))
+                                                list(subscribe or []),
+                                                participant))
         except WebRTCError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise WebRTCError(f"Не удалось обработать offer: {exc}") from exc
 
     async def _handle_offer(self, sdp: str, sdp_type: str, role: str = "publish",
-                            subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
+                            subscribe: Optional[List[str]] = None,
+                            participant: Optional[str] = None) -> Dict[str, Any]:
         mod = self._aiortc
         self._counter += 1
         sid = f"web-{self._counter}"
         info = SessionInfo(id=sid)
         info.role = role
         pc = mod.RTCPeerConnection(self._pc_config())
-        relay = _MediaRelay(info, self._sink)
+        # publish_id — id участника конференции (совпадает с тем, на
+        # который подписываются зрители); иначе id сессии.
+        relay = _MediaRelay(info, self._sink, bus=self._bus,
+                            publish_id=participant or sid)
         with self._lock:
             self._sessions[sid] = info
             self._pc[sid] = pc
@@ -277,8 +292,10 @@ class WebRTCManager:
         out_tracks: List[Any] = []
         if role == "viewer" and self._bus is not None:
             for pid in (subscribe or []):
-                track = _make_video_track(mod, self._bus, pid)
-                if track is not None:
+                for factory in (_make_video_track, _make_audio_track):
+                    track = factory(mod, self._bus, pid)
+                    if track is None:
+                        continue
                     try:
                         pc.addTrack(track)
                         out_tracks.append(track)
@@ -441,6 +458,44 @@ def _make_video_track(mod: Any, bus: Any, pid: str, fps: int = 30) -> Any:
                 await asyncio.sleep(1.0 / max(1, fps))
 
     return _OutVideo()
+
+
+def _make_audio_track(mod: Any, bus: Any, pid: str, rate: int = 48000) -> Any:
+    """Исходящий аудио-трек зрителя: свежий звук публикатора ``pid``.
+
+    Публикуемый PCM — s16. Если av/aiortc недоступны или нет кадра —
+    возвращаем None/тишину."""
+    base = getattr(mod, "AudioStreamTrack", None)
+    if base is None:
+        return None
+
+    class _OutAudio(base):  # type: ignore[misc, valid-type]
+        kind = "audio"
+
+        async def recv(self) -> Any:
+            while True:
+                item = bus.latest_audio(pid)
+                if item is not None:
+                    pcm, sample_rate, channels = item
+                    frame = _pcm_to_audio_frame(mod, pcm, sample_rate, channels)
+                    if frame is not None:
+                        return frame
+                await asyncio.sleep(0.02)
+
+    return _OutAudio()
+
+
+def _pcm_to_audio_frame(mod: Any, pcm: bytes, rate: int, channels: int) -> Any:
+    """s16 PCM -> av.AudioFrame (mono). None, если av недоступен."""
+    try:
+        av = __import__("av")
+        samples = max(1, len(pcm) // 2)
+        frame = av.AudioFrame(format="s16", layout="mono", samples=samples)
+        frame.sample_rate = int(rate)
+        frame.planes[0].update(pcm)
+        return frame
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def make_frame_hub_sink(frame_hub: Any) -> Any:

@@ -430,7 +430,8 @@ class WebSession:
     # -- WebRTC-ingest -----------------------------------------------------
     def webrtc_offer(self, sdp: str, sdp_type: str = "offer",
                      role: str = "publish",
-                     subscribe: Optional[List[str]] = None) -> Dict[str, Any]:
+                     subscribe: Optional[List[str]] = None,
+                     participant: Optional[str] = None) -> Dict[str, Any]:
         """Обработать SDP-offer браузера, вернуть answer.
 
         :param role: ``publish`` (браузер шлёт медиа) или ``viewer``
@@ -443,7 +444,8 @@ class WebSession:
         try:
             return self.webrtc.handle_offer(sdp, sdp_type or "offer",
                                             role=role or "publish",
-                                            subscribe=subscribe)
+                                            subscribe=subscribe,
+                                            participant=participant)
         except WebRTCError as exc:
             raise ApiError(str(exc), status=400) from exc
 
@@ -732,7 +734,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(sub, list):
                 sub = None
             return s.webrtc_offer(str(data.get("sdp", "")), str(data.get("type", "offer")),
-                                  role=str(data.get("role", "publish")), subscribe=sub)
+                                  role=str(data.get("role", "publish")), subscribe=sub,
+                                  participant=str(data.get("participant", "")) or None)
         if path == "/api/webrtc/close":
             return s.webrtc_close(str(data.get("session", "")))
         if path == "/api/conference/join":

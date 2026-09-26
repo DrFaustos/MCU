@@ -211,7 +211,8 @@ async function rtcPublish() {
   await _pc.setLocalDescription(offer);
   await new Promise(r => setTimeout(r, 400));
   const resp = await api('/webrtc/offer', 'POST', {
-    sdp: _pc.localDescription.sdp, type: _pc.localDescription.type, role: 'publish'
+    sdp: _pc.localDescription.sdp, type: _pc.localDescription.type, role: 'publish',
+    participant: me ? me.id : null
   });
   await _pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
   hint.textContent = 'Публикация идёт (сессия ' + resp.session + ')';
@@ -237,12 +238,25 @@ async function subscribeTo(peer) {
   if (viewerPCs[peer.id] || !window.RTCPeerConnection) return;
   const pc = new RTCPeerConnection();
   pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
   const entry = { pc, stream: new MediaStream() };
   viewerPCs[peer.id] = entry;
   pc.ontrack = (ev) => {
     entry.stream.addTrack(ev.track);
-    const v = document.querySelector(`.tile[data-peer="${CSS.escape(peer.id)}"] video`);
-    if (v) v.srcObject = entry.stream;
+    if (ev.track.kind === 'video') {
+      const v = document.querySelector(`.tile[data-peer="${CSS.escape(peer.id)}"] video`);
+      if (v) v.srcObject = entry.stream;
+    } else if (ev.track.kind === 'audio') {
+      // Звук участника: отдельный <audio>, чтобы слышать других.
+      let a = document.querySelector(`audio[data-peer="${CSS.escape(peer.id)}"]`);
+      if (!a) {
+        a = document.createElement('audio');
+        a.autoplay = true;
+        a.dataset.peer = peer.id;
+        document.body.appendChild(a);
+      }
+      a.srcObject = entry.stream;
+    }
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -260,6 +274,8 @@ function stopViewer(peerId) {
   const entry = viewerPCs[peerId];
   if (!entry) return;
   try { entry.pc.close(); } catch (e) { /* ignore */ }
+  const a = document.querySelector(`audio[data-peer="${CSS.escape(peerId)}"]`);
+  if (a) a.remove();
   delete viewerPCs[peerId];
 }
 
