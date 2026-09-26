@@ -125,6 +125,9 @@
 * TLS (HTTPS) — опционально, по умолчанию **выключен**: `--web-tls`,
   `features.web.tls`, галочка в GUI. Пустые `cert_file`/`key_file` ->
   самоподписанный сертификат через `mcuclient/tls_utils.py`.
+* WebRTC-ingest (браузер -> MCU): `mcuclient/webrtc_ingest.py` на
+  `aiortc` (опционально). Без aiortc `WEBRTC_AVAILABLE=False`, offer ->
+  503. Видео идёт в `FrameHub`. Это приём, а не SFU-раздача.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 

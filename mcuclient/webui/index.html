@@ -62,6 +62,11 @@
       <h2>Своё видео</h2>
       <img id="localVideo" alt="Локальный источник видео" src="">
       <div id="videoHint">Источник видео выключен</div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnPublish">Опубликовать камеру/микрофон (WebRTC)</button>
+        <button id="btnUnpublish" disabled>Остановить</button>
+      </div>
+      <div id="rtcHint" style="color:var(--muted);font-size:11px;margin-top:6px"></div>
     </div>
 
     <div class="section">
@@ -242,6 +247,47 @@ $('grid').addEventListener('click', (e) => {
   act(map[btn.dataset.act]);
 });
 
+let _pc = null;
+let _localStream = null;
+
+async function rtcPublish() {
+  if (!window.RTCPeerConnection) { alert('Браузер не поддерживает WebRTC'); return; }
+  if (_pc) return;
+  const hint = $('rtcHint');
+  try {
+    _localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  } catch (e) {
+    hint.textContent = 'Нет доступа к камере/микрофону: ' + e.message;
+    return;
+  }
+  _pc = new RTCPeerConnection();
+  _pc.onconnectionstatechange = () => { hint.textContent = 'WebRTC: ' + _pc.connectionState; };
+  _localStream.getTracks().forEach(t => _pc.addTrack(t, _localStream));
+  // Локальное превью публикуемого потока
+  $('localVideo').srcObject = _localStream;
+  const offer = await _pc.createOffer();
+  await _pc.setLocalDescription(offer);
+  // Ждём сбора ICE-кандидатов (упрощённо — небольшая пауза)
+  await new Promise(r => setTimeout(r, 500));
+  const resp = await api('/webrtc/offer', 'POST', { sdp: _pc.localDescription.sdp, type: _pc.localDescription.type });
+  await _pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
+  hint.textContent = 'Публикация идёт (сессия ' + resp.session + ')';
+  $('btnPublish').disabled = true;
+  $('btnUnpublish').disabled = false;
+}
+
+async function rtcUnpublish() {
+  const hint = $('rtcHint');
+  try {
+    if (_pc) { _pc.close(); _pc = null; }
+    if (_localStream) { _localStream.getTracks().forEach(t => t.stop()); _localStream = null; }
+    $('localVideo').srcObject = null;
+    hint.textContent = 'Публикация остановлена';
+  } catch (e) { hint.textContent = 'Ошибка остановки: ' + e.message; }
+  $('btnPublish').disabled = false;
+  $('btnUnpublish').disabled = true;
+}
+
 function startVideo() {
   const img = $('localVideo');
   const hint = $('videoHint');
@@ -261,6 +307,8 @@ function startVideo() {
   }
 }
 
+$('btnPublish').onclick = () => rtcPublish().catch(e => alert(e.message));
+$('btnUnpublish').onclick = () => rtcUnpublish().catch(e => alert(e.message));
 refresh().then(startVideo); loadDevices(); loadChat(); connectEvents();
 setInterval(refresh, 3000);
 </script>

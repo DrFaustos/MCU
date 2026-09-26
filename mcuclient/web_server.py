@@ -36,6 +36,12 @@ from urllib.parse import parse_qs, urlparse
 
 from .log import get_logger
 from .video_stream import FrameHub
+from .webrtc_ingest import (
+    WEBRTC_AVAILABLE,
+    WebRTCError,
+    WebRTCManager,
+    make_frame_hub_sink,
+)
 
 log = get_logger("web")
 
@@ -186,9 +192,16 @@ class WebSession:
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
         self._frame_listener = None
+        # WebRTC-ingest: браузер публикует камеру/микрофон в MCU.
+        # Кадры веб-видео идут в тот же FrameHub (видно на странице).
+        self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub))
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
+        try:
+            self.webrtc.close_all()
+        except Exception:  # noqa: BLE001
+            log.debug("Закрытие WebRTC-сессий с ошибкой", exc_info=True)
         self.detach_frame_listener()
         self._dispatcher.stop()
 
@@ -251,6 +264,8 @@ class WebSession:
             "video_frames": self.frame_hub.frames,
             "video_available": self.frame_hub.has_frame,
             "video_jpeg": self.frame_hub.jpeg_available,
+            "webrtc_available": bool(self.webrtc.available),
+            "webrtc_sessions": self.webrtc.sessions(),
         }
 
     def participants(self) -> List[Dict[str, Any]]:
@@ -372,6 +387,27 @@ class WebSession:
     def set_audio_device(self, device: int) -> Dict[str, Any]:
         ok = self._call(lambda: bool(self._engine.set_audio_device(int(device))))
         return {"ok": ok, "device": int(device)}
+
+    # -- WebRTC-ingest -----------------------------------------------------
+    def webrtc_offer(self, sdp: str, sdp_type: str = "offer") -> Dict[str, Any]:
+        """Обработать SDP-offer браузера, вернуть answer.
+
+        :raises ApiError: 503, если aiortc не установлен; 400 при битом SDP.
+        """
+        if not self.webrtc.available:
+            raise ApiError("WebRTC недоступен: не установлен aiortc", status=503)
+        try:
+            return self.webrtc.handle_offer(sdp, sdp_type or "offer")
+        except WebRTCError as exc:
+            raise ApiError(str(exc), status=400) from exc
+
+    def webrtc_sessions(self) -> List[Dict[str, Any]]:
+        return self.webrtc.sessions()
+
+    def webrtc_close(self, sid: str) -> Dict[str, Any]:
+        if not sid:
+            raise ApiError("Не указан id сессии")
+        return {"ok": self.webrtc.close_session(str(sid))}
 
     # -- внутреннее --------------------------------------------------------
     def _require_pid(self, pid: Any) -> int:
@@ -597,6 +633,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"devices": s.audio_devices()})
             elif path == "/api/layouts":
                 self._send_json({"layouts": s.layouts()})
+            elif path == "/api/webrtc/sessions":
+                self._send_json({"sessions": s.webrtc_sessions(),
+                                 "available": s.webrtc.available})
             else:
                 self._send_error_json("Не найдено", 404)
         except ApiError as exc:
@@ -639,6 +678,10 @@ class _Handler(BaseHTTPRequestHandler):
             return s.set_video_device(data.get("device"))
         if path == "/api/audio_device":
             return s.set_audio_device(data.get("device"))
+        if path == "/api/webrtc/offer":
+            return s.webrtc_offer(str(data.get("sdp", "")), str(data.get("type", "offer")))
+        if path == "/api/webrtc/close":
+            return s.webrtc_close(str(data.get("session", "")))
         raise ApiError("Не найдено", status=404)
 
     def _serve_frame(self, as_jpeg: bool) -> None:

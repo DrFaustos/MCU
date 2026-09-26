@@ -106,3 +106,6 @@ tools/h323d/*.o
 tools/h323d/bin/
 tools/h323d/build/
 .build-venv2/
+
+# Локальное venv для WebRTC (aiortc) — не коммитим
+.webrtc-venv/

@@ -236,6 +236,21 @@ Web-панель подписывается на кадры коммутатор
 
 Тесты: `tests/test_video_stream.py` (15). Всего 565 passed.
 
+### 2026-09-26 — Web-панель: WebRTC-ingest (браузер публикует медиа в MCU)
+
+`mcuclient/webrtc_ingest.py` (`WebRTCManager`, на `aiortc`) принимает
+SDP-offer браузера и заводит его камеру/микрофон в MCU: видео идёт в
+`FrameHub` (видно на странице), аудио — в приёмник. Кнопка «Опубликовать
+камеру/микрофон (WebRTC)» на странице. API: `POST /api/webrtc/offer`,
+`POST /api/webrtc/close`, `GET /api/webrtc/sessions`.
+
+Зависимость **опциональна**: без `aiortc` модуль импортируется,
+`WEBRTC_AVAILABLE=False`, offer отвечает 503 — как `pjsua2` в адаптере.
+Это **приём** в MCU, а не SFU-раздача/TURN (см. ADR-0001 §5).
+
+Тесты: `tests/test_webrtc_ingest.py` (9), `tests/test_webrtc_e2e.py` (2,
+skip без aiortc).
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

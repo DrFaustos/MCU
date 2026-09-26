@@ -202,4 +202,10 @@ REST — состояние и команды, SSE (`/api/events`) — собы�
 или MJPEG-поток `/api/video.mjpeg` (если есть cv2). Это снимок локального
 источника, а не WebRTC/SFU.
 
+WebRTC-ingest: `mcuclient/webrtc_ingest.py` (`WebRTCManager`) принимает
+SDP-offer браузера (`POST /api/webrtc/offer`) и заводит его треки в MCU
+(видео -> FrameHub). Зависимость `aiortc` опциональна: без неё модуль
+импортируется, `available=False`, API отдаёт 503. Это приём медиа в MCU,
+а не SFU-раздача; см. WEB_CONTROL §7-8.
+
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md). Конфиг: `features.web`.
