@@ -4,7 +4,7 @@
 какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
 до того, как трогать код. Обновлять при значимых изменениях.
 
-Дата последнего обновления: **2026-09-26**, версия проекта **0.2.32**.
+Дата последнего обновления: **2026-09-26 (сессия 2)**, версия проекта **0.2.32**.
 
 ---
 
@@ -17,7 +17,7 @@
 | Декомпозиция SipEngine на сервисы | [ARCHITECTURE.md](ARCHITECTURE.md), §11 |
 | Выбор протокола звонка | [CALL_PROTOCOL.md](CALL_PROTOCOL.md) |
 | H.323 (нативный хост) | [H323_STATUS.md](H323_STATUS.md), [ADR-0002](ADR-0002-h323plus-unified-media.md) |
-| Web-панель управления (сделано) | [WEB_CONTROL.md](WEB_CONTROL.md) |
+| Web-панель / конференция из браузера | [WEB_CONTROL.md](WEB_CONTROL.md) |
 | Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
 | Контракт остановки движка | [STOP_CONTRACT.md](STOP_CONTRACT.md) |
 | Два клиента / стенд | [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md) |
@@ -125,9 +125,25 @@
 * TLS (HTTPS) — опционально, по умолчанию **выключен**: `--web-tls`,
   `features.web.tls`, галочка в GUI. Пустые `cert_file`/`key_file` ->
   самоподписанный сертификат через `mcuclient/tls_utils.py`.
-* WebRTC-ingest (браузер -> MCU): `mcuclient/webrtc_ingest.py` на
-  `aiortc` (опционально). Без aiortc `WEBRTC_AVAILABLE=False`, offer ->
-  503. Видео идёт в `FrameHub`. Это приём, а не SFU-раздача.
+* TLS (HTTPS) — опционально, по умолчанию **выключен**: `--web-tls`,
+  `features.web.tls`, галочка в GUI. Пустые `cert_file`/`key_file` ->
+  самоподписанный сертификат (`mcuclient/tls_utils.py`).
+* Своё видео в браузере: снимок локального источника (`/api/frame.png`,
+  `/api/video.mjpeg`), `mcuclient/video_stream.py` (`FrameHub`).
+* **WebRTC-ingest**: браузер публикует камеру/микрофон в MCU
+  (`mcuclient/webrtc_ingest.py`, опционально `aiortc`). Без aiortc
+  `WEBRTC_AVAILABLE=False`, offer -> 503.
+* **Конференция из браузера (как BBB)**: форма входа по имени
+  (`/api/conference/join`), участники `kind=web` видны в общей сетке тайлов.
+  Ядро — `mcuclient/webrtc_sfu.py` (`Conference` + `MediaBus`).
+* **SFU fan-out**: зритель (`role=viewer`, `subscribe=[id,...]`) получает
+  видео и аудио других веб-участников (`_make_video_track`,
+  `_make_audio_track`). Принятые кадры публикуются в шину под id участника.
+* **ICE (STUN/TURN)**: `features.web.ice_servers/turn_user/turn_password`,
+  `Config.web_ice_servers`, для интернета/NAT. По умолчанию — только LAN.
+* **Диагностика падений (Windows)**: `report_fatal()` в `mcuclient/log.py`
+  показывает MessageBox с текстом и путём к логу; `mcu-client.log` пишется
+  рядом с `.exe`.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
@@ -159,6 +175,17 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 ### 3.5. Тесты подменяют приватные поля
 Ряд тестов ходит в приватные поля сервисов (`engine._recording._audio_recorder`
 и т.п.). При переименовании полей ищите использования в `tests/`.
+
+### 3.7. fan-out требует публикации в шину (исправлено, `f0a05df`)
+`_MediaRelay` сначала отдавал принятые WebRTC-кадры только в локальный sink
+(FrameHub), а в `MediaBus` не публиковал — зрители (fan-out) получали пустые
+треки. Теперь `_emit_video`/`_emit_audio` публикуют в шину под `publish_id`
+(id участника конференции). Регрессия — `tests/test_webrtc_publish_bus.py`.
+
+### 3.8. ICE-серверы: строки И словари (исправлено, `ceb38fe`)
+`Config.web_ice_servers` отдаёт список словарей `{urls, username, credential}`
+(для TURN-учётки), а `WebRTCManager._pc_config` раньше ждал список строк и
+делал `urls=[url]` — TURN-логин/пароль терялись. Теперь принимаются оба вида.
 
 ### 3.6. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные
@@ -198,7 +225,14 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
   Проверять на целевом железе.
 - **Wayland:** встраивание видео в тайл через X11 может не работать — есть фолбэк
   на отдельное окно (`restart_local_preview_window`).
-- **Windows-сборка:** известны падения; смотреть `mcu-client.log` рядом с бинарником.
+- **Windows-сборка:** при падении на старте появляется MessageBox с путём к
+  `mcu-client.log` (рядом с `.exe`); причина видна без консоли.
+- **WebRTC/SFU:** web-конференция работает (ingest + fan-out видео/аудио,
+  STUN/TURN), но нет: записи веб-потока, симулкаста, джиттер-буферов,
+  микширования аудио (сейчас — отдельный трек на каждого публикатора).
+- **Видео в GUI:** известны жалобы — тайл «Своя камера» не всегда
+  масштабируется под сетку, при смене устройства изображение может остаться
+  старым, при муте видео показывает последний кадр. См. `VIDEO_STATUS.md`.
 - **H.323:** нативный приём только через `mcu_h323d` (см. H323_STATUS); E2E с
   реальным терминалом не прогонялся.
 
@@ -206,7 +240,29 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 
 ## 7. Журнал ключевых коммитов (сессия)
 
- 
+| Коммит | Что |
+|--------|-----|
+| `8a409f2` | диагностика падений: MessageBox + лог рядом с .exe |
+| `11941a1` | кэш кодирования кадров FrameHub + фикс MJPEG-цикла |
+| `058a398` | оптимизация SFU fan-out (latest-wins + общий кэш) |
+| `f0a05df` | fan-out реально наполняется: публикация в шину + аудио-трек |
+| `ceb38fe` | ICE-серверы (STUN/TURN) + фикс учётки TURN |
+| `2da6584` | вход в конференцию из браузера (имя + fan-out) |
+| `ddd731f` | SFU fan-out — зритель принимает видео других |
+| `fde88c7` | API конференции веб-участников |
+| `3a54586` | конференц-ядро WebRTC (участники + шина медиа) |
+| `b972884` | WebRTC-ingest (браузер публикует камеру/микрофон) |
+| `7073f30` | тест-страж контракта Windows-сборки |
+| `be292a0` | своё видео в браузере (снимок/MJPEG) |
+| `b0392a9` | TLS (HTTPS) для web-панели (по умолчанию выкл.) |
+| `f4b5962` | встроенная web-панель управления |
+| `b9a8ec9` | AI_CONTEXT для ИИ-агентов |
+| `6196eed` | версия 0.2.32 (единый источник + фикс vsource) |
+| `31f3767` | fix(vsource): не падать без кадра |
+| `6bb47c9` | единый источник: кадры коммутатора в тайле «Вы» |
+| `b962602` | выбор камеры прямо в тайле «Вы» |
+| `d5987f3` | тайл «Вы» всегда, превью по клику, мут = только передача |
+
 
 ---
 
