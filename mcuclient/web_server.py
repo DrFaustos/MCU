@@ -185,10 +185,12 @@ class WebSession:
     молча подменяется дефолтом.
     """
 
-    def __init__(self, engine: Any, config: Any = None, h323: Any = None) -> None:
+    def __init__(self, engine: Any, config: Any = None, h323: Any = None,
+                 ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
         self._config = config
         self._h323 = h323
+        self._ice_servers = list(ice_servers or [])
         self._dispatcher = EngineDispatcher(engine)
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
@@ -199,7 +201,8 @@ class WebSession:
         # WebRTC-ingest (publish) + fan-out (viewer): браузер шлёт свои треки
         # в MCU и/или принимает треки других участников с шины.
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
-                                    bus=self.conference.bus)
+                                    bus=self.conference.bus,
+                                    ice_servers=self._ice_servers)
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -845,11 +848,12 @@ class WebServer:
                  host: str = "0.0.0.0", port: int = 8080,
                  auth_token: Optional[str] = None,
                  tls: bool = False, certfile: Optional[str] = None,
-                 keyfile: Optional[str] = None) -> None:
+                 keyfile: Optional[str] = None,
+                 ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
         self._config = config
         self._h323 = h323
-        self.session = WebSession(engine, config, h323)
+        self.session = WebSession(engine, config, h323, ice_servers=ice_servers)
         self.host = host
         self.port = int(port)
         self.auth_token = auth_token
@@ -966,6 +970,7 @@ def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
         tls=bool(web_cfg.get("tls", False)),
         certfile=web_cfg.get("cert_file") or None,
         keyfile=web_cfg.get("key_file") or None,
+        ice_servers=getattr(config, "web_ice_servers", None),
     )
 
 
@@ -986,6 +991,7 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
         tls=tls,
         certfile=certfile,
         keyfile=keyfile,
+        ice_servers=getattr(config, "web_ice_servers", None),
     )
 
 

@@ -320,7 +320,23 @@ class WebRTCManager:
         if cfg_cls is None:
             return None
         ice_cls = getattr(mod, "RTCIceServer", None)
-        servers = [ice_cls(urls=[url]) for url in self._ice_servers] if ice_cls is not None else []
+        servers = []
+        if ice_cls is not None:
+            for entry in self._ice_servers:
+                # Поддерживаем и строку URL, и dict {urls, username, credential}
+                # (последнее нужно для TURN с учёткой, см. Config.web_ice_servers).
+                if isinstance(entry, dict):
+                    urls = entry.get("urls") or []
+                    if isinstance(urls, str):
+                        urls = [urls]
+                    kwargs = {"urls": list(urls)}
+                    if entry.get("username"):
+                        kwargs["username"] = entry["username"]
+                    if entry.get("credential"):
+                        kwargs["credential"] = entry["credential"]
+                    servers.append(ice_cls(**kwargs))
+                else:
+                    servers.append(ice_cls(urls=[str(entry)]))
         return cfg_cls(iceServers=servers)
 
     def sessions(self) -> List[Dict[str, Any]]:

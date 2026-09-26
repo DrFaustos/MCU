@@ -52,3 +52,46 @@ def test_web_auth_token_must_be_string():
         assert "auth_token" in str(exc)
     else:
         raise AssertionError("ожидали ConfigError для нестрокового токена")
+
+
+# --- ICE-серверы (STUN/TURN) -----------------------------------------------
+
+def test_ice_servers_empty_by_default():
+    cfg = load_config()
+    assert cfg.web_ice_servers == []
+
+
+def test_ice_servers_split_stun_and_turn():
+    raw = _deep_merge(DEFAULT_CONFIG, {"features": {"web": {
+        "ice_servers": ["stun:stun.l.google.com:19302",
+                        "turn:turn.example.com:3478?transport=udp"],
+        "turn_user": "u", "turn_password": "p",
+    }}})
+    validate_config(raw)
+    from mcuclient.config import Config
+    cfg = Config(raw=raw)
+    ice = cfg.web_ice_servers
+    assert any(e["urls"] == ["stun:stun.l.google.com:19302"] for e in ice)
+    turn = [e for e in ice if any(u.startswith("turn:") for u in e["urls"])]
+    assert turn and turn[0]["username"] == "u" and turn[0]["credential"] == "p"
+
+
+def test_ice_bad_scheme_rejected():
+    raw = _deep_merge(DEFAULT_CONFIG, {"features": {"web": {
+        "ice_servers": ["http://example.com"]}}})
+    try:
+        validate_config(raw)
+    except ConfigError as exc:
+        assert "ice_servers" in str(exc)
+    else:
+        raise AssertionError("ожидали ConfigError для не-ICE URL")
+
+
+def test_ice_bad_type_rejected():
+    raw = _deep_merge(DEFAULT_CONFIG, {"features": {"web": {"ice_servers": "stun:x"}}})
+    try:
+        validate_config(raw)
+    except ConfigError as exc:
+        assert "ice_servers" in str(exc)
+    else:
+        raise AssertionError("ожидали ConfigError для не-списка")

@@ -228,6 +228,22 @@ API конференции: `GET /api/conference`, `POST /api/conference/join` (
 микширования аудио** (звук веб-участника пока не идёт в конференцию),
 **нет записи веб-потока**, лимит 64 веб-участника. Полноценный SFU — дальше.
 
+## 7b. ICE-серверы (STUN/TURN) для WebRTC
+
+По умолчанию WebRTC собирает только локальные (host) кандидаты — этого
+достаточно в одной LAN. Для соединения **через интернет/NAT** нужен STUN
+(и TURN, если прямой путь недоступен):
+
+    "features": { "web": {
+      "ice_servers": ["stun:stun.l.google.com:19302",
+                      "turn:turn.example.com:3478?transport=udp"],
+      "turn_user": "user", "turn_password": "secret"
+    }}
+
+Валидация принимает только `stun:`/`stuns:`/`turn:`/`turns:` URL; логин/пароль
+подставляются к turn/turns-записям (`Config.web_ice_servers`). Пусто — только
+LAN. TURN-сервер поднимается отдельно (coturn и т.п.) — это инфраструктура.
+
 ## 8. WebRTC-ingest (браузер -> MCU)
 
 Фича **опциональна**: нужен пакет `aiortc`.

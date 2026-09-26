@@ -132,6 +132,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "tls": False,
             "cert_file": "",
             "key_file": "",
+            # ICE-серверы для WebRTC (STUN/TURN): список URL-строк.
+            # Пример для интернета за NAT: ["stun:stun.l.google.com:19302",
+            # "turn:turn.example.com:3478?transport=udp"]. Пусто — только
+            # локальная сеть (LAN/host-кандидаты).
+            "ice_servers": [],
+            # Учётка TURN (общая для всех turn:-URL, если нужна).
+            "turn_user": "",
+            "turn_password": "",
         },
     },
 }
@@ -272,6 +280,18 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             raise ConfigError("features.web.auth_token: ожидалась строка")
         _check_bool("features.web.tls", web.get("tls", False))
         for key in ("cert_file", "key_file"):
+            if not isinstance(web.get(key, ""), str):
+                raise ConfigError(f"features.web.{key}: ожидалась строка")
+        ice = web.get("ice_servers", [])
+        if not isinstance(ice, list) or not all(isinstance(x, str) for x in ice):
+            raise ConfigError("features.web.ice_servers: ожидался список строк")
+        for url in ice:
+            scheme = url.split(":", 1)[0].lower()
+            if scheme not in ("stun", "stuns", "turn", "turns"):
+                raise ConfigError(
+                    f"features.web.ice_servers: '{url}' — ожидается stun:/turn: URL"
+                )
+        for key in ("turn_user", "turn_password"):
             if not isinstance(web.get(key, ""), str):
                 raise ConfigError(f"features.web.{key}: ожидалась строка")
 
@@ -474,6 +494,35 @@ class Config:
     @property
     def web_enabled(self) -> bool:
         return bool(self.web.get("enabled", False))
+
+    @property
+    def web_ice_servers(self) -> List[Dict[str, Any]]:
+        """ICE-серверы (STUN/TURN) для WebRTC в формате aiortc.
+
+        Возвращает список ``{"urls": [..], "username": .., "credential": ..}``.
+        Логин/пароль подставляются только для turn/turns-URL.
+        """
+        cfg = self.web
+        urls = [u for u in (cfg.get("ice_servers") or []) if isinstance(u, str)]
+        if not urls:
+            return []
+        user = str(cfg.get("turn_user", "") or "")
+        password = str(cfg.get("turn_password", "") or "")
+        result: List[Dict[str, Any]] = []
+        plain: List[str] = []
+        for url in urls:
+            if url.split(":", 1)[0].lower() in ("turn", "turns"):
+                entry: Dict[str, Any] = {"urls": [url]}
+                if user:
+                    entry["username"] = user
+                if password:
+                    entry["credential"] = password
+                result.append(entry)
+            else:
+                plain.append(url)
+        if plain:
+            result.append({"urls": plain})
+        return result
 
     def set_video_bitrate(self, kbps: int) -> None:
         self.raw["media"]["video"]["bitrate_kbps"] = max(VIDEO_BITRATE_MIN, int(kbps))

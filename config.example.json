@@ -82,7 +82,10 @@
       "auth_token": "",
       "tls": false,
       "cert_file": "",
-      "key_file": ""
+      "key_file": "",
+      "ice_servers": [],
+      "turn_user": "",
+      "turn_password": ""
     }
   }
 }
