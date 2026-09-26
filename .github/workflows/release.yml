@@ -32,31 +32,20 @@ jobs:
       - name: Verify pjsua2 (required for SIP)
         run: python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      # --console собирает ДВА файла: MCU-Client.exe (windowed) и
-      # MCU-Client-console.exe (с консолью) — консольный нужен для
-      # диагностики нативного падения, которое в windowed-сборке не видно.
-      - name: Build executable (windowed + console + debug)
+      # Релиз собирает ТОЛЬКО debug-бинарник (консольный, MCU_DEBUG=1):
+      # расширенный лог запуска/работы. Релизная (windowed) сборка на этом
+      # этапе не нужна — приложение в активной отладке.
+      - name: Build executable (debug only)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --console --debug
-
-      # .cmd-обёртка: запускает консольную сборку, сохраняет ВЕСЬ вывод
-      # (stdout+stderr, включая нативные сообщения) в out.txt и НЕ закрывает
-      # окно (pause) — иначе при падении консоль мгновенно исчезает.
-      - name: Copy console wrapper
-        shell: cmd
-        run: copy packaging\run-console.cmd dist\run-console.cmd
+        run: python build.py --debug-only
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MCU-Client-Windows
-          path: |
-            dist/MCU-Client.exe
-            dist/MCU-Client-console.exe
-            dist/MCU-Client-debug.exe
-            dist/run-console.cmd
+          path: dist/MCU-Client-debug.exe
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
@@ -94,19 +83,18 @@ jobs:
           sudo -E ./scripts/install_pjsua2.sh "$(which python)"
           python -c "import pjsua2; print('pjsua2 OK:', pjsua2.__file__)"
 
-      - name: Build executable (release + debug)
+      # Только debug-бинарник (консольный, MCU_DEBUG=1) — расширенный лог.
+      - name: Build executable (debug only)
         env:
           PYTHONUTF8: '1'
           PYTHONIOENCODING: 'utf-8'
-        run: python build.py --debug
+        run: python build.py --debug-only
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MCU-Client-Linux
-          path: |
-            dist/MCU-Client
-            dist/MCU-Client-debug
+          path: dist/MCU-Client-debug
 
   release:
     needs: [build-windows, build-linux]

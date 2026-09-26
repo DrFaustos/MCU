@@ -9,6 +9,7 @@ SmartScreen, которые часто ругаются на «безымянн�
     python build.py --onedir        # папка вместо одного файла
                                     # (меньше ложных срабатываний AV)
     python build.py --console       # + отладочная сборка с консолью
+    python build.py --debug-only    # ТОЛЬКО debug-бинарник (расширенный лог)
     python build.py --appimage      # + AppImage (только Linux)
     python build.py --allow-no-pjsip
 """
@@ -229,12 +230,26 @@ def main(argv: list[str] | None = None) -> None:
     want_appimage = "--appimage" in args
     allow_no_pjsip = "--allow-no-pjsip" in args
     want_console = "--console" in args
-    want_debug = "--debug" in args
+    debug_only = "--debug-only" in args
+    want_debug = "--debug" in args or debug_only
     onedir = "--onedir" in args
 
     log("[+] Начало сборки MCU Client...")
     ensure_pjsua2(allow_missing=allow_no_pjsip)
     ensure_pyinstaller()
+
+    if debug_only:
+        # Только отладочная сборка: консольный бинарник с MCU_DEBUG=1
+        # (расширенный лог). Релизный бинарник не собираем — не тратим время.
+        log("[+] Режим --debug-only: только DEBUG-бинарник (MCU_DEBUG=1)")
+        hook = ROOT / "packaging" / "_debug_hook.py"
+        debug_bin = build_binary(console=True, name=f"{APP_NAME}-debug",
+                                 onedir=onedir, runtime_hook=hook)
+        if debug_bin.exists():
+            log(f"    DEBUG-файл: {debug_bin.resolve()}")
+        log("[+] Сборка завершена!")
+        return
+
     binary = build_binary(onedir=onedir)
 
     log("[+] Сборка завершена!")

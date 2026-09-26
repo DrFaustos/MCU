@@ -1,9 +1,12 @@
-"""Страж контракта Windows-сборки (release.yml + build.py).
+"""Страж контракта сборки/релиза (release.yml + build.py).
 
-Цель — не дать молча сломать Windows-упаковку: без `pjsua2-wheel` SIP в .exe
-не поднимется, без verify-шага ошибка всплывёт только в собранном бинарнике,
-а без `--add-data` внутрь не попадёт страница web-панели. Тест читает сами
+Цель — не дать молча сломать упаковку: без `pjsua2-wheel` SIP в .exe не
+поднимется, без verify-шага ошибка всплывёт только в собранном бинарнике,
+без `--add-data` внутрь не попадёт страница web-панели. Тест читает сами
 файлы, а не запускает сборку (она долгая и требует Windows).
+
+Текущий контракт релиза: по тегу собираются **только debug-бинарники**
+(расширенный лог, MCU_DEBUG=1) — `MCU-Client-debug.exe` и `MCU-Client-debug`.
 """
 
 from __future__ import annotations
@@ -21,37 +24,51 @@ def _read(path: pathlib.Path) -> str:
 
 def test_release_installs_pjsua2_wheel_on_windows():
     text = _read(RELEASE)
-    # Должна быть Windows-джоба.
     assert "windows-latest" in text
-    # pjsua2-wheel ставится именно для Windows (в Linux — SWIG-сборка).
     assert "pjsua2-wheel" in text, "release.yml должен ставить pjsua2-wheel для Windows"
 
 
 def test_release_verifies_pjsua2_import():
     text = _read(RELEASE)
-    # Шаг верификации: импорт pjsua2 должен падать громко, а не в бинарнике.
     assert "import pjsua2" in text, "нужен шаг проверки `import pjsua2` в CI"
 
 
-def test_release_builds_windowed_console_and_debug():
+def test_release_builds_debug_only():
     text = _read(RELEASE)
-    # --console собирает windowed + console; --debug даёт debug-бинарник.
-    assert "--console" in text
-    assert "--debug" in text
-    # В артефакты должны попадать все три варианта.
-    for name in ("MCU-Client.exe", "MCU-Client-console.exe", "MCU-Client-debug.exe"):
-        assert name in text, f"в артефактах нет {name}"
+    # Обе платформы собирают только debug (расширенный лог).
+    assert text.count("--debug-only") == 2, "обе сборки (Windows и Linux) — --debug-only"
+    # Релизные/консольные варианты больше не собираются.
+    assert "--console" not in text, "релиз больше не должен собирать console-вариант"
+
+
+def test_release_artifacts_are_debug_only():
+    text = _read(RELEASE)
+    assert "dist/MCU-Client-debug.exe" in text
+    assert "dist/MCU-Client-debug" in text
+    # Старые релизные артефакты не должны попадать в релиз.
+    assert "dist/MCU-Client.exe" not in text
+    assert "MCU-Client-console.exe" not in text
+
+
+def test_build_supports_debug_only_flag():
+    text = _read(BUILD)
+    assert "--debug-only" in text, "build.py должен поддерживать --debug-only"
+    assert "debug_only" in text
 
 
 def test_build_includes_webui_data():
     text = _read(BUILD)
-    # Страница web-панели обязана попадать в бинарник.
     assert "webui" in text, "build.py должен класть mcuclient/webui внутрь бинарника"
     assert "--add-data" in text
 
 
 def test_build_hidden_imports_media_stack():
     text = _read(BUILD)
-    # Тяжёлые/динамические импорты, которые PyInstaller не видит сам.
     for mod in ("pjsua2", "PySide6", "numpy", "cv2", "pyvirtualcam", "mss"):
         assert mod in text, f"build.py не объявляет --hidden-import {mod}"
+
+
+def test_debug_hook_sets_mcu_debug():
+    hook = ROOT / "packaging" / "_debug_hook.py"
+    assert hook.exists(), "нужен runtime-hook для MCU_DEBUG=1"
+    assert "MCU_DEBUG" in hook.read_text(encoding="utf-8")
