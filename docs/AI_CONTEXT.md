@@ -21,6 +21,7 @@
 | Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
 | Контракт остановки движка | [STOP_CONTRACT.md](STOP_CONTRACT.md) |
 | Два клиента / стенд | [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md) |
+| Web-конференция: проверка из браузера | [WEB_CONFERENCE_TEST.md](WEB_CONFERENCE_TEST.md) |
 | Видео/камеры | [VIDEO_STATUS.md](VIDEO_STATUS.md) |
 | История коммитов | `git log --oneline` |
 
