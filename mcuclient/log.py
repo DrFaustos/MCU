@@ -204,6 +204,33 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"mcuclient.{name}")
 
 
+def report_fatal(message: str) -> None:
+    """Показать критическую ошибку пользователю вне консоли.
+
+    В windowed-сборке Windows (нет консоли, stderr уходит в devnull) открываем
+    нативный MessageBox с текстом и путём к лог-файлу. В остальных случаях
+    пишем в stderr. Сама ошибка уже должна быть залогирована вызывающим.
+    """
+    log_path = log_file_path()
+    text = f"{message}\n\nПодробности в лог-файле:\n{log_path}"
+    shown = False
+    if sys.platform == "win32":
+        try:  # pragma: no cover — зависит от Windows
+            import ctypes  # noqa: PLC0415
+
+            ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
+                0, text, "MCU Client — критическая ошибка", 0x10
+            )
+            shown = True
+        except Exception:  # noqa: BLE001
+            shown = False
+    if not shown and sys.stderr is not None:
+        try:  # pragma: no cover
+            print(f"[MCU] КРИТИЧЕСКАЯ ОШИБКА: {text}", file=sys.stderr)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def log_file_path() -> str:
     """Вернуть путь к активному лог-файлу."""
     return str(_pick_log_path())

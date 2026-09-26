@@ -109,7 +109,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # === ШАГ 0: настройка логирования ДО любых тяжёлых импортов ===
-    from mcuclient.log import get_logger, log_environment, log_file_path, setup_logging
+    from mcuclient.log import (
+    get_logger,
+    log_environment,
+    log_file_path,
+    report_fatal,
+    setup_logging,
+)
 
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("main")
@@ -184,12 +190,14 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001
         log.critical("КРИТИЧЕСКАЯ ОШИБКА на этапе импорта:", exc_info=True)
         log.critical("Трассировка:\n%s", traceback.format_exc())
+        report_fatal("Не удалось запустить приложение: ошибка импорта.")
         return 3
 
     try:
         config = load_config(args.config)
     except Exception:  # noqa: BLE001
         log.critical("Не удалось загрузить конфигурацию:", exc_info=True)
+        report_fatal("Не удалось загрузить конфигурацию.")
         return 3
 
     # --- CLI overrides ---
@@ -249,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
+        report_fatal("Ошибка инициализации движка (SIP/медиа).")
         return 3
 
     if args.no_camera:
@@ -267,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Шаг 4/6: SIP-движок запущен, главный поток зарегистрирован")
     except Exception:  # noqa: BLE001
         log.critical("Ошибка запуска SIP-движка:", exc_info=True)
+        report_fatal("Не удалось запустить SIP-движок.")
         return 3
 
     if args.camera_device is not None:
