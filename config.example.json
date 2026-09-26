@@ -74,6 +74,12 @@
     },
     "virtual_camera": false,
     "virtual_camera_device": "/dev/video0",
-    "default_call_protocol": "auto"
+    "default_call_protocol": "auto",
+    "web": {
+      "enabled": false,
+      "host": "0.0.0.0",
+      "port": 8080,
+      "auth_token": ""
+    }
   }
 }

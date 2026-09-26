@@ -5,6 +5,8 @@
     python run.py --listen 0.0.0.0:5060 --display-name "MCU Room"
     python run.py --config config.json --h323 --h323-port 1720
     python run.py --headless          # без GUI (серверный режим)
+    python run.py --headless --web    # + web-панель управления на :8080
+    python run.py --web-port 9000     # web-панель на другом порту
     python run.py --doctor            # диагностика окружения
     python run.py --list-video-devices
     python run.py --test-camera 0 --headless   # тест камеры до звонка
@@ -65,6 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="GUI: сразу позвонить на SIP URI/IP после старта")
     p.add_argument("--call-wait", type=int, default=30,
                    help="headless: сколько секунд ждать вызова (по умолчанию 30)")
+
+    # --- web-панель управления ---
+    p.add_argument("--web", dest="web", action="store_true", default=None,
+                   help="включить встроенную web-панель управления")
+    p.add_argument("--no-web", dest="web", action="store_false",
+                   help="выключить web-панель (перекрывает config)")
+    p.add_argument("--web-host", help="адрес web-панели (по умолчанию 0.0.0.0)")
+    p.add_argument("--web-port", type=int, help="порт web-панели (по умолчанию 8080)")
+    p.add_argument("--web-token", help="токен авторизации web-панели (иначе env MCU_WEB_TOKEN)")
 
     # --- камера / видео ---
     p.add_argument("--list-video-devices", action="store_true",
@@ -193,6 +204,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.h323_port:
         config.raw["h323"]["port"] = args.h323_port
 
+    # --- Web-панель: CLI важнее конфига ---
+    web_cfg = config.raw.setdefault("features", {}).setdefault("web", {})
+    if args.web is not None:
+        web_cfg["enabled"] = bool(args.web)
+    if args.web_host:
+        web_cfg["host"] = args.web_host
+    if args.web_port:
+        web_cfg["port"] = args.web_port
+    if args.web_token:
+        web_cfg["auth_token"] = args.web_token
+    if args.web and not args.headless:
+        # GUI и web одновременно допустимы, но чаще web — для headless.
+        log.info("Web-панель запрошена вместе с GUI")
+
     # Протокол исходящего звонка: CLI-флаг важнее конфига.
     _resolved_protocol = args.protocol or config.default_call_protocol
 
@@ -274,6 +299,9 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             log.exception("Ошибка запуска нативного H.323-эндпоинта")
 
+    # === ШАГ 3.5: встроенный web-сервер управления ===
+    web_server = _start_web_server(engine, config, h323, log)
+
     if args.headless:
         if args.call:
             import time
@@ -285,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not target.ok:
                 log.error("Вызов отклонён: %s", target.error)
+                _stop_web_server(web_server, log)
                 h323_native.stop()
                 h323.stop()
                 engine.stop()
@@ -318,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                     if getattr(p.state, "value", "") == "disconnected":
                         break
             try:
+                _stop_web_server(web_server, log)
                 h323_native.stop()
                 h323.stop()
                 engine.stop()
@@ -335,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             pass
         finally:
+            _stop_web_server(web_server, log)
             h323_native.stop()
             h323.stop()
             engine.stop()
@@ -360,6 +391,38 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             pass
         return 2
+    finally:
+        _stop_web_server(web_server, log)
+
+
+def _start_web_server(engine, config, h323, log):
+    """Поднять встроенную web-панель, если она включена. Иначе None."""
+    try:
+        from mcuclient.web_server import build_web_server
+        server = build_web_server(engine, config, h323)
+    except Exception:  # noqa: BLE001
+        log.exception("Не удалось подготовить web-сервер")
+        return None
+    if server is None:
+        return None
+    if not server.start():
+        log.error("Web-панель не запустилась (порт %s занят?)", server.port)
+        return None
+    if server.auth_token:
+        log.info("Web-панель: авторизация по токену включена")
+    else:
+        log.warning("Web-панель БЕЗ авторизации — доступна всем в сети %s:%s", server.host, server.port)
+    log.info("Откройте в браузере: %s", server.url)
+    return server
+
+
+def _stop_web_server(server, log) -> None:
+    if server is None:
+        return
+    try:
+        server.stop()
+    except Exception:  # noqa: BLE001
+        log.exception("Ошибка остановки web-сервера")
 
 
 def _run_camera_commands(engine, args, log) -> int:

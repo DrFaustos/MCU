@@ -116,6 +116,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "available": ["speaker", "gallery_2x2", "gallery_3x3", "grid_auto"],
             "default": "speaker",
         },
+        # Встроенный web-сервер управления (аналог OpenMCU): браузер
+        # подключается к этому же приложению и рулит сессией. См.
+        # mcuclient/web_server.py, страница — mcuclient/webui/index.html.
+        "web": {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 8080,
+            # Пусто — без авторизации (только для доверенной локальной сети).
+            # Можно задать строку или env MCU_WEB_TOKEN.
+            "auth_token": "",
+        },
     },
 }
 
@@ -242,6 +253,17 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ConfigError(
             f"features.layouts.default '{layouts['default']}' отсутствует в available"
         )
+
+    web = features.get("web")
+    if web is not None:
+        if not isinstance(web, dict):
+            raise ConfigError("features.web должен быть объектом")
+        _check_bool("features.web.enabled", web.get("enabled", False))
+        _check_str("features.web.host", web.get("host", "0.0.0.0"))
+        _check_int("features.web.port", web.get("port", 8080), PORT_MIN, PORT_MAX)
+        token = web.get("auth_token", "")
+        if not isinstance(token, str):
+            raise ConfigError("features.web.auth_token: ожидалась строка")
 
     return raw
 
@@ -430,6 +452,18 @@ class Config:
     @property
     def default_layout(self) -> str:
         return str(self.features.get("layouts", {}).get("default", "speaker"))
+
+    @property
+    def web(self) -> Dict[str, Any]:
+        """Секция web-сервера (features.web) со значениями по умолчанию."""
+        base = DEFAULT_CONFIG["features"]["web"]
+        merged = dict(base)
+        merged.update(self.features.get("web", {}) or {})
+        return merged
+
+    @property
+    def web_enabled(self) -> bool:
+        return bool(self.web.get("enabled", False))
 
     def set_video_bitrate(self, kbps: int) -> None:
         self.raw["media"]["video"]["bitrate_kbps"] = max(VIDEO_BITRATE_MIN, int(kbps))

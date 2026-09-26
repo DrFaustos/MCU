@@ -190,6 +190,28 @@ H323Plus/PJSIP: работает на PCM-буферах (numpy, с чистым
 с терминалами Sony. Разбор H.264 `profile-level-id` → profile/level.
 29 тестов в `tests/test_codec_negotiation.py`; всего 306.
 
+### 2026-09-26 — Встроенная web-панель управления (клиент = сервер)
+
+Приложение теперь может поднимать встроенный HTTP-сервер управления
+(`mcuclient/web_server.py` + `mcuclient/webui/index.html`) — аналог OpenMCU:
+браузер подключается к ПК/серверу, где запущено приложение (GUI или
+`--headless`), и управляет сессией — участники, вызовы, муты, раскладка,
+запись, чат, камеры/микрофоны, screen-share. Включается `--web` или
+`features.web.enabled`. REST + SSE, без внешних зависимостей (только
+stdlib). Все обращения к pjsua2 сериализованы в одном потоке
+(`EngineDispatcher`, `libRegisterThread`).
+
+Найден и исправлен баг: часть публичного API `SipEngine` — `@property`
+(`layout`, `is_recording`, `video_send_enabled`, `screen_share_enabled`),
+а web-слой вызывал их как методы — `TypeError` молча глотался, и статус
+врал (раскладка всегда «speaker», запись всегда «выкл»). Чтение переведено
+на property/method-агностичный `_prop(...)`, регрессия закрыта тестом.
+
+Тесты: +34 (`test_web_server.py` 29, `test_web_http.py` 4,
+`test_web_config.py` 5, `test_web_properties.py` 3 → часть пересекается по
+файлам). Всего 539 passed. Документация: `docs/WEB_CONTROL.md`,
+ARCHITECTURE §12, README.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

@@ -17,6 +17,7 @@
 | Декомпозиция SipEngine на сервисы | [ARCHITECTURE.md](ARCHITECTURE.md), §11 |
 | Выбор протокола звонка | [CALL_PROTOCOL.md](CALL_PROTOCOL.md) |
 | H.323 (нативный хост) | [H323_STATUS.md](H323_STATUS.md), [ADR-0002](ADR-0002-h323plus-unified-media.md) |
+| Web-панель управления (сделано) | [WEB_CONTROL.md](WEB_CONTROL.md) |
 | Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
 | Контракт остановки движка | [STOP_CONTRACT.md](STOP_CONTRACT.md) |
 | Два клиента / стенд | [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md) |
@@ -97,6 +98,32 @@
 `features.virtual_camera_device` (`/dev/video0`).
 
 ---
+
+### 2.7. Встроенный web-сервер и страница управления (сессия)
+
+Приложение — клиент и сервер одновременно: `--web` (или `features.web.enabled`)
+поднимает HTTP-сервер (`mcuclient/web_server.py`) со страницей
+`mcuclient/webui/index.html`. Браузер подключается к ПК/серверу и управляет
+сессией (участники, вызовы, муты, раскладка, запись, чат, устройства).
+
+* REST: `/api/status`, `/api/participants`, `/api/chat`, `/api/devices/*`,
+  `/api/layouts`; команды — POST (`/api/call`, `/api/hangup`, `/api/mute`,
+  `/api/layout`, `/api/recording`, `/api/chat`, `/api/camera`, ...).
+* SSE: `/api/events` — события шины движка.
+* CLI: `--web/--no-web`, `--web-host`, `--web-port`, `--web-token`
+  (или `MCU_WEB_TOKEN`). Конфиг: `features.web`.
+* Потокобезопасность: все обращения к движку — через `EngineDispatcher`
+  (один поток, зарегистрированный в pjlib).
+* **Грабля:** часть API `SipEngine` — `@property` (`layout`, `is_recording`,
+  `video_send_enabled`, `screen_share_enabled`, `recording_file`), часть —
+  методы. Web-слой читает через `_prop(...)`; иначе `eng.layout()` для
+  свойства бросает `TypeError` и значение молча подменяется дефолтом
+  (раскладка всегда «speaker»). Регрессия — `tests/test_web_properties.py`.
+* Тесты: `test_web_server.py`, `test_web_http.py` (реальный сокет),
+  `test_web_config.py`, `test_web_properties.py`.
+
+Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
+
 
 ## 3. Грабли и известные проблемы (важно!)
 

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCU — панель управления</title>
+<style>
+  :root { --bg:#0f1420; --panel:#182031; --panel2:#202b40; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --text:#e6ecf5; --muted:#8b9bb4; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 16px; background: var(--panel); border-bottom:1px solid #263248; }
+  header h1 { font-size:16px; margin:0; }
+  header .room { color: var(--muted); font-size:13px; }
+  header .spacer { flex:1; }
+  .badge { font-size:12px; padding:3px 8px; border-radius:10px; background:var(--panel2); color:var(--muted); }
+  .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+  .badge.err { background: rgba(239,68,68,.15); color: var(--err); }
+  main { flex:1; display:grid; grid-template-columns: 1fr 340px; min-height:0; }
+  #grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap:10px; padding:12px; overflow:auto; align-content:start; }
+  .tile { position:relative; background:#0b1018; border:1px solid #263248; border-radius:10px; aspect-ratio: 16/9; display:flex; flex-direction:column; align-items:center; justify-content:center; overflow:hidden; }
+  .tile .avatar { width:64px; height:64px; border-radius:50%; background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--muted); }
+  .tile.speaking { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(34,197,94,.3); }
+  .tile .name { position:absolute; left:8px; bottom:8px; font-size:12px; background:rgba(0,0,0,.5); padding:2px 8px; border-radius:6px; max-width:90%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tile .flags { position:absolute; right:8px; top:8px; display:flex; gap:4px; font-size:12px; }
+  .tile .state { position:absolute; left:8px; top:8px; font-size:11px; color:var(--muted); }
+  aside { border-left:1px solid #263248; background:var(--panel); display:flex; flex-direction:column; min-height:0; }
+  .section { border-bottom:1px solid #263248; padding:10px 12px; }
+  .section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  .row { display:flex; gap:6px; align-items:center; }
+  input, select, textarea { background:var(--panel2); border:1px solid #2c3a52; color:var(--text); border-radius:8px; padding:8px 10px; font:inherit; font-size:13px; width:100%; }
+  button { background:var(--panel2); border:1px solid #2c3a52; color:var(--text); border-radius:8px; padding:8px 12px; font:inherit; font-size:13px; cursor:pointer; }
+  button:hover { background:#2a3852; }
+  button.primary { background:var(--accent); border-color:var(--accent); }
+  button.danger { background:#7f1d1d; border-color:#991b1b; }
+  button.on { background: rgba(34,197,94,.2); border-color: var(--ok); color: var(--ok); }
+  button:disabled { opacity:.5; cursor:default; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; }
+  #chat { flex:1; overflow:auto; display:flex; flex-direction:column; gap:6px; min-height:120px; }
+  .msg { font-size:13px; background:var(--panel2); padding:6px 9px; border-radius:8px; max-width:100%; word-break:break-word; }
+  .msg.me { background: rgba(59,130,246,.2); align-self:flex-end; }
+  .muted { color: var(--err); }
+  .empty { color: var(--muted); font-size:13px; text-align:center; padding:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MCU</h1>
+  <span class="room" id="roomName">—</span>
+  <span class="badge" id="pjsipBadge">SIP: ?</span>
+  <span class="badge" id="recBadge">Запись: выкл</span>
+  <span class="spacer"></span>
+  <span class="badge" id="verBadge"></span>
+</header>
+<main>
+  <div id="grid"><div class="empty">Нет участников</div></div>
+  <aside>
+    <div class="section">
+      <h2>Исходящий вызов</h2>
+      <div class="row">
+        <input id="callUri" placeholder="sip:user@host или IP" autocomplete="off">
+        <button class="primary" id="btnCall">Звонить</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Свои устройства</h2>
+      <div class="btns">
+        <button id="btnCam">Камера: ?</button>
+        <button id="btnMic">Микрофон: ?</button>
+        <button id="btnVidSend">Видео в эфир: ?</button>
+        <button id="btnScreen">Экран: выкл</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="videoDevices"><option value="">Камеры…</option></select>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <select id="videoSource">
+          <option value="camera">Источник: камера</option>
+          <option value="screen">Источник: экран</option>
+          <option value="colorbar">Источник: colorbar</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Раскладка</h2>
+      <div class="row">
+        <select id="layout"></select>
+        <button id="btnRec">Запись</button>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="btnMuteAll">Заглушить всех</button>
+        <button id="btnHangAll">Сбросить всех</button>
+      </div>
+    </div>
+
+    <div class="section" style="flex:1; display:flex; flex-direction:column; min-height:0">
+      <h2>Чат</h2>
+      <div id="chat"></div>
+      <div class="row" style="margin-top:8px">
+        <input id="chatText" placeholder="Сообщение всем…" autocomplete="off">
+        <button id="btnSend">→</button>
+      </div>
+    </div>
+  </aside>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let status = {};
+let participants = [];
+
+const token = new URLSearchParams(location.search).get('token');
+const qs = token ? ('?token=' + encodeURIComponent(token)) : '';
+
+async function api(path, method = 'GET', body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch('/api' + path + qs, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+function toast(msg) { console.warn(msg); }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderTiles() {
+  const grid = $('grid');
+  if (!participants.length) { grid.innerHTML = '<div class="empty">Нет участников</div>'; return; }
+  grid.innerHTML = participants.map(p => `
+    <div class="tile ${p.speaking ? 'speaking' : ''}" data-id="${p.id}">
+      <div class="state">${esc(p.state)}</div>
+      <div class="flags">${p.muted ? '<span class="muted">🔇</span>' : ''}${p.video_muted ? '<span>📷✕</span>' : ''}</div>
+      <div class="avatar">${esc((p.uri || '?').slice(0, 1).toUpperCase())}</div>
+      <div class="name" title="${esc(p.uri)}">${esc(p.uri || ('#' + p.id))}</div>
+      <div class="btns" style="position:absolute;right:8px;bottom:8px">
+        ${p.state === 'incoming' ? `<button data-act="accept" data-id="${p.id}">Принять</button><button data-act="reject" data-id="${p.id}">Отклонить</button>` : ''}
+        <button data-act="mute" data-id="${p.id}">${p.muted ? 'Вкл звук' : 'Мут'}</button>
+        <button class="danger" data-act="hangup" data-id="${p.id}">Сброс</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderStatus() {
+  $('roomName').textContent = status.room || '—';
+  const pj = $('pjsipBadge');
+  pj.textContent = 'SIP: ' + (status.pjsip ? 'поднят' : 'нет');
+  pj.className = 'badge ' + (status.pjsip ? 'ok' : 'err');
+  $('recBadge').textContent = 'Запись: ' + (status.recording ? 'идёт' : 'выкл');
+  $('recBadge').className = 'badge ' + (status.recording ? 'ok' : '');
+  $('verBadge').textContent = 'v' + (status.version || '');
+  $('btnCam').textContent = 'Камера: ' + (status.camera ? 'вкл' : 'выкл');
+  $('btnCam').className = status.camera ? 'on' : '';
+  $('btnMic').textContent = 'Микрофон: ' + (status.microphone ? 'вкл' : 'выкл');
+  $('btnMic').className = status.microphone ? 'on' : '';
+  $('btnVidSend').textContent = 'Видео в эфир: ' + (status.video_send ? 'вкл' : 'выкл');
+  $('btnVidSend').className = status.video_send ? 'on' : '';
+  $('btnScreen').textContent = 'Экран: ' + (status.screen_share ? 'вкл' : 'выкл');
+  $('btnScreen').className = status.screen_share ? 'on' : '';
+  const sel = $('layout');
+  const layouts = status.layouts || [];
+  if (sel.options.length !== layouts.length) { sel.innerHTML = layouts.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join(''); }
+  sel.value = status.layout || '';
+}
+
+async function refresh() {
+  try {
+    status = await api('/status');
+    participants = status.participants || [];
+    renderStatus(); renderTiles();
+  } catch (e) { toast('Нет связи с сервером: ' + e.message); }
+}
+
+async function loadDevices() {
+  try {
+    const d = await api('/devices/video');
+    const sel = $('videoDevices');
+    sel.innerHTML = '<option value="">Камеры…</option>' + (d.devices || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+  } catch (e) { /* не критично */ }
+}
+
+async function loadChat() {
+  try {
+    const d = await api('/chat');
+    $('chat').innerHTML = (d.messages || []).map(m => `<div class="msg ${m.direction === 'out' ? 'me' : ''}">${esc(m.text)}</div>`).join('');
+  } catch (e) { /* не критично */ }
+}
+
+function connectEvents() {
+  const es = new EventSource('/api/events' + qs);
+  es.onmessage = (ev) => {
+    try {
+      const { event } = JSON.parse(ev.data);
+      if (event && (event.startsWith('call.') || event.startsWith('chat.') || event.startsWith('layout.') || event.startsWith('engine.'))) {
+        refresh();
+        if (event.startsWith('chat.')) loadChat();
+      }
+    } catch (e) { /* ignore */ }
+  };
+  es.onerror = () => { /* EventSource сам переподключится */ };
+}
+
+async function act(fn) { try { await fn(); await refresh(); } catch (e) { alert(e.message); } }
+
+$('btnCall').onclick = () => act(() => api('/call', 'POST', { uri: $('callUri').value.trim() }));
+$('callUri').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnCall').click(); });
+$('btnCam').onclick = () => act(() => api('/camera', 'POST', { enabled: !status.camera }));
+$('btnMic').onclick = () => act(() => api('/microphone', 'POST', { enabled: !status.microphone }));
+$('btnVidSend').onclick = () => act(() => api('/video_send', 'POST', { enabled: !status.video_send }));
+$('btnScreen').onclick = () => act(() => api('/screen_share', 'POST', { enabled: !status.screen_share }));
+$('btnRec').onclick = () => act(() => api('/recording', 'POST', {}));
+$('btnMuteAll').onclick = () => act(() => api('/mute_all', 'POST', { audio: true }));
+$('btnHangAll').onclick = () => act(async () => { for (const p of participants) { await api('/hangup', 'POST', { id: p.id }); } });
+$('layout').onchange = () => act(() => api('/layout', 'POST', { layout: $('layout').value }));
+$('videoDevices').onchange = () => { const v = $('videoDevices').value; if (v !== '') act(() => api('/video_device', 'POST', { device: Number(v) })); };
+$('videoSource').onchange = () => act(() => api('/video_source', 'POST', { kind: $('videoSource').value }));
+
+function sendChat() {
+  const text = $('chatText').value.trim();
+  if (!text) return;
+  act(async () => { await api('/chat', 'POST', { text }); $('chatText').value = ''; await loadChat(); });
+}
+$('btnSend').onclick = sendChat;
+$('chatText').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+$('grid').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  const map = { accept: () => api('/accept', 'POST', { id }), reject: () => api('/reject', 'POST', { id }), hangup: () => api('/hangup', 'POST', { id }), mute: () => api('/mute', 'POST', { id, audio: !(participants.find(p => p.id === id) || {}).muted }) };
+  act(map[btn.dataset.act]);
+});
+
+refresh(); loadDevices(); loadChat(); connectEvents();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

@@ -132,6 +132,9 @@ def build_binary(console: bool = False, name: str | None = None,
         "--hidden-import", "pyvirtualcam",
         "--hidden-import", "numpy",
         "--hidden-import", "cv2",
+        # Страница web-панели должна попасть внутрь бинарника.
+        # PyInstaller кладёт datas рядом с mcuclient/ (см. mcuclient/webui).
+        "--add-data", f"{ROOT / 'mcuclient' / 'webui'}{os.pathsep}mcuclient/webui",
     ]
     if runtime_hook is not None:
         cmd += ["--runtime-hook", str(runtime_hook)]
