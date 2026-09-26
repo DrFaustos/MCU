@@ -28,12 +28,14 @@ import os
 import queue
 import ssl
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .log import get_logger
+from .video_stream import FrameHub
 
 log = get_logger("web")
 
@@ -181,10 +183,45 @@ class WebSession:
         self._config = config
         self._h323 = h323
         self._dispatcher = EngineDispatcher(engine)
+        # Последний кадр локального источника -> браузер (без WebRTC).
+        self.frame_hub = FrameHub(min_interval=0.0)
+        self._frame_listener = None
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
+        self.detach_frame_listener()
         self._dispatcher.stop()
+
+    def attach_frame_listener(self) -> None:
+        """Подписать FrameHub на кадры видеоисточника движка (если можно)."""
+        if self._frame_listener is not None:
+            return
+        add = getattr(self._engine, "add_vsource_listener", None)
+        if not callable(add):
+            return
+        self._frame_listener = self.frame_hub.on_frame
+        try:
+            add(self._frame_listener)
+        except Exception:  # noqa: BLE001
+            log.debug("Не удалось подписаться на кадры источника", exc_info=True)
+            self._frame_listener = None
+
+    def detach_frame_listener(self) -> None:
+        if self._frame_listener is None:
+            return
+        remove = getattr(self._engine, "remove_vsource_listener", None)
+        if callable(remove):
+            try:
+                remove(self._frame_listener)
+            except Exception:  # noqa: BLE001
+                log.debug("Не удалось отписаться от кадров источника", exc_info=True)
+        self._frame_listener = None
+
+    def frame_png(self):
+        return self.frame_hub.png()
+
+    def frame_jpeg(self, quality: int = 75):
+        return self.frame_hub.jpeg(quality)
 
     def _call(self, fn: Callable[[], Any]) -> Any:
         return self._dispatcher.call(fn)
@@ -211,6 +248,9 @@ class WebSession:
             "video_source": _prop(eng, "current_video_source", "camera"),
             "participants": participants,
             "version": _version(),
+            "video_frames": self.frame_hub.frames,
+            "video_available": self.frame_hub.has_frame,
+            "video_jpeg": self.frame_hub.jpeg_available,
         }
 
     def participants(self) -> List[Dict[str, Any]]:
@@ -506,6 +546,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             self._serve_events()
             return
+        if path in ("/api/frame.png", "/api/frame.jpg", "/api/video.mjpeg"):
+            if not self._authorized():
+                self._send_error_json("Требуется авторизация", 401)
+                return
+            if path == "/api/video.mjpeg":
+                self._serve_mjpeg()
+            else:
+                self._serve_frame(path.endswith(".jpg"))
+            return
         if path.startswith("/api/"):
             if not self._authorized():
                 self._send_error_json("Требуется авторизация", 401)
@@ -591,6 +640,58 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/audio_device":
             return s.set_audio_device(data.get("device"))
         raise ApiError("Не найдено", status=404)
+
+    def _serve_frame(self, as_jpeg: bool) -> None:
+        """Отдать один кадр локального источника (PNG или JPEG)."""
+        body = None
+        ctype = "image/png"
+        if as_jpeg:
+            body = self.session.frame_jpeg()
+            ctype = "image/jpeg"
+        if body is None:
+            body = self.session.frame_png()
+            ctype = "image/png"
+        if body is None:
+            self._send_error_json("Кадров пока нет (источник видео выключен?)", 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_mjpeg(self) -> None:
+        """Поток MJPEG (multipart/x-mixed-replace). Требует cv2."""
+        if not self.session.frame_hub.jpeg_available:
+            self._send_error_json("MJPEG недоступен: нет кодировщика JPEG (opencv)", 501)
+            return
+        boundary = "mcu-frame"
+        self.send_response(200)
+        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        last = -1
+        try:
+            while True:
+                jpg = self.session.frame_jpeg()
+                if jpg is None:
+                    time.sleep(0.2)
+                    continue
+                seq = self.session.frame_hub.frames
+                if seq == last:
+                    time.sleep(0.03)
+                    continue
+                last = seq
+                self.wfile.write(f"--{boundary}\r\n".encode())
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode())
+                self.wfile.write(jpg)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _serve_events(self) -> None:
         if not self._authorized():
@@ -696,6 +797,11 @@ class WebServer:
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever, name="mcu-web", daemon=True)
         self._thread.start()
+        # Подписываемся на кадры видеоисточника (если движок умеет).
+        try:
+            self.session.attach_frame_listener()
+        except Exception:  # noqa: BLE001
+            log.debug("Подписка на кадры источника не удалась", exc_info=True)
         log.info("Web-панель: %s (host=%s, port=%s)", self.url, self.host, self.port)
         return True
 

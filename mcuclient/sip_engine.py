@@ -1120,6 +1120,14 @@ class SipEngine:
     def current_video_source(self) -> str:
         return self._vsource.current_video_source()
 
+    def add_vsource_listener(self, callback) -> None:
+        """Добавить слушателя кадров источника (например, web-панель)."""
+        self._vsource.add_on_frame(callback)
+
+    def remove_vsource_listener(self, callback) -> None:
+        """Убрать слушателя кадров источника."""
+        self._vsource.remove_on_frame(callback)
+
     def set_vsource_on_frame(self, callback) -> None:
         """Подписаться на кадры виртуального источника (единый поток)."""
         self._vsource.set_on_frame(callback)

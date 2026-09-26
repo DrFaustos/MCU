@@ -118,6 +118,14 @@ class VideoSourceService:
     def current_video_source(self) -> str:
         return self._vswitch.current_source().kind
 
+    def add_on_frame(self, callback) -> None:
+        """Добавить слушателя кадров коммутатора (можно несколько)."""
+        self._vswitch.add_frame_listener(callback)
+
+    def remove_on_frame(self, callback) -> None:
+        """Убрать слушателя кадров коммутатора."""
+        self._vswitch.remove_frame_listener(callback)
+
     def set_on_frame(self, callback) -> None:
         """Подписаться на кадры коммутатора (RGB, в его потоке)."""
         self._vswitch.on_frame = callback

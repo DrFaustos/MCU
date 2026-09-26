@@ -197,4 +197,9 @@ REST — состояние и команды, SSE (`/api/events`) — собы�
 читает их через `_prop(...)`, иначе `eng.layout()` для свойства бросает
 `TypeError` и значение молча теряется (регрессия — `tests/test_web_properties.py`).
 
+Своё видео: web-панель подписывается на кадры коммутатора источника
+(`add_vsource_listener`) и отдаёт последний кадр — `GET /api/frame.png`
+или MJPEG-поток `/api/video.mjpeg` (если есть cv2). Это снимок локального
+источника, а не WebRTC/SFU.
+
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md). Конфиг: `features.web`.

@@ -225,6 +225,17 @@ ARCHITECTURE §12, README.
 обычный HTTP на том же порту не отвечает. Тесты: `test_web_tls.py`,
 `test_ui_web_slots.py`. Всего 550 passed.
 
+### 2026-09-26 — Web-панель: своё видео в браузере (снимок/MJPEG)
+
+Web-панель подписывается на кадры коммутатора источника и отдаёт локальное
+видео в браузер без новых зависимостей: `GET /api/frame.png` (PNG на stdlib,
+обновление ~2 к/с), `GET /api/frame.jpg` и `GET /api/video.mjpeg` (MJPEG,
+если доступен `cv2`). Модуль `mcuclient/video_stream.py` (`FrameHub`),
+подписка — `SipEngine.add_vsource_listener`. Это **не** WebRTC/SFU: удалённые
+участники и звук в браузер не идут (см. ADR-0001 §5).
+
+Тесты: `tests/test_video_stream.py` (15). Всего 565 passed.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

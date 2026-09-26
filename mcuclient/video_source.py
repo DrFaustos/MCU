@@ -114,6 +114,9 @@ class VideoSourceSwitcher:
         # Внешний потребитель превью (RGB-кадр) — для тайла «Своя камера».
         # Вызывается в потоке коммутатора (см. docstring модуля).
         self.on_frame: Callable[[Any], None] | None = None
+        # Дополнительные слушатели кадров (web-панель и др.). В отличие от
+        # on_frame (один владелец — тайл «Вы»), их может быть несколько.
+        self._frame_listeners: list[Callable[[Any], None]] = []
         self._cap = None  # cv2.VideoCapture текущей камеры
         self._cap_dev: int | None = None
         # mss держим один на поток — создание на каждый кадр дорого и течёт.
@@ -136,6 +139,18 @@ class VideoSourceSwitcher:
     @property
     def frames_sent(self) -> int:
         return self._frames_sent
+
+    def add_frame_listener(self, callback: Callable[[Any], None]) -> None:
+        """Добавить слушателя кадров (вызывается в потоке коммутатора)."""
+        if callback is not None and callback not in self._frame_listeners:
+            self._frame_listeners.append(callback)
+
+    def remove_frame_listener(self, callback: Callable[[Any], None]) -> None:
+        """Убрать слушателя кадров."""
+        try:
+            self._frame_listeners.remove(callback)
+        except ValueError:
+            pass
 
     def current_source(self) -> SourceInfo:
         with self._lock:
@@ -328,6 +343,11 @@ class VideoSourceSwitcher:
                             if callable(self.on_frame):
                                 try:
                                     self.on_frame(frame)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            for _listener in list(self._frame_listeners):
+                                try:
+                                    _listener(frame)
                                 except Exception:  # noqa: BLE001
                                     pass
                     # sleep_until_next_frame опирается на внутренний таймер
