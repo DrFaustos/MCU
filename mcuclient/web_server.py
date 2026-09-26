@@ -42,6 +42,7 @@ from .webrtc_ingest import (
     WebRTCManager,
     make_frame_hub_sink,
 )
+from .webrtc_sfu import Conference
 
 log = get_logger("web")
 
@@ -195,6 +196,8 @@ class WebSession:
         # WebRTC-ingest: браузер публикует камеру/микрофон в MCU.
         # Кадры веб-видео идут в тот же FrameHub (видно на странице).
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub))
+        # Конференция веб-участников (вход по имени, как в BBB).
+        self.conference = Conference(on_change=self._conference_changed)
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -202,6 +205,11 @@ class WebSession:
             self.webrtc.close_all()
         except Exception:  # noqa: BLE001
             log.debug("Закрытие WebRTC-сессий с ошибкой", exc_info=True)
+        try:
+            for p in self.conference.participants():
+                self.conference.leave(p["id"])
+        except Exception:  # noqa: BLE001
+            log.debug("Очистка веб-участников с ошибкой", exc_info=True)
         self.detach_frame_listener()
         self._dispatcher.stop()
 
@@ -266,6 +274,7 @@ class WebSession:
             "video_jpeg": self.frame_hub.jpeg_available,
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
+            "conference_participants": self.conference.participants(),
         }
 
     def participants(self) -> List[Dict[str, Any]]:
@@ -387,6 +396,31 @@ class WebSession:
     def set_audio_device(self, device: int) -> Dict[str, Any]:
         ok = self._call(lambda: bool(self._engine.set_audio_device(int(device))))
         return {"ok": ok, "device": int(device)}
+
+    # -- Конференция веб-участников ---------------------------------------
+    def conference_join(self, name: str, role: str = "participant") -> Dict[str, Any]:
+        if self.conference.count() >= 64:
+            raise ApiError("Комната переполнена (64 веб-участника)", status=409)
+        p = self.conference.join(name, role=role)
+        return {"ok": True, "participant": p.to_dict(), "webrtc": self.webrtc.available}
+
+    def conference_leave(self, pid: str) -> Dict[str, Any]:
+        if not pid:
+            raise ApiError("Не указан id участника")
+        return {"ok": self.conference.leave(str(pid))}
+
+    def conference_participants(self) -> List[Dict[str, Any]]:
+        return self.conference.participants()
+
+    def conference_rename(self, pid: str, name: str) -> Dict[str, Any]:
+        return {"ok": self.conference.rename(str(pid), name)}
+
+    def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
+        return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+
+    def _conference_changed(self) -> None:
+        """Список веб-участников изменился (зацепка для событий)."""
+        log.debug("Конференция: участников=%d", self.conference.count())
 
     # -- WebRTC-ingest -----------------------------------------------------
     def webrtc_offer(self, sdp: str, sdp_type: str = "offer") -> Dict[str, Any]:
@@ -633,6 +667,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"devices": s.audio_devices()})
             elif path == "/api/layouts":
                 self._send_json({"layouts": s.layouts()})
+            elif path == "/api/conference":
+                self._send_json({"participants": s.conference_participants(),
+                                 "webrtc": s.webrtc.available})
             elif path == "/api/webrtc/sessions":
                 self._send_json({"sessions": s.webrtc_sessions(),
                                  "available": s.webrtc.available})
@@ -682,6 +719,16 @@ class _Handler(BaseHTTPRequestHandler):
             return s.webrtc_offer(str(data.get("sdp", "")), str(data.get("type", "offer")))
         if path == "/api/webrtc/close":
             return s.webrtc_close(str(data.get("session", "")))
+        if path == "/api/conference/join":
+            return s.conference_join(str(data.get("name", "")), str(data.get("role", "participant")))
+        if path == "/api/conference/leave":
+            return s.conference_leave(str(data.get("id", "")))
+        if path == "/api/conference/rename":
+            return s.conference_rename(str(data.get("id", "")), str(data.get("name", "")))
+        if path == "/api/conference/media":
+            return s.conference_media(str(data.get("id", "")),
+                                      video=_opt_bool(data.get("video")),
+                                      audio=_opt_bool(data.get("audio")))
         raise ApiError("Не найдено", status=404)
 
     def _serve_frame(self, as_jpeg: bool) -> None:

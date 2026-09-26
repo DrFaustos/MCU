@@ -533,3 +533,95 @@ def test_http_bad_json():
         assert "JSON" in payload
     finally:
         srv.stop()
+
+
+# --- Конференция веб-участников ---------------------------------------------
+
+def test_conference_join_and_leave():
+    s, _ = _session()
+    try:
+        res = s.conference_join("Аня")
+        assert res["ok"] is True
+        pid = res["participant"]["id"]
+        assert res["participant"]["name"] == "Аня"
+        assert res["participant"]["kind"] == "web"
+        assert s.conference_participants()[0]["id"] == pid
+        s.conference_leave(pid)
+        assert s.conference_participants() == []
+    finally:
+        s.close()
+
+
+def test_conference_leave_requires_id():
+    s, _ = _session()
+    try:
+        try:
+            s.conference_leave("")
+        except ApiError:
+            pass
+        else:
+            raise AssertionError("ожидали ApiError")
+    finally:
+        s.close()
+
+
+def test_conference_rename_and_media():
+    s, _ = _session()
+    try:
+        pid = s.conference_join("Аня")["participant"]["id"]
+        s.conference_rename(pid, "Анна")
+        assert s.conference_participants()[0]["name"] == "Анна"
+        s.conference_media(pid, video=False, audio=True)
+        p = s.conference_participants()[0]
+        assert p["video_enabled"] is False and p["audio_enabled"] is True
+    finally:
+        s.close()
+
+
+def test_conference_capacity_limit():
+    s, _ = _session()
+    try:
+        for i in range(64):
+            s.conference_join(f"u{i}")
+        try:
+            s.conference_join("лишний")
+        except ApiError as exc:
+            assert exc.status == 409
+        else:
+            raise AssertionError("ожидали ApiError 409")
+    finally:
+        s.close()
+
+
+def test_conference_cleared_on_close():
+    eng = _FakeEngine()
+    s = WebSession(eng, _FakeConfig())
+    s.conference_join("Аня")
+    assert s.conference_participants()
+    s.close()
+    assert s.conference_participants() == []
+
+
+def test_http_conference_roundtrip():
+    srv = _start_server()
+    try:
+        code, data = _http(srv, "POST", "/api/conference/join", {"name": "Аня"})
+        assert code == 200 and data["ok"] is True
+        pid = data["participant"]["id"]
+        code, data = _http(srv, "GET", "/api/conference")
+        assert code == 200
+        assert [p["name"] for p in data["participants"]] == ["Аня"]
+        code, data = _http(srv, "POST", "/api/conference/leave", {"id": pid})
+        assert code == 200 and data["ok"] is True
+    finally:
+        srv.stop()
+
+
+def test_http_conference_join_empty_name_is_guest():
+    srv = _start_server()
+    try:
+        code, data = _http(srv, "POST", "/api/conference/join", {"name": "  "})
+        assert code == 200
+        assert data["participant"]["name"] == "Гость"
+    finally:
+        srv.stop()
