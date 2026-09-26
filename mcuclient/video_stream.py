@@ -98,6 +98,10 @@ class FrameHub:
         self._seq = 0
         self._last_ts = 0.0
         self._min_interval = float(min_interval)
+        # Кэш закодированных кадров по версии: одна кодировка на кадр,
+        # а не на каждый HTTP-запрос (несколько зрителей опрашивают PNG).
+        self._png_cache: Tuple[int, Optional[bytes]] = (-1, None)
+        self._jpeg_cache: Tuple[int, Optional[bytes]] = (-1, None)
 
     @property
     def has_frame(self) -> bool:
@@ -133,18 +137,33 @@ class FrameHub:
             return self._frame, self._size[0], self._size[1]
 
     def png(self) -> Optional[bytes]:
-        """Последний кадр как PNG (stdlib). None, если кадров ещё не было."""
-        frame, width, height = self.latest()
+        """Последний кадр как PNG (stdlib), с кэшем на версию кадра."""
+        frame, width, height, seq = self._snapshot()
         if frame is None or width <= 0 or height <= 0:
             return None
-        return encode_png(frame, width, height)
+        cached_seq, cached = self._png_cache
+        if cached_seq == seq and cached is not None:
+            return cached
+        body = encode_png(frame, width, height)
+        self._png_cache = (seq, body)
+        return body
 
     def jpeg(self, quality: int = 75) -> Optional[bytes]:
-        """Последний кадр как JPEG (нужен cv2). None, если нельзя."""
-        frame, width, height = self.latest()
+        """Последний кадр как JPEG (нужен cv2), с кэшем на версию кадра."""
+        frame, width, height, seq = self._snapshot()
         if frame is None or width <= 0 or height <= 0:
             return None
-        return encode_jpeg(frame, width, height, quality)
+        cached_seq, cached = self._jpeg_cache
+        if cached_seq == seq and cached is not None:
+            return cached
+        body = encode_jpeg(frame, width, height, quality)
+        self._jpeg_cache = (seq, body)
+        return body
+
+    def _snapshot(self) -> Tuple[Any, int, int, int]:
+        """(кадр, width, height, seq) одним захватом лока."""
+        with self._lock:
+            return self._frame, self._size[0], self._size[1], self._seq
 
     @property
     def jpeg_available(self) -> bool:

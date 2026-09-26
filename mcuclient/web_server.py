@@ -784,13 +784,13 @@ class _Handler(BaseHTTPRequestHandler):
         last = -1
         try:
             while True:
+                seq = self.session.frame_hub.frames
+                if seq == last:
+                    time.sleep(0.03)  # новый кадр не пришёл — не кодируем
+                    continue
                 jpg = self.session.frame_jpeg()
                 if jpg is None:
                     time.sleep(0.2)
-                    continue
-                seq = self.session.frame_hub.frames
-                if seq == last:
-                    time.sleep(0.03)
                     continue
                 last = seq
                 self.wfile.write(f"--{boundary}\r\n".encode())
