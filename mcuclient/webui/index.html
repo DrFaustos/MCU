@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MCU — панель управления</title>
+<title>MCU — конференция</title>
 <style>
   :root { --bg:#0f1420; --panel:#182031; --panel2:#202b40; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --text:#e6ecf5; --muted:#8b9bb4; }
   * { box-sizing: border-box; }
@@ -18,11 +18,13 @@
   main { flex:1; display:grid; grid-template-columns: 1fr 340px; min-height:0; }
   #grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap:10px; padding:12px; overflow:auto; align-content:start; }
   .tile { position:relative; background:#0b1018; border:1px solid #263248; border-radius:10px; aspect-ratio: 16/9; display:flex; flex-direction:column; align-items:center; justify-content:center; overflow:hidden; }
+  .tile video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000; }
   .tile .avatar { width:64px; height:64px; border-radius:50%; background:var(--panel2); display:flex; align-items:center; justify-content:center; font-size:24px; color:var(--muted); }
   .tile.speaking { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(34,197,94,.3); }
-  .tile .name { position:absolute; left:8px; bottom:8px; font-size:12px; background:rgba(0,0,0,.5); padding:2px 8px; border-radius:6px; max-width:90%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tile .flags { position:absolute; right:8px; top:8px; display:flex; gap:4px; font-size:12px; }
-  .tile .state { position:absolute; left:8px; top:8px; font-size:11px; color:var(--muted); }
+  .tile .name { position:absolute; left:8px; bottom:8px; font-size:12px; background:rgba(0,0,0,.55); padding:2px 8px; border-radius:6px; max-width:90%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; z-index:2; }
+  .tile .flags { position:absolute; right:8px; top:8px; display:flex; gap:4px; font-size:12px; z-index:2; }
+  .tile .state { position:absolute; left:8px; top:8px; font-size:11px; color:#cfe0ff; z-index:2; }
+  .tile .kind { position:absolute; right:8px; bottom:8px; font-size:10px; color:var(--muted); z-index:2; }
   aside { border-left:1px solid #263248; background:var(--panel); display:flex; flex-direction:column; min-height:0; }
   .section { border-bottom:1px solid #263248; padding:10px 12px; }
   .section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
@@ -44,14 +46,31 @@
   #videoWrap h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
   #localVideo { width:100%; aspect-ratio:16/9; background:#0b1018; border:1px solid #263248; border-radius:10px; display:block; object-fit:contain; }
   #videoHint { color:var(--muted); font-size:11px; margin-top:6px; }
+  #joinOverlay { position:fixed; inset:0; background:rgba(8,12,20,.96); display:flex; align-items:center; justify-content:center; z-index:100; }
+  #joinCard { background:var(--panel); border:1px solid #263248; border-radius:16px; padding:28px; width:min(420px, 92vw); text-align:center; }
+  #joinCard h1 { font-size:22px; margin:0 0 6px; }
+  #joinCard p { color:var(--muted); font-size:13px; margin:0 0 18px; }
+  #joinCard input { text-align:center; font-size:15px; padding:12px; margin-bottom:10px; }
+  #joinCard button { width:100%; padding:12px; font-size:15px; }
+  #joinHint { color:var(--muted); font-size:11px; margin-top:10px; min-height:14px; }
 </style>
 </head>
 <body>
+<div id="joinOverlay">
+  <div id="joinCard">
+    <h1>MCU — вход в конференцию</h1>
+    <p>Введите имя, чтобы присоединиться</p>
+    <input id="joinName" placeholder="Ваше имя" autocomplete="off" maxlength="64">
+    <button class="primary" id="btnJoin">Войти</button>
+    <div id="joinHint"></div>
+  </div>
+</div>
 <header>
   <h1>MCU</h1>
   <span class="room" id="roomName">—</span>
   <span class="badge" id="pjsipBadge">SIP: ?</span>
   <span class="badge" id="recBadge">Запись: выкл</span>
+  <span class="badge" id="meBadge" style="display:none"></span>
   <span class="spacer"></span>
   <span class="badge" id="verBadge"></span>
 </header>
@@ -65,12 +84,13 @@
       <div class="btns" style="margin-top:8px">
         <button id="btnPublish">Опубликовать камеру/микрофон (WebRTC)</button>
         <button id="btnUnpublish" disabled>Остановить</button>
+        <button id="btnLeave">Выйти из конференции</button>
       </div>
       <div id="rtcHint" style="color:var(--muted);font-size:11px;margin-top:6px"></div>
     </div>
 
     <div class="section">
-      <h2>Исходящий вызов</h2>
+      <h2>Исходящий вызов (SIP/H.323)</h2>
       <div class="row">
         <input id="callUri" placeholder="sip:user@host или IP" autocomplete="off">
         <button class="primary" id="btnCall">Звонить</button>
@@ -123,7 +143,10 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 let status = {};
-let participants = [];
+let sipParticipants = [];
+let webParticipants = [];
+let me = null;            // мой веб-участник {id, name}
+let viewerPCs = {};       // peerId -> {pc, stream} — приём видео других
 
 const token = new URLSearchParams(location.search).get('token');
 const qs = token ? ('?token=' + encodeURIComponent(token)) : '';
@@ -137,24 +160,158 @@ async function api(path, method = 'GET', body) {
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   return data;
 }
-function toast(msg) { console.warn(msg); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+// --- Вход по имени ---------------------------------------------------------
+async function joinConference() {
+  const name = $('joinName').value.trim();
+  if (!name) { $('joinHint').textContent = 'Введите имя'; return; }
+  try {
+    const res = await api('/conference/join', 'POST', { name });
+    me = res.participant;
+    $('joinOverlay').style.display = 'none';
+    $('meBadge').style.display = '';
+    $('meBadge').textContent = 'Вы: ' + me.name;
+    // Автоматически начинаем публикацию и подписку на других.
+    await rtcPublish();
+    await conferenceRefresh();
+    syncViewers();
+  } catch (e) { $('joinHint').textContent = 'Не удалось войти: ' + e.message; }
+}
+$('btnJoin').onclick = joinConference;
+$('joinName').addEventListener('keydown', e => { if (e.key === 'Enter') joinConference(); });
+
+async function leaveConference() {
+  try { if (me) await api('/conference/leave', 'POST', { id: me.id }); } catch (e) { /* ignore */ }
+  await rtcUnpublish();
+  Object.keys(viewerPCs).forEach(k => stopViewer(k));
+  me = null; webParticipants = [];
+  $('meBadge').style.display = 'none';
+  $('joinOverlay').style.display = 'flex';
+  renderTiles();
+}
+$('btnLeave').onclick = leaveConference;
+
+// --- Публикация своей камеры/микрофона в MCU -------------------------------
+let _pc = null;
+let _localStream = null;
+
+async function rtcPublish() {
+  if (!window.RTCPeerConnection) return;
+  if (_pc) return;
+  const hint = $('rtcHint');
+  try {
+    _localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  } catch (e) { hint.textContent = 'Нет доступа к камере/микрофону: ' + e.message; return; }
+  _pc = new RTCPeerConnection();
+  _pc.onconnectionstatechange = () => { hint.textContent = 'Публикация: ' + _pc.connectionState; };
+  _localStream.getTracks().forEach(t => _pc.addTrack(t, _localStream));
+  $('localVideo').srcObject = _localStream;
+  const offer = await _pc.createOffer();
+  await _pc.setLocalDescription(offer);
+  await new Promise(r => setTimeout(r, 400));
+  const resp = await api('/webrtc/offer', 'POST', {
+    sdp: _pc.localDescription.sdp, type: _pc.localDescription.type, role: 'publish'
+  });
+  await _pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
+  hint.textContent = 'Публикация идёт (сессия ' + resp.session + ')';
+  $('btnPublish').disabled = true;
+  $('btnUnpublish').disabled = false;
+}
+
+async function rtcUnpublish() {
+  try {
+    if (_pc) { _pc.close(); _pc = null; }
+    if (_localStream) { _localStream.getTracks().forEach(t => t.stop()); _localStream = null; }
+    $('localVideo').srcObject = null;
+    $('rtcHint').textContent = 'Публикация остановлена';
+  } catch (e) { /* ignore */ }
+  $('btnPublish').disabled = false;
+  $('btnUnpublish').disabled = true;
+}
+$('btnPublish').onclick = () => rtcPublish().catch(e => alert(e.message));
+$('btnUnpublish').onclick = () => rtcUnpublish();
+
+// --- Приём видео других веб-участников (fan-out) ---------------------------
+async function subscribeTo(peer) {
+  if (viewerPCs[peer.id] || !window.RTCPeerConnection) return;
+  const pc = new RTCPeerConnection();
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  const entry = { pc, stream: new MediaStream() };
+  viewerPCs[peer.id] = entry;
+  pc.ontrack = (ev) => {
+    entry.stream.addTrack(ev.track);
+    const v = document.querySelector(`.tile[data-peer="${CSS.escape(peer.id)}"] video`);
+    if (v) v.srcObject = entry.stream;
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise(r => setTimeout(r, 400));
+  try {
+    const resp = await api('/webrtc/offer', 'POST', {
+      sdp: pc.localDescription.sdp, type: pc.localDescription.type,
+      role: 'viewer', subscribe: [peer.id]
+    });
+    await pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
+  } catch (e) { /* подписка не удалась — тайл будет без видео */ }
+}
+
+function stopViewer(peerId) {
+  const entry = viewerPCs[peerId];
+  if (!entry) return;
+  try { entry.pc.close(); } catch (e) { /* ignore */ }
+  delete viewerPCs[peerId];
+}
+
+function syncViewers() {
+  if (!me) return;
+  // Подписываемся на всех других веб-участников, отписываемся от ушедших.
+  const ids = new Set(webParticipants.filter(p => p.id !== me.id).map(p => p.id));
+  webParticipants.filter(p => p.id !== me.id).forEach(p => { if (!viewerPCs[p.id]) subscribeTo(p); });
+  Object.keys(viewerPCs).forEach(id => { if (!ids.has(id)) stopViewer(id); });
+  // Перепривязываем потоки к тайлам (после перерисовки).
+  Object.entries(viewerPCs).forEach(([id, entry]) => {
+    const v = document.querySelector(`.tile[data-peer="${CSS.escape(id)}"] video`);
+    if (v && v.srcObject !== entry.stream) v.srcObject = entry.stream;
+  });
+}
+
+// --- Отрисовка -------------------------------------------------------------
 function renderTiles() {
   const grid = $('grid');
-  if (!participants.length) { grid.innerHTML = '<div class="empty">Нет участников</div>'; return; }
-  grid.innerHTML = participants.map(p => `
+  const sip = sipParticipants.map(p => ({ ...p, kindLabel: 'SIP/H.323' }));
+  const web = webParticipants.map(p => ({
+    id: p.id, uri: p.name, label: p.name, state: p.state,
+    muted: !p.audio_enabled, video_muted: !p.video_enabled, speaking: false,
+    web: true, isMe: me && p.id === me.id, kindLabel: 'браузер'
+  }));
+  const all = [...sip, ...web];
+  if (!all.length) { grid.innerHTML = '<div class="empty">Нет участников</div>'; return; }
+  grid.innerHTML = all.map(p => {
+    if (p.web) {
+      return `
+      <div class="tile" data-peer="${esc(p.id)}">
+        <div class="state">${esc(p.state || '')}</div>
+        <div class="flags">${p.muted ? '<span class="muted">🔇</span>' : ''}${p.video_muted ? '<span>📷✕</span>' : ''}</div>
+        ${p.isMe ? '' : `<video autoplay playsinline></video>`}
+        <div class="avatar" style="${p.isMe ? '' : 'display:none'}">${esc((p.label || '?').slice(0, 1).toUpperCase())}</div>
+        <div class="name">${esc(p.label)}${p.isMe ? ' (вы)' : ''}</div>
+        <div class="kind">браузер</div>
+      </div>`;
+    }
+    return `
     <div class="tile ${p.speaking ? 'speaking' : ''}" data-id="${p.id}">
       <div class="state">${esc(p.state)}</div>
       <div class="flags">${p.muted ? '<span class="muted">🔇</span>' : ''}${p.video_muted ? '<span>📷✕</span>' : ''}</div>
       <div class="avatar">${esc((p.uri || '?').slice(0, 1).toUpperCase())}</div>
       <div class="name" title="${esc(p.uri)}">${esc(p.uri || ('#' + p.id))}</div>
-      <div class="btns" style="position:absolute;right:8px;bottom:8px">
+      <div class="btns" style="position:absolute;right:8px;bottom:8px;z-index:2">
         ${p.state === 'incoming' ? `<button data-act="accept" data-id="${p.id}">Принять</button><button data-act="reject" data-id="${p.id}">Отклонить</button>` : ''}
         <button data-act="mute" data-id="${p.id}">${p.muted ? 'Вкл звук' : 'Мут'}</button>
         <button class="danger" data-act="hangup" data-id="${p.id}">Сброс</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderStatus() {
@@ -182,16 +339,22 @@ function renderStatus() {
 async function refresh() {
   try {
     status = await api('/status');
-    participants = status.participants || [];
+    sipParticipants = status.participants || [];
+    webParticipants = status.conference_participants || [];
+    if (me) {
+      const still = webParticipants.find(p => p.id === me.id);
+      if (!still) { me = null; $('meBadge').style.display = 'none'; $('joinOverlay').style.display = 'flex'; }
+    }
     renderStatus(); renderTiles();
-  } catch (e) { toast('Нет связи с сервером: ' + e.message); }
+  } catch (e) { console.warn('Нет связи: ' + e.message); }
 }
+
+async function conferenceRefresh() { await refresh(); syncViewers(); }
 
 async function loadDevices() {
   try {
     const d = await api('/devices/video');
-    const sel = $('videoDevices');
-    sel.innerHTML = '<option value="">Камеры…</option>' + (d.devices || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+    $('videoDevices').innerHTML = '<option value="">Камеры…</option>' + (d.devices || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
   } catch (e) { /* не критично */ }
 }
 
@@ -226,7 +389,7 @@ $('btnVidSend').onclick = () => act(() => api('/video_send', 'POST', { enabled: 
 $('btnScreen').onclick = () => act(() => api('/screen_share', 'POST', { enabled: !status.screen_share }));
 $('btnRec').onclick = () => act(() => api('/recording', 'POST', {}));
 $('btnMuteAll').onclick = () => act(() => api('/mute_all', 'POST', { audio: true }));
-$('btnHangAll').onclick = () => act(async () => { for (const p of participants) { await api('/hangup', 'POST', { id: p.id }); } });
+$('btnHangAll').onclick = () => act(async () => { for (const p of sipParticipants) { await api('/hangup', 'POST', { id: p.id }); } });
 $('layout').onchange = () => act(() => api('/layout', 'POST', { layout: $('layout').value }));
 $('videoDevices').onchange = () => { const v = $('videoDevices').value; if (v !== '') act(() => api('/video_device', 'POST', { device: Number(v) })); };
 $('videoSource').onchange = () => act(() => api('/video_source', 'POST', { kind: $('videoSource').value }));
@@ -243,74 +406,13 @@ $('grid').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const id = Number(btn.dataset.id);
-  const map = { accept: () => api('/accept', 'POST', { id }), reject: () => api('/reject', 'POST', { id }), hangup: () => api('/hangup', 'POST', { id }), mute: () => api('/mute', 'POST', { id, audio: !(participants.find(p => p.id === id) || {}).muted }) };
+  const map = { accept: () => api('/accept', 'POST', { id }), reject: () => api('/reject', 'POST', { id }), hangup: () => api('/hangup', 'POST', { id }), mute: () => api('/mute', 'POST', { id, audio: !(sipParticipants.find(p => p.id === id) || {}).muted }) };
   act(map[btn.dataset.act]);
 });
 
-let _pc = null;
-let _localStream = null;
-
-async function rtcPublish() {
-  if (!window.RTCPeerConnection) { alert('Браузер не поддерживает WebRTC'); return; }
-  if (_pc) return;
-  const hint = $('rtcHint');
-  try {
-    _localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (e) {
-    hint.textContent = 'Нет доступа к камере/микрофону: ' + e.message;
-    return;
-  }
-  _pc = new RTCPeerConnection();
-  _pc.onconnectionstatechange = () => { hint.textContent = 'WebRTC: ' + _pc.connectionState; };
-  _localStream.getTracks().forEach(t => _pc.addTrack(t, _localStream));
-  // Локальное превью публикуемого потока
-  $('localVideo').srcObject = _localStream;
-  const offer = await _pc.createOffer();
-  await _pc.setLocalDescription(offer);
-  // Ждём сбора ICE-кандидатов (упрощённо — небольшая пауза)
-  await new Promise(r => setTimeout(r, 500));
-  const resp = await api('/webrtc/offer', 'POST', { sdp: _pc.localDescription.sdp, type: _pc.localDescription.type });
-  await _pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
-  hint.textContent = 'Публикация идёт (сессия ' + resp.session + ')';
-  $('btnPublish').disabled = true;
-  $('btnUnpublish').disabled = false;
-}
-
-async function rtcUnpublish() {
-  const hint = $('rtcHint');
-  try {
-    if (_pc) { _pc.close(); _pc = null; }
-    if (_localStream) { _localStream.getTracks().forEach(t => t.stop()); _localStream = null; }
-    $('localVideo').srcObject = null;
-    hint.textContent = 'Публикация остановлена';
-  } catch (e) { hint.textContent = 'Ошибка остановки: ' + e.message; }
-  $('btnPublish').disabled = false;
-  $('btnUnpublish').disabled = true;
-}
-
-function startVideo() {
-  const img = $('localVideo');
-  const hint = $('videoHint');
-  // Предпочитаем MJPEG (плавно); иначе — редкий опрос PNG.
-  const useMjpeg = status.video_jpeg;
-  if (useMjpeg) {
-    img.src = '/api/video.mjpeg' + qs;
-    hint.textContent = 'MJPEG-поток (локальный источник)';
-  } else if (status.video_available) {
-    if (!img.dataset.poll) {
-      img.dataset.poll = '1';
-      img._t = setInterval(() => { img.src = '/api/frame.png' + qs + '&t=' + Date.now(); }, 500);
-    }
-    hint.textContent = 'PNG-обновление (~2 к/с)';
-  } else {
-    hint.textContent = 'Источник видео выключен (включите камеру/экран)';
-  }
-}
-
-$('btnPublish').onclick = () => rtcPublish().catch(e => alert(e.message));
-$('btnUnpublish').onclick = () => rtcUnpublish().catch(e => alert(e.message));
-refresh().then(startVideo); loadDevices(); loadChat(); connectEvents();
-setInterval(refresh, 3000);
+refresh(); loadDevices(); loadChat(); connectEvents();
+setInterval(() => { refresh(); }, 3000);
+setInterval(() => { if (me) syncViewers(); }, 4000);
 </script>
 </body>
 </html>
