@@ -21,6 +21,15 @@ function msSupported() {
   return !!window.mediasoupClient && !!me;
 }
 
+async function msHealth() {
+  try {
+    const st = await api('/mediasoup');
+    return !!(st && st.available);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function msAvailable() {
   try {
     const st = await api('/mediasoup');
@@ -55,6 +64,12 @@ async function msEnsureTransports() {
       iceCandidates: tp.iceCandidates, dtlsParameters: tp.dtlsParameters, sctpParameters: tp.sctpParameters });
     _msSend.on('connect', onConnect);
     _msSend.on('produce', onProduce);
+    _msSend.on('connectionstatechange', (st) => {
+      if (st === 'failed' || st === 'disconnected') {
+        $('rtcHint').textContent = 'mediasoup: транспорт ' + st + ' — переподключение…';
+        msReconnect().catch(() => {});
+      }
+    });
   }
   if (!_msRecv) {
     _msRecv = _msDevice.createRecvTransport({ id: tp.id, iceParameters: tp.iceParameters,
@@ -108,15 +123,44 @@ function _msProducerOwner(producerId) {
 }
 
 // Подписаться на всех, кого ещё не смотрим, и запомнить владельцев.
+// Устойчиво: ошибка одной подписки не роняет остальные и таймер.
 async function msSync() {
   if (!_msEnabled || !me) return;
+  let r;
   try {
-    const r = await api('/mediasoup/signal', 'POST', { action: 'producers', participant: me.id });
-    for (const p of (r.producers || [])) {
-      _msProducerMap[p.producerId] = p.participantId;
-      if (!_msConsumers[p.producerId]) await msConsume(p.producerId, p.kind);
+    r = await api('/mediasoup/signal', 'POST', { action: 'producers', participant: me.id });
+  } catch (e) {
+    $('rtcHint').textContent = 'mediasoup: связь потеряна, переподключение…';
+    try { await msReconnect(); } catch (e2) { /* остаёмся выключены */ }
+    return;
+  }
+  for (const p of (r.producers || [])) {
+    _msProducerMap[p.producerId] = p.participantId;
+    if (!_msConsumers[p.producerId]) {
+      try { await msConsume(p.producerId, p.kind); } catch (e) { /* пропускаем */ }
     }
-  } catch (e) { /* не критично */ }
+  }
+}
+
+// Переподключиться: закрыть старые транспорты и поднять заново.
+async function msReconnect() {
+  if (!_msEnabled || !me) return;
+  Object.values(_msConsumers).forEach(c => { try { c.consumer.close(); } catch (e) {} });
+  _msConsumers = {};
+  _msProducers.forEach(p => { try { p.close(); } catch (e) {} });
+  _msProducers = [];
+  try { if (_msSend) _msSend.close(); } catch (e) {}
+  try { if (_msRecv) _msRecv.close(); } catch (e) {}
+  _msSend = null; _msRecv = null;
+  await msEnsureTransports();
+  const stream = _localStream;
+  if (stream) {
+    for (const track of stream.getTracks()) {
+      try { _msProducers.push(await _msSend.produce({ track })); } catch (e) {}
+    }
+  }
+  await msSync();
+  $('rtcHint').textContent = 'mediasoup: переподключено';
 }
 
 // Включить/выключить mediasoup-режим (вместо aiortc-пути).
@@ -143,4 +187,5 @@ async function msToggle(on) {
   $('rtcHint').textContent = 'SFU: ' + (on ? 'mediasoup' : 'aiortc');
 }
 
-window.msConference = { toggle: msToggle, sync: msSync, available: msAvailable };
+window.msConference = { toggle: msToggle, sync: msSync, available: msAvailable,
+                       reconnect: msReconnect, health: msHealth };
