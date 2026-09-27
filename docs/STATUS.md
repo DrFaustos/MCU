@@ -393,6 +393,18 @@ mediasoup (`push_sip_pcm`), входящий RTP -> `on_sip_pcm`. Без pjsua2/
 `MediasoupRtpBridge.start()` при старте сервера и подключить `push_sip_pcm`
 к audio-port pjsua2 активного вызова.
 
+### 2026-09-27 — Безопасная обвязка RTP-моста SIP↔mediasoup
+
+Пункт (3) закрыт настолько, насколько можно без реального SIP-терминала.
+`WebSession` получил точку подключения RTP-моста: `mediasoup_rtp_bridge()`
+(ленивый, только при включённом mediasoup + доступном control API),
+`push_sip_pcm_to_sfu()` (PCM из SIP → mediasoup), `_on_sfu_audio` (звук из
+mediasoup → общий микс веба). При выключенном mediasoup — безопасный no-op,
+базовый режим не меняется.
+
+Тесты: `test_mediasoup_rtp_wiring.py` (4). Всего 729 passed.
+Нативная проверка «звук терминала в браузере» требует SIP-терминала/sipp.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.
