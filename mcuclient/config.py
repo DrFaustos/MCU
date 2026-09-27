@@ -140,6 +140,20 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             # Учётка TURN (общая для всех turn:-URL, если нужна).
             "turn_user": "",
             "turn_password": "",
+            # SFU mediasoup (симулкаст, масштаб): отдельный Node-процесс.
+            # См. mediasoup-sidecar/ и docs/WEB_CONTROL.md.
+            "mediasoup": {
+                "enabled": False,
+                "host": "127.0.0.1",
+                "port": 4443,
+                "token": "",
+                "workers": 0,
+                "rtc_min": 40000,
+                "rtc_max": 40100,
+                "announced_ip": "",
+                "listen_ip": "0.0.0.0",
+                "log_level": "warn",
+            },
         },
     },
 }
@@ -294,6 +308,14 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("turn_user", "turn_password"):
             if not isinstance(web.get(key, ""), str):
                 raise ConfigError(f"features.web.{key}: ожидалась строка")
+        ms = web.get("mediasoup")
+        if ms is not None:
+            if not isinstance(ms, dict):
+                raise ConfigError("features.web.mediasoup должен быть объектом")
+            _check_bool("features.web.mediasoup.enabled", ms.get("enabled", False))
+            _check_int("features.web.mediasoup.port", ms.get("port", 4443), PORT_MIN, PORT_MAX)
+            if not isinstance(ms.get("token", ""), str):
+                raise ConfigError("features.web.mediasoup.token: ожидалась строка")
 
     return raw
 

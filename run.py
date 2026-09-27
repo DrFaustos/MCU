@@ -323,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # === ШАГ 3.5: встроенный web-сервер управления ===
     web_server = _start_web_server(engine, config, h323, log)
+    # SFU mediasoup (симулкаст/масштаб) — отдельный Node-процесс.
+    mediasoup = _start_mediasoup(config, log)
 
     if args.headless:
         if args.call:
@@ -335,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not target.ok:
                 log.error("Вызов отклонён: %s", target.error)
+                _stop_mediasoup(mediasoup, log)
                 _stop_web_server(web_server, log)
                 h323_native.stop()
                 h323.stop()
@@ -369,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
                     if getattr(p.state, "value", "") == "disconnected":
                         break
             try:
+                _stop_mediasoup(mediasoup, log)
                 _stop_web_server(web_server, log)
                 h323_native.stop()
                 h323.stop()
@@ -387,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             pass
         finally:
+            _stop_mediasoup(mediasoup, log)
             _stop_web_server(web_server, log)
             h323_native.stop()
             h323.stop()
@@ -414,7 +419,34 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 2
     finally:
+        _stop_mediasoup(mediasoup, log)
         _stop_web_server(web_server, log)
+
+
+def _start_mediasoup(config, log):
+    """Поднять mediasoup-sidecar, если включён в features.web.mediasoup."""
+    try:
+        from mcuclient.mediasoup_supervisor import MediasoupSupervisor
+        sup = MediasoupSupervisor(config)
+    except Exception:  # noqa: BLE001
+        log.exception("Не удалось подготовить mediasoup-супервизор")
+        return None
+    if not sup.enabled():
+        return None
+    if sup.start():
+        log.info("mediasoup: SFU поднят (симулкаст доступен)")
+        return sup
+    log.error("mediasoup: SFU не запустился (нет Node/сайдкара?)")
+    return None
+
+
+def _stop_mediasoup(sup, log) -> None:
+    if sup is None:
+        return
+    try:
+        sup.stop()
+    except Exception:  # noqa: BLE001
+        log.exception("Ошибка остановки mediasoup")
 
 
 def _start_web_server(engine, config, h323, log):

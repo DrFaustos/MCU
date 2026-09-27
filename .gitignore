@@ -113,3 +113,9 @@ tools/h323d/build/
 # mediasoup-sidecar (Node.js): не коммитим зависимости и локальные lock-файлы
 mediasoup-sidecar/node_modules/
 mediasoup-sidecar/package-lock.json
+
+# Node.js (mediasoup-sidecar): не коммитим зависимости, только исходники
+node_modules/
+mediasoup-sidecar/node_modules/
+# Пустой корневой lock (создан случайно в корне, не нужен)
+/package-lock.json
