@@ -124,6 +124,9 @@
         <button id="btnRec">Запись</button>
         <button id="btnWebRec">Запись веб</button>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="chkMediasoup" style="width:auto;margin-right:6px">SFU mediasoup (симулкаст)</label>
+      </div>
       <div class="btns" style="margin-top:8px">
         <button id="btnMuteAll">Заглушить всех</button>
         <button id="btnHangAll">Сбросить всех</button>
@@ -409,6 +412,10 @@ $('btnVidSend').onclick = () => act(() => api('/video_send', 'POST', { enabled: 
 $('btnScreen').onclick = () => act(() => api('/screen_share', 'POST', { enabled: !status.screen_share }));
 $('btnRec').onclick = () => act(() => api('/recording', 'POST', {}));
 $('btnWebRec').onclick = () => act(() => api('/web_recording', 'POST', {}));
+// SFU: переключение между aiortc (по умолчанию) и mediasoup.
+$('chkMediasoup').onchange = (e) => {
+  if (window.msConference) window.msConference.toggle(e.target.checked).catch(err => alert(err.message));
+};
 $('btnMuteAll').onclick = () => act(() => api('/mute_all', 'POST', { audio: true }));
 $('btnHangAll').onclick = () => act(async () => { for (const p of sipParticipants) { await api('/hangup', 'POST', { id: p.id }); } });
 $('layout').onchange = () => act(() => api('/layout', 'POST', { layout: $('layout').value }));
@@ -435,5 +442,7 @@ refresh(); loadDevices(); loadChat(); connectEvents();
 setInterval(() => { refresh(); }, 3000);
 setInterval(() => { if (me) syncViewers(); }, 4000);
 </script>
+<script src="/mediasoup-client.js"></script>
+<script src="/ms-conference.js"></script>
 </body>
 </html>
