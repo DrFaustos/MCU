@@ -365,6 +365,20 @@ WebRTC через интернет/строгий NAT; в одной LAN не н
 
 Тесты: `test_mediasoup_client.py` (12), `test_mediasoup_supervisor.py` (7).
 
+### 2026-09-27 — Browser-клиент mediasoup (симулкаст) на странице
+
+Пункт (1) плана: браузер умеет работать с mediasoup как SFU. Сервер:
+`mediasoup_signaling.py` (join/connect/produce/consume/producers/layers) +
+эндпоинты `GET /api/mediasoup`, `POST /api/mediasoup/{join,leave,signal}`.
+Страница: офлайн-бандл `mediasoup-client.js` (собран esbuild, 212 КБ, без
+CDN) и `ms-conference.js` (Device, send/recv транспорты, публикация,
+consume, синхронизация). В UI — чекбокс **«SFU mediasoup»**; по умолчанию
+работает прежний aiortc-путь, mediasoup включается галочкой при
+`features.web.mediasoup.enabled=true` на сервере.
+
+Тесты: `test_mediasoup_signaling` (13), `test_mediasoup_endpoints` (5).
+Проверено вживую: статика отдаётся (200), `/api/mediasoup` отвечает.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.
