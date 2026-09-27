@@ -4,7 +4,7 @@
 какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
 до того, как трогать код. Обновлять при значимых изменениях.
 
-Дата последнего обновления: **2026-09-26 (сессия 2)**, версия проекта **0.2.33**.
+Дата последнего обновления: **2026-09-27 (сессия 3)**, версия проекта **0.2.33**.
 
 ---
 
@@ -22,6 +22,7 @@
 | Контракт остановки движка | [STOP_CONTRACT.md](STOP_CONTRACT.md) |
 | Два клиента / стенд | [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md) |
 | Web-конференция: проверка из браузера | [WEB_CONFERENCE_TEST.md](WEB_CONFERENCE_TEST.md) |
+| SFU-стек (mediasoup+coturn) | `docker/sfu/README.md` |
 | Видео/камеры | [VIDEO_STATUS.md](VIDEO_STATUS.md) |
 | История коммитов | `git log --oneline` |
 
@@ -158,6 +159,44 @@
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
+### 2.8. Микширование аудио веб-участников (MCU-стиль)
+
+`AudioMixSession` (`webrtc_sfu.py`): зритель получает **один смешанный
+аудио-трек** (голоса всех, кроме себя) вместо N треков. Использует
+`AudioMixer`. Тесты: `test_audio_mix_session`, `test_audio_mix_wiring`,
+`test_mixed_audio_track`.
+
+### 2.9. Запись web-конференции и TLS/ICE
+
+- `WebRecorder` (`web_recorder.py`): кадры `FrameHub` через FFmpeg в MP4
+  + микс в WAV; API `/api/web_recording`.
+- TLS (HTTPS) для web-панели — опционально, по умолчанию выключен
+  (`--web-tls`, `tls_utils.py`).
+- ICE (STUN/TURN) — `features.web.ice_servers`/`turn_*`; готовый coturn в
+  `docker/turn/`.
+
+### 2.10. Мост SIP/H.323 <-> WebRTC (аудио)
+
+- `SipWebAudioBridge` (`sip_web_bridge.py`) — логика; `SipAudioPort`
+  (`sip_audio_port.py`, `pjsua2.AudioMediaPort`) — нативный порт;
+  `WebSession.attach_sip_call_port` связывает их.
+- `rtp_audio.py` — G.711 (PCMU/PCMA), RTP (RFC 3550), `RtpUdpEndpoint`.
+- `mediasoup_rtp_bridge.py` — `MediasoupRtpBridge`: PlainTransport +
+  produce_plain, SIP-звук -> mediasoup и обратно.
+- `WebSession.mediasoup_rtp_bridge()`/`push_sip_pcm_to_sfu()`/`_on_sfu_audio`.
+- `sip_mock.py` — `MockSipAudioSource`: тестовый тон без терминала.
+  **TODO:** нативный hook-up `push_sip_pcm` к audio-port pjsua2 активного
+  вызова (нужен SIP-терминал/sipp для проверки).
+
+### 2.11. SFU mediasoup: сигналинг, браузер, стек одной командой
+
+- Сервер: `mediasoup_signaling.py` (join/connect/produce/consume/producers/
+  layers) + HTTP `/api/mediasoup*`; клиент `mediasoup_client.py`.
+- Браузер: офлайн-бандл `webui/mediasoup-client.js` (esbuild) и
+  `webui/ms-conference.js`; чекбокс «SFU mediasoup» на странице.
+- Супервизор: `mediasoup_supervisor.py` (запуск сайдкара, `run.py`).
+- Стек одной командой: `docker/sfu/` (mediasoup + coturn), см. README.
+
 ## 3. Грабли и известные проблемы (важно!)
 
 ### 3.1. `sleep_until_next_frame` без кадра (исправлено, `31f3767`)
@@ -198,7 +237,13 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 (для TURN-учётки), а `WebRTCManager._pc_config` раньше ждал список строк и
 делал `urls=[url]` — TURN-логин/пароль терялись. Теперь принимаются оба вида.
 
-### 3.6. Временная диагностика
+### 3.6. Ресемпл без numpy (исправлено, `9c6b6b2`)
+`_resample_mono` в `webrtc_sfu.py` при `_np is None` возвращал `b""` при
+смене частоты (8->48 кГц): SIP-звук молча пропадал в миксе. Добавлен
+pure-Python fallback (моно + линейный ресемпл); регрессия —
+`test_resample_fallback.py`.
+
+### 3.7. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные
 расходы только при DEBUG.
 
