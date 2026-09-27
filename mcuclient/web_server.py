@@ -221,6 +221,8 @@ class WebSession:
         self._web_recorder = WebRecorder(output_dir=self._recording_dir())
         self._rec_thread: Optional[threading.Thread] = None
         self._rec_stop = threading.Event()
+        # Сигналинг mediasoup (опционально): браузеры как SFU-участники.
+        self._ms_signaling = None
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -546,6 +548,69 @@ class WebSession:
         self._rec_thread = threading.Thread(target=_run, name="mcu-webrec", daemon=True)
         self._rec_thread.start()
 
+    # -- mediasoup-сигналинг (опциональный SFU) ----------------------------
+    def mediasoup_signaling(self):
+        """Ленивый MediasoupSignaling по features.web.mediasoup. Или None."""
+        if self._ms_signaling is not None:
+            return self._ms_signaling or None
+        try:
+            from .mediasoup_client import MediasoupClient
+            from .mediasoup_signaling import MediasoupSignaling
+            cfg = (self._config.web or {}).get("mediasoup", {}) if self._config else {}
+            if not cfg.get("enabled"):
+                self._ms_signaling = False
+                return None
+            host = cfg.get("host", "127.0.0.1")
+            port = cfg.get("port", 4443)
+            client = MediasoupClient(base_url=f"http://{host}:{port}",
+                                     token=str(cfg.get("token", "") or ""))
+            self._ms_signaling = MediasoupSignaling(client)
+        except Exception:  # noqa: BLE001
+            log.debug("mediasoup-сигналинг недоступен", exc_info=True)
+            self._ms_signaling = False
+        return self._ms_signaling or None
+
+    def mediasoup_available(self) -> bool:
+        sig = self.mediasoup_signaling()
+        return bool(sig and sig.available)
+
+    def mediasoup_join(self, pid: str) -> Dict[str, Any]:
+        sig = self.mediasoup_signaling()
+        if sig is None:
+            raise ApiError("mediasoup не включён", status=503)
+        try:
+            return sig.join(pid)
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(f"mediasoup join: {exc}", status=502) from exc
+
+    def mediasoup_leave(self, pid: str) -> Dict[str, Any]:
+        sig = self.mediasoup_signaling()
+        return {"ok": bool(sig and sig.leave(pid))}
+
+    def mediasoup_signal(self, action: str, pid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        sig = self.mediasoup_signaling()
+        if sig is None:
+            raise ApiError("mediasoup не включён", status=503)
+        try:
+            if action == "connect":
+                return sig.connect(pid, payload.get("dtlsParameters") or {})
+            if action == "produce":
+                return sig.produce(pid, str(payload.get("kind", "")),
+                                   payload.get("rtpParameters") or {},
+                                   payload.get("appData"))
+            if action == "consume":
+                return sig.consume(pid, str(payload.get("producerId", "")),
+                                   payload.get("rtpCapabilities") or {})
+            if action == "producers":
+                return {"ok": True, "producers": sig.list_producers(pid)}
+            if action == "layers":
+                return sig.set_layers(pid, str(payload.get("consumerId", "")),
+                                      _opt_int(payload.get("spatialLayer")),
+                                      _opt_int(payload.get("temporalLayer")))
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(f"mediasoup {action}: {exc}", status=502) from exc
+        raise ApiError(f"неизвестное действие mediasoup: {action}", status=400)
+
     def _mix_recipients(self) -> List[str]:
         """Кому отдавать микс: все веб-участники (каждый слышит всех, кроме себя)."""
         return [p["id"] for p in self.conference.participants()]
@@ -813,6 +878,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/conference":
                 self._send_json({"participants": s.conference_participants(),
                                  "webrtc": s.webrtc.available})
+            elif path == "/api/mediasoup":
+                sig = s.mediasoup_signaling()
+                self._send_json({"available": bool(sig and sig.available),
+                                 "stats": sig.stats() if sig else None})
             elif path == "/api/webrtc/sessions":
                 self._send_json({"sessions": s.webrtc_sessions(),
                                  "available": s.webrtc.available})
@@ -858,6 +927,13 @@ class _Handler(BaseHTTPRequestHandler):
             return s.set_video_device(data.get("device"))
         if path == "/api/audio_device":
             return s.set_audio_device(data.get("device"))
+        if path == "/api/mediasoup/join":
+            return s.mediasoup_join(str(data.get("participant", "")))
+        if path == "/api/mediasoup/leave":
+            return s.mediasoup_leave(str(data.get("participant", "")))
+        if path == "/api/mediasoup/signal":
+            return s.mediasoup_signal(str(data.get("action", "")),
+                                      str(data.get("participant", "")), data)
         if path == "/api/webrtc/offer":
             sub = data.get("subscribe")
             if not isinstance(sub, list):
