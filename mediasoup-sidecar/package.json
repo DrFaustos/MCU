@@ -13,6 +13,8 @@
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
-    "mediasoup": "^3.13.0"
+    "esbuild": "^0.28.2",
+    "mediasoup": "^3.13.0",
+    "mediasoup-client": "^3.18.7"
   }
 }
