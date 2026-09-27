@@ -223,9 +223,16 @@ class WebSession:
         self._rec_stop = threading.Event()
         # Сигналинг mediasoup (опционально): браузеры как SFU-участники.
         self._ms_signaling = None
+        # RTP-мост SIP/H.323 <-> mediasoup (опционально).
+        self._ms_rtp = None
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
+        try:
+            if self._ms_rtp:
+                self._ms_rtp.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("Остановка RTP-моста с ошибкой", exc_info=True)
         try:
             self._rec_stop.set()
             self._web_recorder.stop()
@@ -309,6 +316,7 @@ class WebSession:
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
             "conference_participants": self.conference.participants(),
+            "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
             "web_recording": self._web_recorder.is_recording,
         }
 
@@ -547,6 +555,52 @@ class WebSession:
 
         self._rec_thread = threading.Thread(target=_run, name="mcu-webrec", daemon=True)
         self._rec_thread.start()
+
+    # -- RTP-мост SIP/H.323 <-> mediasoup --------------------------------
+    def mediasoup_rtp_bridge(self):
+        """Ленивый RTP-мост SIP<->mediasoup (или None, если выключен).
+
+        Мост заводит SIP-аудио в mediasoup-комнату и обратно. Создаётся
+        только если mediasoup включён и control API доступен; при любой
+        ошибке возвращает None и не мешает базовому режиму.
+        """
+        if self._ms_rtp is not None:
+            return self._ms_rtp or None
+        sig = self.mediasoup_signaling()
+        if sig is None:
+            self._ms_rtp = False
+            return None
+        try:
+            from .mediasoup_rtp_bridge import MediasoupRtpBridge
+            room_id = sig.ensure_room()
+            bridge = MediasoupRtpBridge(
+                sig._client, room_id, on_sip_pcm=self._on_sfu_audio)  # noqa: SLF001
+            if not bridge.start():
+                self._ms_rtp = False
+                return None
+            self._ms_rtp = bridge
+        except Exception:  # noqa: BLE001
+            log.debug("mediasoup RTP-мост не поднялся", exc_info=True)
+            self._ms_rtp = False
+        return self._ms_rtp or None
+
+    def _on_sfu_audio(self, pcm: bytes) -> None:
+        """Звук из mediasoup (SIP-участник слышен) -> в общий микс веба."""
+        try:
+            self.conference.bus.publish_audio("sip", pcm, 8000, 1)  # G.711
+        except Exception:  # noqa: BLE001
+            log.debug("_on_sfu_audio упал", exc_info=True)
+
+    def push_sip_pcm_to_sfu(self, pcm: bytes) -> bool:
+        """Точка входа для движка: PCM из SIP/H.323 -> в mediasoup-комнату."""
+        bridge = self.mediasoup_rtp_bridge()
+        if bridge is None or not pcm:
+            return False
+        return bridge.push_sip_pcm(pcm)
+
+    def mediasoup_rtp_stats(self) -> Dict[str, Any]:
+        bridge = self.mediasoup_rtp_bridge()
+        return bridge.stats() if bridge is not None else {"started": False}
 
     # -- mediasoup-сигналинг (опциональный SFU) ----------------------------
     def mediasoup_signaling(self):
