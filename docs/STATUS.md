@@ -419,6 +419,14 @@ mediasoup → общий микс веба). При выключенном media
 
 Всего 743 passed.
 
+### 2026-09-27 — SFU-стек одной командой (mediasoup + coturn)
+
+`docker/sfu/docker-compose.yml` поднимает всё для web-конференции через
+интернет/NAT: **mediasoup** (SFU, control API только на localhost, UDP-диапазон
+медиа) и **coturn** (STUN/TURN). `docker/sfu/.env.example` — ANNOUNCED_IP,
+TURN_USER/TURN_PASSWORD; `docker/sfu/README.md` — запуск и подключение к
+`config.json`. Тесты: `test_sfu_stack.py` (6). Всего 749 passed.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

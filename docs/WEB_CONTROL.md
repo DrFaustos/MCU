@@ -303,5 +303,8 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 * Включается в `features.web.mediasoup.enabled` (по умолчанию **выкл**);  при старте приложение поднимает сайдкар дочерним процессом  (`mcuclient/mediasoup_supervisor.py`) и общается с ним по HTTP  control API (`mcuclient/mediasoup_client.py`). Медиа идёт по RTP,  через API — только управление.
 * Требует **Node.js ≥ 20** и открытый диапазон UDP `rtc_min..rtc_max`  (по умолчанию 40000-40100); для интернета — `announced_ip` и TURN.
 * Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
+* **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
+  cp .env.example .env && docker compose up -d --build` — см.
+  `docker/sfu/README.md`.
 * Запуск/проверка сайдкара: `cd mediasoup-sidecar && npm install &&  npm run smoke`.
 * Это **дополнение**, а не замена: базовый `aiortc`-SFU (микс, запись,  мост SIP↔WebRTC) продолжает работать без Node.
