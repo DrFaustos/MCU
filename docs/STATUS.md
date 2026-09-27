@@ -427,6 +427,14 @@ mediasoup → общий микс веба). При выключенном media
 TURN_USER/TURN_PASSWORD; `docker/sfu/README.md` — запуск и подключение к
 `config.json`. Тесты: `test_sfu_stack.py` (6). Всего 749 passed.
 
+### 2026-09-27 — Устойчивость mediasoup-клиента (переподключение)
+
+Страница (ms-conference.js) переживает обрыв: `msSync` при потере связи
+переподключается (не роняя таймер и остальные подписки), `msReconnect`
+закрывает транспорты/producer-ы и поднимает их заново, обрыв send-транспорта
+(`failed`/`disconnected`) запускает переподключение. Добавлены `msHealth()` и
+экспорт `msConference.reconnect/health`.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.
