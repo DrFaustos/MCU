@@ -184,7 +184,35 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
     if not pcm:
         return b""
     if _np is None:
-        return pcm if (rate == target_rate and channels == 1) else b""
+        # Pure-Python fallback: без numpy приводим к моно и частоте
+        # (нужно, если numpy не установлен; иначе SIP-звук 8 кГц
+        # терялся бы при ресемпле в 48 кГц).
+        import array
+        arr = array.array("h")
+        arr.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+        if channels > 1 and len(arr) % channels == 0:
+            mono = array.array("h", [0] * (len(arr) // channels))
+            for i in range(len(mono)):
+                acc = 0
+                for c in range(channels):
+                    acc += arr[i * channels + c]
+                mono[i] = acc // channels
+            arr = mono
+        if rate != target_rate and len(arr) > 1:
+            n = int(round(len(arr) * float(target_rate) / float(rate)))
+            if n <= 0:
+                return b""
+            out = array.array("h", [0] * n)
+            step = (len(arr) - 1) / float(n - 1) if n > 1 else 0.0
+            for i in range(n):
+                pos = i * step
+                i0 = int(pos)
+                i1 = min(i0 + 1, len(arr) - 1)
+                frac = pos - i0
+                val = arr[i0] * (1.0 - frac) + arr[i1] * frac
+                out[i] = max(-32768, min(32767, int(val)))
+            return out.tobytes()
+        return arr.tobytes() if channels == 1 else arr.tobytes()
     try:
         arr = _np.frombuffer(pcm, dtype=_np.int16)
     except Exception:  # noqa: BLE001
