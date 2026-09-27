@@ -1,0 +1,38 @@
+# Готовый TURN/STUN-сервер (coturn) для web-конференции MCU.
+#
+# Зачем: WebRTC-участники за строгим NAT (интернет, гостевой Wi-Fi) не
+# соединятся напрямую — нужен ретранслятор. В одной LAN он не нужен.
+#
+# Запуск:
+#   export TURN_EXTERNAL_IP=203.0.113.10   # ваш внешний IP/домен
+#   export TURN_USER=mcu
+#   export TURN_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f docker/turn/docker-compose.yml up -d
+#
+# Затем в config.json:
+#   "features": { "web": {
+#     "ice_servers": ["stun:203.0.113.10:3478",
+#                     "turn:203.0.113.10:3478?transport=udp"],
+#     "turn_user": "mcu",
+#     "turn_password": "<пароль выше>"
+#   }}
+#
+# Проверка: https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/
+
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: mcu-coturn
+    restart: unless-stopped
+    network_mode: host          # TURN требует широкий диапазон UDP-портов
+    environment:
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?задайте внешний IP}
+      TURN_USER: ${TURN_USER:-mcu}
+      TURN_PASSWORD: ${TURN_PASSWORD:?задайте пароль}
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --user=${TURN_USER}:${TURN_PASSWORD}

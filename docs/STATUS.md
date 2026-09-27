@@ -340,6 +340,13 @@ API: `POST /api/web_recording`, `GET /api/web_recording`, поле `web_recordin
 
 Тесты: `test_web_recorder.py` (9), `test_web_recording_wiring.py` (3).
 
+### 2026-09-27 — Готовый TURN/STUN-стек (coturn) в репозитории
+
+Ограничение «нет TURN» закрыто инфраструктурно: в `docker/turn/` лежит готовый
+coturn (docker-compose + turnserver.conf + README). Запуск одной командой, в
+`features.web.ice_servers` подставляются STUN/TURN-URL и учётка. Требуется для
+WebRTC через интернет/строгий NAT; в одной LAN не нужен.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

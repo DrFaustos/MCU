@@ -257,6 +257,8 @@ API конференции: `GET /api/conference`, `POST /api/conference/join` (
 Валидация принимает только `stun:`/`stuns:`/`turn:`/`turns:` URL; логин/пароль
 подставляются к turn/turns-записям (`Config.web_ice_servers`). Пусто — только
 LAN. TURN-сервер поднимается отдельно (coturn и т.п.) — это инфраструктура.
+Готовый coturn лежит в репозитории: `docker/turn/`
+(см. [docker/turn/README.md](../docker/turn/README.md)).
 
 ## 8. WebRTC-ingest (браузер -> MCU)
 
