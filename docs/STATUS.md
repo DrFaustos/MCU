@@ -379,6 +379,20 @@ consume, синхронизация). В UI — чекбокс **«SFU mediasoup
 Тесты: `test_mediasoup_signaling` (13), `test_mediasoup_endpoints` (5).
 Проверено вживую: статика отдаётся (200), `/api/mediasoup` отвечает.
 
+### 2026-09-27 — RTP-мост SIP/H.323 <-> mediasoup (PlainTransport)
+
+Пункт (3) плана: аппаратный SIP/H.323-терминал заводится в mediasoup-комнату.
+`mcuclient/rtp_audio.py` — G.711 (PCMU/PCMA), сборка/разбор RTP (RFC 3550),
+`RtpUdpEndpoint` (PCM<->RTP по UDP). `mcuclient/mediasoup_rtp_bridge.py` —
+`MediasoupRtpBridge`: PlainTransport + `produce_plain`, звук из pjsua2 -> RTP ->
+mediasoup (`push_sip_pcm`), входящий RTP -> `on_sip_pcm`. Без pjsua2/Node
+(внедряются). Тесты: `test_rtp_audio` (10, реальный UDP-обмен),
+`test_mediasoup_rtp_bridge` (8, реальный RTP-обмен).
+
+Осталось (нативная обвязка, нужен SIP-терминал для e2e): создать
+`MediasoupRtpBridge.start()` при старте сервера и подключить `push_sip_pcm`
+к audio-port pjsua2 активного вызова.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.
