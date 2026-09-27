@@ -109,3 +109,7 @@ tools/h323d/build/
 
 # Локальное venv для WebRTC (aiortc) — не коммитим
 .webrtc-venv/
+
+# mediasoup-sidecar (Node.js): не коммитим зависимости и локальные lock-файлы
+mediasoup-sidecar/node_modules/
+mediasoup-sidecar/package-lock.json
