@@ -43,6 +43,7 @@ from .webrtc_ingest import (
     make_frame_hub_sink,
 )
 from .webrtc_sfu import AudioMixSession, Conference
+from .web_recorder import WebRecorder
 
 log = get_logger("web")
 
@@ -211,9 +212,18 @@ class WebSession:
                                     ice_servers=self._ice_servers,
                                     audio_mix=self.audio_mix)
         self.audio_mix.start()
+        # Запись web-конференции: кадры FrameHub + смешанное аудио.
+        self._web_recorder = WebRecorder(output_dir=self._recording_dir())
+        self._rec_thread: Optional[threading.Thread] = None
+        self._rec_stop = threading.Event()
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
+        try:
+            self._rec_stop.set()
+            self._web_recorder.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("Остановка web-записи с ошибкой", exc_info=True)
         try:
             self.audio_mix.stop()
         except Exception:  # noqa: BLE001
@@ -292,6 +302,7 @@ class WebSession:
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
             "conference_participants": self.conference.participants(),
+            "web_recording": self._web_recorder.is_recording,
         }
 
     def participants(self) -> List[Dict[str, Any]]:
@@ -434,6 +445,70 @@ class WebSession:
 
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
         return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+
+    def _recording_dir(self) -> str:
+        try:
+            return str(self._config.recording_path)
+        except Exception:  # noqa: BLE001
+            return "./recordings"
+
+    def web_recording_state(self) -> Dict[str, Any]:
+        rec = self._web_recorder
+        return {
+            "recording": rec.is_recording,
+            "video": str(rec.video_path) if rec.video_path else None,
+            "audio": str(rec.audio_path) if rec.audio_path else None,
+            "frames": rec.video_frames,
+        }
+
+    def web_recording_toggle(self, enabled: Optional[bool] = None) -> Dict[str, Any]:
+        """Включить/выключить запись web-конференции."""
+        rec = self._web_recorder
+        if enabled is None:
+            ok = rec.toggle()
+        elif bool(enabled) == rec.is_recording:
+            ok = True
+        elif enabled:
+            ok = rec.start()
+            if ok:
+                self._start_rec_thread()
+        else:
+            ok = rec.stop()
+        if not ok:
+            raise ApiError("Не удалось переключить запись (нет ffmpeg?)", status=503)
+        return {"ok": True, **self.web_recording_state()}
+
+    def _start_rec_thread(self) -> None:
+        """Фоновый тик: видео из FrameHub + аудио-микс -> WebRecorder."""
+        if self._rec_thread is not None and self._rec_thread.is_alive():
+            return
+        self._rec_stop.clear()
+
+        def _run() -> None:
+            last_frame = -1
+            last_audio = -1
+            while not self._rec_stop.is_set():
+                if not self._web_recorder.is_recording:
+                    self._rec_stop.wait(0.2)
+                    continue
+                try:
+                    seq = self.frame_hub.frames
+                    if seq != last_frame:
+                        frame = self.frame_hub.latest()
+                        if frame and frame[0] is not None:
+                            rgb, w, h = frame[0], frame[1], frame[2]
+                            self._web_recorder.on_video(rgb, w, h)
+                            last_frame = seq
+                    item = self.audio_mix.record_mix()
+                    if item is not None and item[0] != last_audio:
+                        self._web_recorder.on_audio(item[1], self.audio_mix.sample_rate, 1)
+                        last_audio = item[0]
+                except Exception:  # noqa: BLE001
+                    log.debug("Тик web-записи упал", exc_info=True)
+                self._rec_stop.wait(1.0 / max(1, self._web_recorder.fps))
+
+        self._rec_thread = threading.Thread(target=_run, name="mcu-webrec", daemon=True)
+        self._rec_thread.start()
 
     def _mix_recipients(self) -> List[str]:
         """Кому отдавать микс: все веб-участники (каждый слышит всех, кроме себя)."""
@@ -697,6 +772,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"devices": s.audio_devices()})
             elif path == "/api/layouts":
                 self._send_json({"layouts": s.layouts()})
+            elif path == "/api/web_recording":
+                self._send_json(s.web_recording_state())
             elif path == "/api/conference":
                 self._send_json({"participants": s.conference_participants(),
                                  "webrtc": s.webrtc.available})
@@ -754,6 +831,8 @@ class _Handler(BaseHTTPRequestHandler):
                                   participant=str(data.get("participant", "")) or None)
         if path == "/api/webrtc/close":
             return s.webrtc_close(str(data.get("session", "")))
+        if path == "/api/web_recording":
+            return s.web_recording_toggle(_opt_bool(data.get("enabled")))
         if path == "/api/conference/join":
             return s.conference_join(str(data.get("name", "")), str(data.get("role", "participant")))
         if path == "/api/conference/leave":

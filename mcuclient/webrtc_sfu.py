@@ -313,6 +313,13 @@ class AudioMixSession:
                 self._mixed[rid] = (seq, pcm)
         return seq
 
+    def record_mix(self):
+        """Общий микс для записи: (seq, pcm) или None (все голоса)."""
+        result = self._mixer.mix()
+        pcm = _fit_frame(result.pcm, self._frame_bytes)
+        with self._lock:
+            return (self._seq, pcm)
+
     def mixed_for(self, recipient: str):
         """Последний микс для получателя: (seq, pcm) или None."""
         with self._lock:

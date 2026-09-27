@@ -330,6 +330,16 @@ fan-out зрителям создавал пустые треки. Теперь 
 Тесты: `test_audio_mix_session.py` (7), `test_audio_mix_wiring.py` (2),
 `test_mixed_audio_track.py` (2). Всего 637 passed.
 
+### 2026-09-27 — Запись web-конференции (WebRecorder)
+
+Убрано ограничение «нет записи веб-потока»: `mcuclient/web_recorder.py` пишет
+именно конференцию (кадры `FrameHub` + смешанное аудио `AudioMixSession`), а не
+экран сервера. Видео кодируется FFmpeg в MP4, аудио пишется в WAV (stdlib).
+API: `POST /api/web_recording`, `GET /api/web_recording`, поле `web_recording`
+в статусе; кнопка «Запись веб» на странице. Работает в headless.
+
+Тесты: `test_web_recorder.py` (9), `test_web_recording_wiring.py` (3).
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

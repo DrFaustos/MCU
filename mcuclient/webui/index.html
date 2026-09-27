@@ -122,6 +122,7 @@
       <div class="row">
         <select id="layout"></select>
         <button id="btnRec">Запись</button>
+        <button id="btnWebRec">Запись веб</button>
       </div>
       <div class="btns" style="margin-top:8px">
         <button id="btnMuteAll">Заглушить всех</button>
@@ -338,6 +339,8 @@ function renderStatus() {
   pj.className = 'badge ' + (status.pjsip ? 'ok' : 'err');
   $('recBadge').textContent = 'Запись: ' + (status.recording ? 'идёт' : 'выкл');
   $('recBadge').className = 'badge ' + (status.recording ? 'ok' : '');
+  const wr = $('btnWebRec');
+  if (wr) { wr.textContent = 'Запись веб: ' + (status.web_recording ? 'идёт' : 'выкл'); wr.className = status.web_recording ? 'on' : ''; }
   $('verBadge').textContent = 'v' + (status.version || '');
   $('btnCam').textContent = 'Камера: ' + (status.camera ? 'вкл' : 'выкл');
   $('btnCam').className = status.camera ? 'on' : '';
@@ -405,6 +408,7 @@ $('btnMic').onclick = () => act(() => api('/microphone', 'POST', { enabled: !sta
 $('btnVidSend').onclick = () => act(() => api('/video_send', 'POST', { enabled: !status.video_send }));
 $('btnScreen').onclick = () => act(() => api('/screen_share', 'POST', { enabled: !status.screen_share }));
 $('btnRec').onclick = () => act(() => api('/recording', 'POST', {}));
+$('btnWebRec').onclick = () => act(() => api('/web_recording', 'POST', {}));
 $('btnMuteAll').onclick = () => act(() => api('/mute_all', 'POST', { audio: true }));
 $('btnHangAll').onclick = () => act(async () => { for (const p of sipParticipants) { await api('/hangup', 'POST', { id: p.id }); } });
 $('layout').onchange = () => act(() => api('/layout', 'POST', { layout: $('layout').value }));
