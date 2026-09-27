@@ -224,7 +224,7 @@ class AudioMixSession:
 
     def __init__(self, bus: MediaBus, recipients=None, sample_rate: int = 48000,
                  frame_ms: int = 20, strategy: str = "average",
-                 mixer: Optional[AudioMixer] = None) -> None:
+                 mixer: Optional[AudioMixer] = None, on_mix=None) -> None:
         self._bus = bus
         self._recipients = recipients  # callable -> list[str] | None
         self._rate = int(sample_rate)
@@ -243,6 +243,8 @@ class AudioMixSession:
         self._seq = 0
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Колбэк общего микса: (pcm, rate, channels) — например, мост в SIP.
+        self._on_mix = on_mix
 
     # -- параметры ---------------------------------------------------------
     @property
@@ -311,6 +313,14 @@ class AudioMixSession:
             pcm = _fit_frame(result.pcm, self._frame_bytes)
             with self._lock:
                 self._mixed[rid] = (seq, pcm)
+        # Общий микс (все голоса) — наружу, например в SIP-мост.
+        if self._on_mix is not None:
+            try:
+                common = self._mixer.mix()
+                self._on_mix(_fit_frame(common.pcm, self._frame_bytes),
+                             self._rate, 1)
+            except Exception:  # noqa: BLE001
+                log.debug("on_mix упал", exc_info=True)
         return seq
 
     def record_mix(self):

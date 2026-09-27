@@ -44,6 +44,7 @@ from .webrtc_ingest import (
 )
 from .webrtc_sfu import AudioMixSession, Conference
 from .web_recorder import WebRecorder
+from .sip_web_bridge import SipWebAudioBridge
 
 log = get_logger("web")
 
@@ -203,9 +204,13 @@ class WebSession:
         # в MCU и/или принимает треки других участников с шины.
         # Микширование аудио (MCU-стиль): зритель получает ОДИН смешанный
         # аудио-трек (голоса всех, кроме себя), а не по треку на каждого.
+        # Мост SIP<->WebRTC (аудио). sip_sink задаётся движком позже
+        # (attach_sip_sink); веб-микс уходит туда через on_mix.
+        self.sip_bridge = SipWebAudioBridge(self.conference.bus)
         self.audio_mix = AudioMixSession(
             self.conference.bus,
             recipients=self._mix_recipients,
+            on_mix=self.sip_bridge.push_web_mix,
         )
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
                                     bus=self.conference.bus,
@@ -445,6 +450,17 @@ class WebSession:
 
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
         return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+
+    def attach_sip_sink(self, sink) -> None:
+        """Подключить нативный media-port SIP как приёмник веб-микса."""
+        self.sip_bridge._sip_sink = sink  # noqa: SLF001 — осознанно: точка связи
+
+    def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1) -> None:
+        """Точка входа для media-port движка: SIP-звук -> в общий микс веба."""
+        self.sip_bridge.on_sip_audio(pcm, rate, channels)
+
+    def sip_bridge_stats(self) -> Dict[str, Any]:
+        return self.sip_bridge.stats()
 
     def _recording_dir(self) -> str:
         try:
