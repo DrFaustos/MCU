@@ -85,7 +85,19 @@
       "key_file": "",
       "ice_servers": [],
       "turn_user": "",
-      "turn_password": ""
+      "turn_password": "",
+      "mediasoup": {
+        "enabled": false,
+        "host": "127.0.0.1",
+        "port": 4443,
+        "token": "",
+        "workers": 0,
+        "rtc_min": 40000,
+        "rtc_max": 40100,
+        "announced_ip": "",
+        "listen_ip": "0.0.0.0",
+        "log_level": "warn"
+      }
     }
   }
 }

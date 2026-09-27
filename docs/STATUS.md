@@ -359,6 +359,12 @@ WebRTC через интернет/строгий NAT; в одной LAN не н
 Тесты: `test_sip_audio_port.py` (8), `test_sip_port_wiring.py` (1).
 Всего 670 passed.
 
+### 2026-09-27 — Опциональный SFU mediasoup (симулкаст, масштаб)
+
+Подхвачен старт mediasoup-пути: `mediasoup-sidecar/` (Node.js + C++ worker'ы) — SFU с **симулкастом** и масштабом на несколько worker'ов, которых нет у `aiortc`. Python-сторона: `mediasoup_client.py` (control API), `mediasoup_supervisor.py` (запуск/останов дочернего процесса), конфиг `features.web.mediasoup`, старт/стоп в `run.py`. По умолчанию **выключено** — базовый `aiortc`-SFU (микс, запись, мост) работает без Node. Smoke сайдкара пройден (4 worker'а, комната, кодеки, транспорты).
+
+Тесты: `test_mediasoup_client.py` (12), `test_mediasoup_supervisor.py` (7).
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.
