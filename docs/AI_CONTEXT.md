@@ -145,6 +145,14 @@
 * **Диагностика падений (Windows)**: `report_fatal()` в `mcuclient/log.py`
   показывает MessageBox с текстом и путём к логу; `mcu-client.log` пишется
   рядом с `.exe`.
+* **Микширование аудио** (MCU-стиль): `AudioMixSession` (`webrtc_sfu.py`) —
+  зритель получает ОДИН смешанный аудио-трек (голоса всех, кроме себя);
+  использует `AudioMixer`. Тесты: `test_audio_mix_session`, `_wiring`.
+* **Запись web-конференции**: `WebRecorder` (`web_recorder.py`) — кадры
+  FrameHub через FFmpeg в MP4 + микс в WAV; API `/api/web_recording`.
+* **TURN/STUN**: `docker/turn/` (coturn + compose) для интернета/NAT.
+* **Мост SIP↔WebRTC (аудио)**: `SipWebAudioBridge` (`sip_web_bridge.py`) —
+  чистая логика; нативная обвязка media-port — TODO.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
@@ -228,9 +236,10 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
   на отдельное окно (`restart_local_preview_window`).
 - **Windows-сборка:** при падении на старте появляется MessageBox с путём к
   `mcu-client.log` (рядом с `.exe`); причина видна без консоли.
-- **WebRTC/SFU:** web-конференция работает (ingest + fan-out видео/аудио,
-  STUN/TURN), но нет: записи веб-потока, симулкаста, джиттер-буферов,
-  микширования аудио (сейчас — отдельный трек на каждого публикатора).
+- **WebRTC/SFU:** есть ingest, fan-out видео, **микширование аудио**,
+  **запись web**, TURN/STUN. Нет: **нативной обвязки SIP↔WebRTC-моста**
+  (media-port), **симулкаста**, джиттер-буферов. Симулкаст требует замены
+  SFU (mediasoup/Janus) — параллельно начат `mediasoup-sidecar/`.
 - **Видео в GUI:** известны жалобы — тайл «Своя камера» не всегда
   масштабируется под сетку, при смене устройства изображение может остаться
   старым, при муте видео показывает последний кадр. См. `VIDEO_STATUS.md`.
