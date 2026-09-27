@@ -1,0 +1,51 @@
+# Единый SFU-стек MCU: mediasoup-sidecar + coturn (STUN/TURN).
+#
+# Быстрый старт:
+#   cd docker/sfu
+#   cp .env.example .env        # впишите свой внешний IP (ANNOUNCED_IP)
+#   docker compose up -d --build
+#   docker compose logs -f mediasoup
+
+services:
+  mediasoup:
+    build:
+      context: ../..
+      dockerfile: docker/mediasoup-sidecar.Dockerfile
+    image: mcu-mediasoup:local
+    container_name: mcu-mediasoup
+    restart: unless-stopped
+    environment:
+      MCU_MEDIASOUP_HOST: "0.0.0.0"
+      MCU_MEDIASOUP_PORT: "4443"
+      MCU_MEDIASOUP_WORKERS: "${MCU_MEDIASOUP_WORKERS:-0}"
+      MCU_MEDIASOUP_RTC_MIN: "${MCU_MEDIASOUP_RTC_MIN:-40000}"
+      MCU_MEDIASOUP_RTC_MAX: "${MCU_MEDIASOUP_RTC_MAX:-40100}"
+      MCU_MEDIASOUP_ANNOUNCED_IP: "${ANNOUNCED_IP:?задайте ANNOUNCED_IP в .env}"
+      MCU_MEDIASOUP_LISTEN_IP: "0.0.0.0"
+      MEDIASOUP_LOG_LEVEL: "${MEDIASOUP_LOG_LEVEL:-warn}"
+    ports:
+      - "127.0.0.1:4443:4443"
+      - "${MCU_MEDIASOUP_RTC_MIN:-40000}-${MCU_MEDIASOUP_RTC_MAX:-40100}:${MCU_MEDIASOUP_RTC_MIN:-40000}-${MCU_MEDIASOUP_RTC_MAX:-40100}/udp"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4443/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: mcu-coturn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_EXTERNAL_IP: "${ANNOUNCED_IP:?задайте ANNOUNCED_IP в .env}"
+      TURN_USER: "${TURN_USER:-mcu}"
+      TURN_PASSWORD: "${TURN_PASSWORD:?задайте TURN_PASSWORD в .env}"
+    volumes:
+      - ../turn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --external-ip=${ANNOUNCED_IP}
+      - --user=${TURN_USER:-mcu}:${TURN_PASSWORD}
