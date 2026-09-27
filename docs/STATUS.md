@@ -347,6 +347,18 @@ coturn (docker-compose + turnserver.conf + README). Запуск одной ко
 `features.web.ice_servers` подставляются STUN/TURN-URL и учётка. Требуется для
 WebRTC через интернет/строгий NAT; в одной LAN не нужен.
 
+### 2026-09-27 — Нативный аудио-порт pjsua2 для моста SIP↔WebRTC
+
+`mcuclient/sip_audio_port.py` — `SipAudioPort` поверх `pjsua2.AudioMediaPort`:
+`onFrameReceived` (SIP -> веб, публикует PCM в шину) и `onFrameRequested`
+(веб -> SIP, отдаёт свежий микс). Создаётся с внедрённым pj-модулем, поэтому
+тестируется фейками. `WebSession.attach_sip_call_port(port)` связывает порт с
+мостом (SIP->веб и веб->SIP). Осталось: вызвать create/startTransmit из
+`sip_engine` на медиа активного вызова (нужен реальный SIP-терминал для e2e).
+
+Тесты: `test_sip_audio_port.py` (8), `test_sip_port_wiring.py` (1).
+Всего 670 passed.
+
 ### 2026-09-22 — Этап 4 (ADR-0002): раскладки видеостены
 
 Добавлен `mcuclient/vwall.py` — движок раскладок видео без OpenCV/H323Plus.

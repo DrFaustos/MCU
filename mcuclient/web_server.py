@@ -451,6 +451,26 @@ class WebSession:
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
         return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
 
+    def attach_sip_call_port(self, port) -> None:
+        """Связать нативный SipAudioPort с мостом (SIP<->Web-аудио).
+
+        Движок создаёт порт и подключает его к аудио вызова; здесь
+        направляем колбэки порта в мост: SIP->веб (on_sip_audio) и
+        веб->SIP (свежий микс из AudioMixSession).
+        """
+        try:
+            port._on_sip_audio = self.on_sip_audio  # noqa: SLF001
+
+            def _take() -> bytes:
+                item = self.audio_mix.record_mix()
+                return item[1] if item is not None else b""
+
+            port._take_web_pcm = _take  # noqa: SLF001
+            self._sip_call_port = port
+            log.info("Нативный SIP-аудио-порт подключён к мосту")
+        except Exception:  # noqa: BLE001
+            log.debug("attach_sip_call_port: не удалось связать порт", exc_info=True)
+
     def attach_sip_sink(self, sink) -> None:
         """Подключить нативный media-port SIP как приёмник веб-микса."""
         self.sip_bridge._sip_sink = sink  # noqa: SLF001 — осознанно: точка связи

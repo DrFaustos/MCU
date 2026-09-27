@@ -151,8 +151,10 @@
 * **Запись web-конференции**: `WebRecorder` (`web_recorder.py`) — кадры
   FrameHub через FFmpeg в MP4 + микс в WAV; API `/api/web_recording`.
 * **TURN/STUN**: `docker/turn/` (coturn + compose) для интернета/NAT.
-* **Мост SIP↔WebRTC (аудио)**: `SipWebAudioBridge` (`sip_web_bridge.py`) —
-  чистая логика; нативная обвязка media-port — TODO.
+* **Мост SIP↔WebRTC (аудио)**: `SipWebAudioBridge` (`sip_web_bridge.py`) +
+  `SipAudioPort` (`sip_audio_port.py`, `pjsua2.AudioMediaPort`);
+  `WebSession.attach_sip_call_port` связывает их. TODO: create/startTransmit
+  из `sip_engine` на медиа вызова (нужен SIP-терминал для e2e).
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
