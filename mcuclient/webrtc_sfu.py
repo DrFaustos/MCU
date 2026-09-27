@@ -20,7 +20,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from .audio_mixer import AudioMixer, MixerConfig, MixStrategy
 from .log import get_logger
+
+try:  # numpy есть в зависимостях; при отсутствии — деградация.
+    import numpy as _np
+except Exception:  # noqa: BLE001
+    _np = None  # type: ignore
 
 log = get_logger("sfu")
 
@@ -173,6 +179,149 @@ class MediaBus:
             return sorted(set(self._video) | set(self._audio))
 
 
+def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> bytes:
+    """Привести PCM s16 к моно и целевой частоте (numpy). Без numpy — как есть."""
+    if not pcm:
+        return b""
+    if _np is None:
+        return pcm if (rate == target_rate and channels == 1) else b""
+    try:
+        arr = _np.frombuffer(pcm, dtype=_np.int16)
+    except Exception:  # noqa: BLE001
+        return b""
+    if channels > 1 and len(arr) % channels == 0:
+        arr = arr.reshape(-1, channels).mean(axis=1)
+    if rate != target_rate and len(arr) > 1:
+        n = int(round(len(arr) * float(target_rate) / float(rate)))
+        if n <= 0:
+            return b""
+        src = _np.arange(len(arr), dtype=_np.float64)
+        dst = _np.linspace(0.0, len(arr) - 1.0, n)
+        arr = _np.interp(dst, src, arr.astype(_np.float64))
+    return _np.clip(arr, -32768, 32767).astype(_np.int16).tobytes()
+
+
+def _fit_frame(pcm: bytes, frame_bytes: int) -> bytes:
+    """Подогнать PCM под фиксированный размер кадра (добить тишиной/обрезать)."""
+    if frame_bytes <= 0 or len(pcm) == frame_bytes:
+        return pcm
+    if len(pcm) > frame_bytes:
+        return pcm[:frame_bytes]
+    return pcm + b"\x00" * (frame_bytes - len(pcm))
+
+
+class AudioMixSession:
+    """Микширует аудио веб-участников в один поток (MCU-стиль).
+
+    В отличие от fan-out (каждый зритель получает отдельный трек на каждого
+    публикатора), здесь сервер сводит голоса в **один** микс на получателя
+    и отдаёт один аудио-трек. Получатель не слышит сам себя.
+
+    Чистая логика без aiortc: периодический :meth:`tick` берёт последний PCM
+    каждого публикатора с шины, приводит к моно/целевой частоте, микширует
+    через :class:`AudioMixer` и складывает результат в ``mixed_for``.
+    """
+
+    def __init__(self, bus: MediaBus, recipients=None, sample_rate: int = 48000,
+                 frame_ms: int = 20, strategy: str = "average",
+                 mixer: Optional[AudioMixer] = None) -> None:
+        self._bus = bus
+        self._recipients = recipients  # callable -> list[str] | None
+        self._rate = int(sample_rate)
+        self._frame_bytes = max(2, int(self._rate * frame_ms / 1000) * 2)
+        if mixer is not None:
+            self._mixer = mixer
+        else:
+            try:
+                strat = MixStrategy(strategy)
+            except ValueError:
+                strat = MixStrategy.AVERAGE
+            self._mixer = AudioMixer(MixerConfig(
+                sample_rate=self._rate, channels=1, strategy=strat))
+        self._lock = threading.Lock()
+        self._mixed: Dict[str, tuple] = {}  # recipient -> (seq, pcm)
+        self._seq = 0
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    # -- параметры ---------------------------------------------------------
+    @property
+    def sample_rate(self) -> int:
+        return self._rate
+
+    @property
+    def frame_bytes(self) -> int:
+        return self._frame_bytes
+
+    # -- жизненный цикл ----------------------------------------------------
+    def start(self, interval: float = 0.02) -> None:
+        """Запустить фоновый тик микширования."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, args=(interval,),
+                                        name="mcu-audio-mix", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._thread = None
+
+    def _run(self, interval: float) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001 — тик не должен падать
+                log.debug("Ошибка тика микшера", exc_info=True)
+            self._stop.wait(max(0.005, interval))
+
+    # -- публичный API -----------------------------------------------------
+    def tick(self) -> int:
+        """Один цикл микширования. Возвращает номер версии микса."""
+        publishers = list(self._bus.publishers())
+        for pid in publishers:
+            item = self._bus.latest_audio(pid)
+            if item is None:
+                continue
+            pcm, rate, channels = item
+            mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
+            self._mixer.set_buffer(pid, mono)
+        # Убрать из микшера тех, кто больше не публикует.
+        for pid in list(self._mixer.participant_ids):
+            if pid not in publishers:
+                self._mixer.remove(pid)
+
+        recipients = self._recipients
+        if callable(recipients):
+            try:
+                rids = list(recipients())
+            except Exception:  # noqa: BLE001
+                rids = publishers
+        else:
+            rids = list(recipients) if recipients else publishers
+
+        with self._lock:
+            self._seq += 1
+            seq = self._seq
+        for rid in rids:
+            result = self._mixer.mix_for(rid)
+            pcm = _fit_frame(result.pcm, self._frame_bytes)
+            with self._lock:
+                self._mixed[rid] = (seq, pcm)
+        return seq
+
+    def mixed_for(self, recipient: str):
+        """Последний микс для получателя: (seq, pcm) или None."""
+        with self._lock:
+            return self._mixed.get(recipient)
+
+    def active_publishers(self) -> List[str]:
+        return list(self._mixer.participant_ids)
+
+
 class Conference:
     """Реестр веб-участников + шина медиа (одна комната)."""
 
@@ -261,4 +410,4 @@ class Conference:
             log.debug("on_change конференции упал", exc_info=True)
 
 
-__all__ = ["ConferenceParticipant", "MediaBus", "Conference"]
+__all__ = ["ConferenceParticipant", "MediaBus", "Conference", "AudioMixSession"]

@@ -264,7 +264,8 @@ async function subscribeTo(peer) {
   try {
     const resp = await api('/webrtc/offer', 'POST', {
       sdp: pc.localDescription.sdp, type: pc.localDescription.type,
-      role: 'viewer', subscribe: [peer.id]
+      role: 'viewer', subscribe: [peer.id],
+      participant: me ? me.id : null
     });
     await pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
   } catch (e) { /* подписка не удалась — тайл будет без видео */ }

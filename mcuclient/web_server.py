@@ -42,7 +42,7 @@ from .webrtc_ingest import (
     WebRTCManager,
     make_frame_hub_sink,
 )
-from .webrtc_sfu import Conference
+from .webrtc_sfu import AudioMixSession, Conference
 
 log = get_logger("web")
 
@@ -200,12 +200,24 @@ class WebSession:
         self.conference = Conference(on_change=self._conference_changed)
         # WebRTC-ingest (publish) + fan-out (viewer): браузер шлёт свои треки
         # в MCU и/или принимает треки других участников с шины.
+        # Микширование аудио (MCU-стиль): зритель получает ОДИН смешанный
+        # аудио-трек (голоса всех, кроме себя), а не по треку на каждого.
+        self.audio_mix = AudioMixSession(
+            self.conference.bus,
+            recipients=self._mix_recipients,
+        )
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
                                     bus=self.conference.bus,
-                                    ice_servers=self._ice_servers)
+                                    ice_servers=self._ice_servers,
+                                    audio_mix=self.audio_mix)
+        self.audio_mix.start()
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
+        try:
+            self.audio_mix.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("Остановка аудио-микшера с ошибкой", exc_info=True)
         try:
             self.webrtc.close_all()
         except Exception:  # noqa: BLE001
@@ -422,6 +434,10 @@ class WebSession:
 
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
         return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+
+    def _mix_recipients(self) -> List[str]:
+        """Кому отдавать микс: все веб-участники (каждый слышит всех, кроме себя)."""
+        return [p["id"] for p in self.conference.participants()]
 
     def _conference_changed(self) -> None:
         """Список веб-участников изменился (зацепка для событий)."""

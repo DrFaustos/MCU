@@ -191,10 +191,13 @@ class WebRTCManager:
                  aiortc_module: Optional[Any] = None,
                  ice_servers: Optional[List[str]] = None,
                  offer_timeout: float = 15.0,
-                 bus: Any = None) -> None:
+                 bus: Any = None,
+                 audio_mix: Any = None) -> None:
         self._sink = sink
         # Шина медиа: источник кадров для зрителей (fan-out).
         self._bus = bus
+        # Микшер аудио (MCU-стиль): один смешанный трек вместо N.
+        self._audio_mix = audio_mix
         self._viewer_tracks: Dict[str, List[Any]] = {}
         self._aiortc = aiortc_module if aiortc_module is not None else _default_aiortc()
         self._ice_servers = list(ice_servers or [])
@@ -291,16 +294,37 @@ class WebRTCManager:
         # Fan-out: для зрителя добавляем исходящие треки с шины.
         out_tracks: List[Any] = []
         if role == "viewer" and self._bus is not None:
+            # Видео: по треку на каждого публикатора (fan-out).
             for pid in (subscribe or []):
-                for factory in (_make_video_track, _make_audio_track):
-                    track = factory(mod, self._bus, pid)
+                track = _make_video_track(mod, self._bus, pid)
+                if track is None:
+                    continue
+                try:
+                    pc.addTrack(track)
+                    out_tracks.append(track)
+                except Exception:  # noqa: BLE001
+                    log.debug("Не удалось добавить видео-трек %s", pid, exc_info=True)
+            # Аудио: если работает микшер — ОДИН смешанный трек (голоса всех,
+            # кроме самого зрителя). Иначе — по треку на публикатора.
+            mixed = None
+            if self._audio_mix is not None and participant:
+                mixed = _make_mixed_audio_track(mod, self._audio_mix, participant)
+            if mixed is not None:
+                try:
+                    pc.addTrack(mixed)
+                    out_tracks.append(mixed)
+                except Exception:  # noqa: BLE001
+                    log.debug("Не удалось добавить микс-трек", exc_info=True)
+            else:
+                for pid in (subscribe or []):
+                    track = _make_audio_track(mod, self._bus, pid)
                     if track is None:
                         continue
                     try:
                         pc.addTrack(track)
                         out_tracks.append(track)
                     except Exception:  # noqa: BLE001
-                        log.debug("Не удалось добавить трек %s", pid, exc_info=True)
+                        log.debug("Не удалось добавить аудио-трек %s", pid, exc_info=True)
         with self._lock:
             self._viewer_tracks[sid] = out_tracks
 
@@ -464,6 +488,34 @@ def _make_video_track(mod: Any, bus: Any, pid: str, fps: int = 30) -> Any:
                 await asyncio.sleep(1.0 / max(1, fps))
 
     return _OutVideo()
+
+
+def _make_mixed_audio_track(mod: Any, audio_mix: Any, recipient: str) -> Any:
+    """Один аудио-трек зрителя: смешанный голос всех (кроме самого зрителя).
+
+    Берёт кадры из :class:`AudioMixSession.mixed_for(recipient)`. Если
+    aiortc/av недоступны — None (тогда используется fan-out по публикаторам).
+    """
+    base = getattr(mod, "AudioStreamTrack", None)
+    if base is None:
+        return None
+
+    class _MixedAudio(base):  # type: ignore[misc, valid-type]
+        kind = "audio"
+
+        async def recv(self) -> Any:
+            while True:
+                item = audio_mix.mixed_for(recipient)
+                if item is not None:
+                    seq, pcm = item
+                    if seq != getattr(self, "_last_seq", -1):
+                        frame = _pcm_to_audio_frame(mod, pcm, audio_mix.sample_rate, 1)
+                        if frame is not None:
+                            self._last_seq = seq
+                            return frame
+                await asyncio.sleep(0.02)
+
+    return _MixedAudio()
 
 
 def _make_audio_track(mod: Any, bus: Any, pid: str, rate: int = 48000) -> Any:
