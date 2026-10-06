@@ -173,3 +173,62 @@ def test_participant_ids_lists_all():
     m.set_buffer(5, _pcm([1]))
     m.set_buffer(7, _pcm([1]))
     assert sorted(m.participant_ids) == [5, 7]
+
+
+# --- Buffers of DIFFERENT length (ptime mismatch) ---------------------------
+# Разделение по времени кадра — норма: SIP-терминал шлёт 20 мс, веб-микс
+# собирается из 10 мс, тишина приходит коротким кадром. Раньше numpy-ветка
+# делала прямое `acc + arr` и падала ValueError (broadcast) посреди разговора.
+
+
+def test_mix_average_handles_unequal_buffer_lengths():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, _pcm([10000] * 160))   # 20 мс @ 8 кГц
+    mx.set_buffer(2, _pcm([20000] * 40))    # 5 мс  @ 8 кГц
+    res = mx.mix()
+    # Длинный буфер задаёт длину микса, короткий дополняется нулями.
+    assert len(res.pcm) == 160 * 2
+    out = _unpack(res.pcm)
+    assert out[0] > 0
+    # Хвост, где говорил только второй канал, не обязан быть нулём.
+    assert out[-1] != 0 or out[159] >= 0
+
+
+def test_mix_sum_clipped_handles_unequal_buffer_lengths():
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, _pcm([10000] * 160))
+    mx.set_buffer(2, _pcm([20000] * 80))
+    res = mx.mix()
+    assert len(res.pcm) == 160 * 2
+    assert _unpack(res.pcm)[0] == 30000
+
+
+def test_mix_unequal_lengths_without_numpy():
+    """Чистая Python-ветка обязана давать тот же результат, что и numpy."""
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, _pcm([1000, 2000, 3000, 4000]))
+    mx.set_buffer(2, _pcm([500, 500]))
+    expected = _unpack(mx.mix().pcm)
+    assert expected == [1500, 2500, 3000, 4000]
+
+    import mcuclient.audio_mixer as mod
+
+    saved = mod._np
+    mod._np = None
+    try:
+        mx2 = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+        mx2.set_buffer(1, _pcm([1000, 2000, 3000, 4000]))
+        mx2.set_buffer(2, _pcm([500, 500]))
+        assert _unpack(mx2.mix().pcm) == expected
+    finally:
+        mod._np = saved
+
+
+def test_mix_for_unequal_lengths_excludes_self():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, _pcm([1000] * 320))
+    mx.set_buffer(2, _pcm([9000] * 80))
+    res = mx.mix_for(1)
+    # Для первого участника — только второй канал, коротких хвостов нет.
+    assert len(res.pcm) == 80 * 2
+    assert _unpack(res.pcm)[0] == 9000

@@ -9,10 +9,23 @@
     "transport": "udp",
     "allowed_peers": [],
     "require_encryption": false,
+    "srtp": "",
+    "max_calls": 16,
     "auto_answer": true,
     "stun": {
       "server": "",
       "enable_ice": true
+    },
+    "nat": {
+      "public_address": "",
+      "turn_server": "",
+      "turn_user": "",
+      "turn_password": "",
+      "turn_transport": "udp",
+      "keep_alive_sec": 15,
+      "rewrite_contact": true,
+      "ice_trickle": "off",
+      "report_nat_type_in_sdp": 1
     },
     "codecs": {
       "audio": [

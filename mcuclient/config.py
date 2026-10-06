@@ -20,6 +20,15 @@ BANDWIDTH_MIN, BANDWIDTH_MAX = 128, 1_000_000
 VIDEO_DIM_MIN, VIDEO_DIM_MAX = 16, 7680
 VIDEO_FPS_MIN, VIDEO_FPS_MAX = 1, 120
 SUPPORTED_TRANSPORTS = ("udp", "tcp", "tls")
+# SRTP: '' = авто (по require_encryption), иначе явный режим.
+SRTP_MODES = ("", "off", "optional", "mandatory")
+# Trickle ICE: аппаратные ВКС-терминалы (Polycom/Sony/Cisco) его часто не
+# понимают, поэтому по умолчанию выключен.
+ICE_TRICKLE_MODES = ("off", "half", "full")
+TURN_TRANSPORTS = ("udp", "tcp", "tls")
+# PJSUA_MAX_CALLS в типовой сборке = 32; больше — только пересборкой PJSIP.
+PJSUA_MAX_CALLS_DEFAULT = 32
+MAX_CALLS_HARD_LIMIT = 64
 
 
 def default_recording_dir() -> Path:
@@ -46,11 +55,48 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "transport": "udp",
         "allowed_peers": [],
         "require_encryption": False,
+        # Шифрование медиа (SRTP). Для совместимости с аппаратным парком
+        # важен ТРЕТЬИЙ режим:
+        #  * "off"        — всегда RTP/AVP (терминалы без SRTP);
+        #  * "optional"   — отвечать a=crypto, если терминал их предложил,
+        #                   иначе RTP. Единственный режим, который принимает
+        #                   и Polycom с включённым SRTP, и старый H.323-шлюз
+        #                   без шифрования, не роняя звонок;
+        #  * "mandatory"  — только SRTP (иначе вызов без медиа).
+        # "" (пусто) — историческое поведение: mandatory если
+        # require_encryption=true, иначе off.
+        "srtp": "",
+        # Ключ PJSUA_MAX_CALLS: в типовой сборке 4! Без явного значения
+        # пятый участник получает 488/503 — для MCU это жёсткий потолок.
+        "max_calls": 16,
         "auto_answer": True,
         # Headless/сервер: использовать null-аудиоустройство PJSIP (нет реального звука).
         "null_audio": False,
         # NAT traversal: STUN-сервер и включение ICE (PJSIP).
         "stun": {"server": "", "enable_ice": True},
+        # NAT/ICE/TURN уровня УЧЁТНОЙ ЗАПИСИ. Здесь, а не в uaConfig, потому
+        # что в pjsua2 2.16 у UaConfig НЕТ enableIce/turn: настройка ICE в
+        # uaConfig — тихий no-op (см. sip_engine._configure_account_nat).
+        "nat": {
+            # Публичный адрес для SDP/Contact, когда STUN недоступен
+            # (закрытый контур, статичный NAT). Пусто — адрес learn'ится из STUN/ICE.
+            "public_address": "",
+            # TURN для медиа (SIP-сторона). turn:-URL без схемы не пишем.
+            "turn_server": "",
+            "turn_user": "",
+            "turn_password": "",
+            "turn_transport": "udp",
+            # Periodic keep-alive: без него NAT-binding протухает через
+            # 30-60 c и вызов «умирает без звука» уже после CONFIRMED.
+            "keep_alive_sec": 15,
+            # Переписывать Contact по публичному адресу (для входящих за NAT).
+            "rewrite_contact": True,
+            # Trickle ICE: off (аппаратные терминалы) | half | full (веб).
+            "ice_trickle": "off",
+            # 0 — не печатать NAT type в SDP, 1 — номер, 2 — номер+имя
+            # (2 удобно для разбора логов от Polycom/Sony).
+            "report_nat_type_in_sdp": 1,
+        },
         "codecs": {
             # Порядок = приоритет (сначала сверху). Набор подобран для
             # максимальной совместимости с парком ВКС Polycom/Sony и
@@ -217,7 +263,47 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             f"sip.transport: '{transport}' не поддерживается, ожидается одно из {SUPPORTED_TRANSPORTS}"
         )
     _check_bool("sip.require_encryption", sip.get("require_encryption"))
+    srtp = sip.get("srtp", "")
+    if not isinstance(srtp, str) or srtp.strip().lower() not in SRTP_MODES:
+        raise ConfigError(
+            f"sip.srtp: '{srtp}' не поддерживается, "
+            f"ожидается одно из ('off', 'optional', 'mandatory') или '' (авто)"
+        )
+    _check_int("sip.max_calls", sip.get("max_calls", 16), 1, MAX_CALLS_HARD_LIMIT)
     _check_bool("sip.auto_answer", sip.get("auto_answer"))
+    nat = sip.get("nat")
+    if nat is not None:
+        if not isinstance(nat, dict):
+            raise ConfigError("sip.nat должен быть объектом")
+        for key in ("public_address", "turn_server", "turn_user", "turn_password"):
+            if not isinstance(nat.get(key, ""), str):
+                raise ConfigError(f"sip.nat.{key}: ожидалась строка")
+        public_address = str(nat.get("public_address", "") or "").strip()
+        if public_address:
+            try:
+                ipaddress.ip_address(public_address)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"sip.nat.public_address: '{public_address}' — ожидается IP-адрес"
+                ) from exc
+        tt = str(nat.get("turn_transport", "udp")).lower()
+        if tt not in TURN_TRANSPORTS:
+            raise ConfigError(
+                f"sip.nat.turn_transport: '{tt}' не поддерживается, "
+                f"ожидается одно из {TURN_TRANSPORTS}"
+            )
+        if nat.get("turn_server") and not nat.get("turn_server", "").strip():
+            raise ConfigError("sip.nat.turn_server: непустая строка или пусто")
+        trickle = str(nat.get("ice_trickle", "off")).lower()
+        if trickle not in ICE_TRICKLE_MODES:
+            raise ConfigError(
+                f"sip.nat.ice_trickle: '{trickle}' не поддерживается, "
+                f"ожидается одно из {ICE_TRICKLE_MODES}"
+            )
+        _check_int("sip.nat.keep_alive_sec", nat.get("keep_alive_sec", 15), 0, 600)
+        _check_bool("sip.nat.rewrite_contact", nat.get("rewrite_contact", True))
+        _check_int("sip.nat.report_nat_type_in_sdp",
+                   nat.get("report_nat_type_in_sdp", 1), 0, 2)
     _check_bool("sip.null_audio", sip.get("null_audio"))
     stun = sip.get("stun")
     if not isinstance(stun, dict):
@@ -420,7 +506,51 @@ class Config:
 
     @property
     def require_encryption(self) -> bool:
-        return bool(self.raw["sip"].get("require_encryption", False))
+        """Совместимость: legacy bool-флаг == режим SRTP 'mandatory'."""
+        return self.srtp == "mandatory"
+
+    @property
+    def srtp(self) -> str:
+        """Режим SRTP: 'off' | 'optional' | 'mandatory' (авто по legacy-флагу)."""
+        raw = str(self.raw["sip"].get("srtp", "") or "").strip().lower()
+        if raw:
+            return raw
+        return "mandatory" if self.raw["sip"].get("require_encryption") else "off"
+
+    @property
+    def max_calls(self) -> int:
+        return int(self.raw["sip"].get("max_calls", 16))
+
+    @property
+    def nat(self) -> Dict[str, Any]:
+        """Секция sip.nat со значениями по умолчанию."""
+        base = dict(DEFAULT_CONFIG["sip"]["nat"])
+        base.update(self.raw["sip"].get("nat", {}) or {})
+        return base
+
+    @property
+    def nat_public_address(self) -> str:
+        return str(self.nat.get("public_address", "") or "").strip()
+
+    @property
+    def turn_server(self) -> str:
+        return str(self.nat.get("turn_server", "") or "").strip()
+
+    @property
+    def turn_configured(self) -> bool:
+        return bool(self.turn_server)
+
+    @property
+    def turn_transport(self) -> str:
+        return str(self.nat.get("turn_transport", "udp")).lower()
+
+    @property
+    def keep_alive_sec(self) -> int:
+        return int(self.nat.get("keep_alive_sec", 15))
+
+    @property
+    def ice_trickle(self) -> str:
+        return str(self.nat.get("ice_trickle", "off")).lower()
 
     @property
     def null_audio(self) -> bool:

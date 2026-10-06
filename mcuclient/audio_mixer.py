@@ -101,6 +101,36 @@ def rms_level(pcm: bytes) -> float:
     return (acc / n) ** 0.5
 
 
+def _aligned_int16_sum(np_mod, buffers: Dict[int, bytes], ids: List[int], dtype):
+    """Sum int16 PCM buffers of DIFFERENT lengths (zero-padded to the longest).
+
+    Разная длина — норма, а не экзотика: ptime у терминалов разный (20/30 мс),
+    веб-микс собирается из фреймов 10 мс, а SIP-фрейм — 20 мс, плюс тишина
+    приходит коротким кадром. Прямое `acc + arr` на этом падает (numpy
+    broadcast ValueError) и рвёт аудио-мост посреди разговора, поэтому
+    выравнивание делаем ЯВНО.
+
+    :param np_mod: импортированный numpy.
+    :param dtype: накапливающий тип (float64 для среднего, int32 для суммы).
+    :return: накопленный массив или None, если данных нет.
+    """
+    arrays = []
+    for pid in ids:
+        pcm = buffers.get(pid) or b""
+        if not pcm:
+            continue
+        arrays.append(np_mod.frombuffer(pcm, dtype=np_mod.int16).astype(dtype))
+    if not arrays:
+        return None
+    length = max(int(a.size) for a in arrays)
+    if length == 0:
+        return None
+    acc = np_mod.zeros(length, dtype=dtype)
+    for a in arrays:
+        acc[: a.size] += a
+    return acc
+
+
 class AudioMixer:
     """Mixes PCM of several participants into one stream for each.
 
@@ -181,10 +211,7 @@ class AudioMixer:
 
     def _sum_scaled(self, buffers: Dict[int, bytes], ids: List[int], divisor: int) -> bytes:
         if _np is not None:
-            acc = None
-            for pid in ids:
-                arr = _np.frombuffer(buffers[pid], dtype=_np.int16).astype(_np.float64)
-                acc = arr if acc is None else acc + arr
+            acc = _aligned_int16_sum(_np, buffers, ids, _np.float64)
             if acc is None:
                 return b""
             acc = acc / max(1, divisor)
@@ -218,10 +245,7 @@ class AudioMixer:
 
     def _sum_and_clip(self, buffers: Dict[int, bytes], ids: List[int]) -> bytes:
         if _np is not None:
-            acc = None
-            for pid in ids:
-                arr = _np.frombuffer(buffers[pid], dtype=_np.int16).astype(_np.int32)
-                acc = arr if acc is None else acc + arr
+            acc = _aligned_int16_sum(_np, buffers, ids, _np.int32)
             if acc is None:
                 return b""
             return _np.clip(acc, -32768, 32767).astype(_np.int16).tobytes()

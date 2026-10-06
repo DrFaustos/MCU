@@ -57,6 +57,28 @@ PJMEDIA_EAUD_MARKERS = (
     "audio device",
 )
 
+# Имена констант pjsua2 для режимов SRTP / Trickle ICE / TURN-транспорта.
+# Держим ИМЕНА, а не числа: порядок enum'ов различается между сборками PJSIP.
+SRTP_CONST_BY_MODE = {
+    "off": "PJMEDIA_SRTP_DISABLED",
+    "optional": "PJMEDIA_SRTP_OPTIONAL",
+    "mandatory": "PJMEDIA_SRTP_MANDATORY",
+}
+ICE_TRICKLE_CONST_BY_MODE = {
+    "off": "PJ_ICE_SESS_TRICKLE_DISABLED",
+    "half": "PJ_ICE_SESS_TRICKLE_HALF",
+    "full": "PJ_ICE_SESS_TRICKLE_FULL",
+}
+TURN_TRANSPORT_CONST_BY_NAME = {
+    "udp": "PJ_TURN_TP_UDP",
+    "tcp": "PJ_TURN_TP_TCP",
+    "tls": "PJ_TURN_TP_TLS",
+}
+# Значения по умолчанию, если константа в сборке отсутствует.
+SRTP_DEFAULT_BY_MODE = {"off": 0, "optional": 1, "mandatory": 2}
+ICE_TRICKLE_DEFAULT_BY_MODE = {"off": 0, "half": 1, "full": 2}
+TURN_TRANSPORT_DEFAULT_BY_NAME = {"udp": 17, "tcp": 6, "tls": 56}
+
 # Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
 # _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости.
 from .pjsip_adapter import (  # noqa: F401
@@ -179,6 +201,78 @@ def _pj_error_reason(exc: BaseException) -> str:
             parts.append(exc.__class__.__name__)
 
     return " | ".join(parts) or exc.__class__.__name__
+
+
+# --- Маппинг конфигованных строк в константы pjsua2 --------------------------
+# Чистые функции: принимают модуль pjsua2 (или None/заглушку) и возвращают
+# enum-значение. Вынесены из методов движка, чтобы их можно было тестировать
+# без нативной библиотеки и на сборках с отсутствующими константами.
+
+
+def _pj_enum(pj_module, name: Optional[str], default: int) -> int:
+    """Достать enum pjsua2 по имени; при отсутствии — безопасный default.
+
+    Разные сборки PJSIP (в т.ч. Windows-сборки из PyPI и self-built) имеют
+    разный набор констант, а значения enum'ов не гарантированно совпадают,
+    поэтому читаем ИМЯ, а не захардкоженное число.
+    """
+    if pj_module is None or not name:
+        return int(default)
+    value = getattr(pj_module, name, None)
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):  # pragma: no cover
+        return int(default)
+
+
+def srtp_use_value(pj_module, mode: str) -> int:
+    """Значение AccountConfig.mediaConfig.srtpUse для режима SRTP.
+
+    'optional' — ключевой режим для смешанного парка: терминал с SRTP
+    получит SRTP, терминал без него — обычный RTP, звонок не рвётся.
+    """
+    key = (mode or "off").strip().lower()
+    name = SRTP_CONST_BY_MODE.get(key, SRTP_CONST_BY_MODE["off"])
+    return _pj_enum(pj_module, name, SRTP_DEFAULT_BY_MODE.get(key, 0))
+
+
+def ice_trickle_value(pj_module, mode: str) -> int:
+    """Значение natConfig.iceTrickle для режима Trickle ICE."""
+    key = (mode or "off").strip().lower()
+    name = ICE_TRICKLE_CONST_BY_MODE.get(key, ICE_TRICKLE_CONST_BY_MODE["off"])
+    return _pj_enum(pj_module, name, ICE_TRICKLE_DEFAULT_BY_MODE.get(key, 0))
+
+
+def turn_conn_type(pj_module, transport: str) -> int:
+    """Значение natConfig.turnConnType для TURN-транспорта."""
+    key = (transport or "udp").strip().lower()
+    name = TURN_TRANSPORT_CONST_BY_NAME.get(key, TURN_TRANSPORT_CONST_BY_NAME["udp"])
+    return _pj_enum(pj_module, name, TURN_TRANSPORT_DEFAULT_BY_NAME.get(key, 17))
+
+
+def normalize_turn_server(value: str) -> str:
+    """TURN-адрес в формате, который ждёт pjsua2: "HOST:PORT" без схемы.
+
+    В pjsua2 `natConfig.turnServer` документируется как "DOMAIN:PORT" —
+    строка вида `turn:host:3478?transport=udp` (формат STUN-URI) будет
+    проглочена молча, ICE просто не поднимет relay-кандидат. Поэтому
+    схему срезаем, порт подставляем по умолчанию.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    for scheme in ("turns:", "turn:", "stuns:", "stun:"):
+        if raw.lower().startswith(scheme):
+            raw = raw[len(scheme):]
+            break
+    raw = raw.split("?", 1)[0].strip()
+    if not raw:
+        return ""
+    if ":" not in raw:
+        raw = f"{raw}:3478"
+    return raw
 
 
 class SipEngine:
@@ -325,10 +419,13 @@ class SipEngine:
             pjsip=is_available(),
         )
         log.info(
-            "Движок запущен: %s:%d, комната '%s', pjsip=%s, шифрование=%s, раскладка=%s",
+            "Движок запущен: %s:%d, комната '%s', pjsip=%s, SRTP=%s, раскладка=%s",
             self.config.sip_listen, self.config.sip_port,
             self.room.name if self.room else "-", is_available(),
-            "вкл" if self.config.require_encryption else "выкл",
+            # Печатаем именно режим, а не вкл/выкл: 'optional' и 'mandatory'
+            # выглядят по-разному в логах поддержки, и это первый вопрос при
+            # разборе "терминал не слышно".
+            self.config.srtp,
             self._layout.layout,
         )
         if self.config.virtual_camera_enabled:
@@ -441,18 +538,112 @@ class SipEngine:
         self._start_account(ep)
 
     def _configure_nat(self, ep_cfg) -> None:  # pragma: no cover
-        """Настраивает STUN и ICE в uaConfig для работы через NAT."""
+        """Настраивает STUN, потолок вызовов и natTypeInSdp в uaConfig.
+
+        ВАЖНО: в pjsua2 2.16 у UaConfig НЕТ полей enableIce/turn — ICE и TURN
+        настраиваются ТОЛЬКО на уровне учётной записи (AccountConfig.natConfig,
+        см. :meth:`_configure_account_nat`). Запись `ua.enableIce = True`
+        здесь молча создавала бы Python-атрибут и ничего бы не включала;
+        поэтому пишем поле только если оно реально существует в сборке, а
+        основной путь — natConfig.
+        """
         ua = getattr(ep_cfg, "uaConfig", None)
         if ua is None:
             return
+        # Потолок одновременных вызовов. В типовой сборке PJSUA_MAX_CALLS=32
+        # (иногда 4): без явного значения пятый участник получает 488/503.
+        max_calls = int(self.config.max_calls)
+        if hasattr(ua, "maxCalls"):
+            try:
+                ua.maxCalls = max_calls
+                log.info("Лимит одновременных вызовов: %d", max_calls)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("uaConfig.maxCalls не применён (%d): %s", max_calls, exc)
         server = self.config.stun_server
         if server and hasattr(ua, "stunServer"):
             ua.stunServer = server
             log.info("STUN-сервер: %s", server)
+        # natTypeInSdp: 0 — не печатать, 1 — номер типа NAT, 2 — номер+имя.
+        # Номера в логах терминалов (Polycom/Sony) сильно ускоряют разбор
+        # "звук в одну сторону": NAT_TYPE symmetric (5) vs open (1).
+        report = int(self.config.nat.get("report_nat_type_in_sdp", 1))
+        if hasattr(ua, "natTypeInSdp"):
+            try:
+                ua.natTypeInSdp = report
+            except Exception as exc:  # noqa: BLE001
+                log.debug("uaConfig.natTypeInSdp не применён: %s", exc)
         ice = self.config.ice_enabled
         if hasattr(ua, "enableIce"):
             ua.enableIce = bool(ice)
-            log.info("ICE: %s", "вкл" if ice else "выкл")
+            log.info("ICE (uaConfig): %s", "вкл" if ice else "выкл")
+
+    def _configure_account_nat(self, acc_cfg) -> None:  # pragma: no cover
+        """Прошивает ICE/TURN/keep-alive/public_address в AccountConfig.
+
+        Единственное место, где ICE и TURN вообще работают в pjsua2 2.16.
+        Всё оборачивается в try/except: набор полей natConfig различается
+        между сборками, а отсутствие опции не должно ронять регистрацию.
+        """
+        nat = self.config.nat
+        nat_cfg = getattr(acc_cfg, "natConfig", None)
+        if nat_cfg is not None:
+            ice = bool(self.config.ice_enabled)
+            try:
+                if hasattr(nat_cfg, "iceEnabled"):
+                    nat_cfg.iceEnabled = ice
+                if hasattr(nat_cfg, "iceTrickle"):
+                    nat_cfg.iceTrickle = ice_trickle_value(_pj, str(nat.get("ice_trickle", "off")))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("natConfig ICE не применён: %s", exc)
+            # TURN: включаем только если задан сервер — иначе pjsua2
+            # пытается резолвить пустой хост и тормозит установку медиа.
+            turn = normalize_turn_server(self.config.turn_server)
+            try:
+                if hasattr(nat_cfg, "turnEnabled"):
+                    nat_cfg.turnEnabled = bool(turn)
+                if turn:
+                    nat_cfg.turnServer = turn
+                    nat_cfg.turnUserName = str(nat.get("turn_user", "") or "")
+                    nat_cfg.turnPassword = str(nat.get("turn_password", "") or "")
+                    if hasattr(nat_cfg, "turnConnType"):
+                        nat_cfg.turnConnType = turn_conn_type(_pj, self.config.turn_transport)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("natConfig TURN не применён: %s", exc)
+            # Keep-alive: без него NAT-binding протухает за 30-60 c и звонок
+            # «умирает без звука» уже после CONFIRMED.
+            keep_alive = int(nat.get("keep_alive_sec", 15) or 0)
+            try:
+                if hasattr(nat_cfg, "udpKaIntervalSec"):
+                    nat_cfg.udpKaIntervalSec = keep_alive
+            except Exception as exc:  # noqa: BLE001
+                log.debug("natConfig.udpKaIntervalSec не применён: %s", exc)
+            try:
+                if hasattr(nat_cfg, "contactRewriteUse"):
+                    nat_cfg.contactRewriteUse = 1 if bool(nat.get("rewrite_contact", True)) else 0
+            except Exception as exc:  # noqa: BLE001
+                log.debug("natConfig.contactRewriteUse не применён: %s", exc)
+            log.info(
+                "NAT(аккаунт): ICE=%s trickle=%s TURN=%s ka=%ds contact_rewrite=%s",
+                ice,
+                nat.get("ice_trickle", "off"),
+                turn or "нет",
+                keep_alive,
+                bool(nat.get("rewrite_contact", True)),
+            )
+        # Публичный адрес для SDP/Contact: нужен, когда STUN недоступен
+        # (закрытый контур, статичный NAT 1:1). Пишем в mediaConfig.
+        # transportConfig — единственный способ сказать pjsua2 внешний адрес
+        # без STUN; STUN при этом остаётся включённым и просто не найдёт сервер.
+        public_address = self.config.nat_public_address
+        if public_address:
+            try:
+                media_cfg = getattr(acc_cfg, "mediaConfig", None)
+                tc = getattr(media_cfg, "transportConfig", None) if media_cfg else None
+                if tc is not None and hasattr(tc, "publicAddress"):
+                    tc.publicAddress = public_address
+                    log.info("Публичный адрес медиа (SDP): %s", public_address)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("public_address '%s' не применён: %s", public_address, exc)
 
     @staticmethod
     def _transport_type(name: str):  # pragma: no cover
@@ -622,12 +813,20 @@ class SipEngine:
                 )
             except Exception as exc:  # noqa: BLE001
                 log.debug("videoConfig недоступен: %s", exc)
+        # SRTP. Три режима, а не два: 'optional' — единственный вариант,
+        # при котором и Polycom с включённым SRTP, и старый шлюз без
+        # шифрования остаются в звонке. Значение берём ИМЕНЕМ константы,
+        # т.к. в разных сборках pjsua2 числа enum'ов не совпадают.
         media_cfg = getattr(acc_cfg, "mediaConfig", None)
-        if media_cfg is not None and hasattr(_pj, "PJMEDIA_SRTP_DISABLED"):
-            if self.config.require_encryption:
-                media_cfg.srtpUse = _pj.PJMEDIA_SRTP_MANDATORY
-            else:
-                media_cfg.srtpUse = _pj.PJMEDIA_SRTP_DISABLED
+        srtp_mode = self.config.srtp
+        if media_cfg is not None and hasattr(media_cfg, "srtpUse"):
+            try:
+                media_cfg.srtpUse = srtp_use_value(_pj, srtp_mode)
+                log.info("SRTP: режим '%s' -> srtpUse=%d", srtp_mode, media_cfg.srtpUse)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("SRTP '%s' не применён: %s", srtp_mode, exc)
+        # ICE/TURN/keep-alive — на уровне аккаунта (в uaConfig их нет).
+        self._configure_account_nat(acc_cfg)
         self._acc_cfg = acc_cfg
         self._account = _Account()
         self._account.create(acc_cfg)

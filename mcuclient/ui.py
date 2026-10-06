@@ -1582,7 +1582,14 @@ if QT_AVAILABLE:
                     self.statusBar().showMessage(f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000)
                 elif event == "engine.started":
                     mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
-                    enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"
+                    # Показываем режим SRTP, а не вкл/выкл: 'optional'
+                    # (шифруем, если терминал предложил) оператор должен
+                    # видеть именно так, иначе "выкл" вводит в заблуждение.
+                    srtp_label = {
+                        "mandatory": "SRTP обязателен",
+                        "optional": "SRTP по запросу",
+                    }.get(self.config.srtp, "SRTP выкл")
+                    enc = f"[{srtp_label}]"
                     self.statusBar().showMessage(
                         f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode} {enc}"
                     )
