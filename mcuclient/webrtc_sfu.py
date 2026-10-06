@@ -358,6 +358,16 @@ class AudioMixSession:
         with self._lock:
             return (self._seq, pcm)
 
+    def mix_excluding(self, publisher: str) -> bytes:
+        """Микс всех, КРОМЕ одного публикатора (20 мс, моно, sample_rate).
+
+        Нужно мосту в SIP: терминал не должен получать обратно собственный
+        голос. :meth:`record_mix` отдаёт микс со всеми, здесь — вычитаем
+        конкретного публикатора из шины (SIP идёт под фиксированным id).
+        """
+        result = self._mixer.mix_for(publisher)
+        return _fit_frame(result.pcm, self._frame_bytes)
+
     def mixed_for(self, recipient: str):
         """Последний микс для получателя: (seq, pcm) или None."""
         with self._lock:

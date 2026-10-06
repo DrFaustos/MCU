@@ -180,13 +180,18 @@
 - `SipWebAudioBridge` (`sip_web_bridge.py`) — логика; `SipAudioPort`
   (`sip_audio_port.py`, `pjsua2.AudioMediaPort`) — нативный порт;
   `WebSession.attach_sip_call_port` связывает их.
+- `SipBridgeService` (`sip_bridge_service.py`) — **рантайм-обвязка**: поднимает
+  порты ровно по числу живых вызовов, подключает их к `call.getAudioMedia(-1)`
+  в обе стороны и льёт PCM в общий микс панели и в RTP-мост mediasoup.
+  Поднимает/гасит `WebServer` вместе с панелью (`_start_sip_bridge`), поэтому
+  тракт работает сам, а не только в тестах. Без pjsua2 — тихий no-op.
+  Микс для терминала — `WebSession.web_mix_for_sip()` (все, КРОМЕ `sip`:
+  иначе терминал слышит собственный голос).
 - `rtp_audio.py` — G.711 (PCMU/PCMA), RTP (RFC 3550), `RtpUdpEndpoint`.
 - `mediasoup_rtp_bridge.py` — `MediasoupRtpBridge`: PlainTransport +
   produce_plain, SIP-звук -> mediasoup и обратно.
 - `WebSession.mediasoup_rtp_bridge()`/`push_sip_pcm_to_sfu()`/`_on_sfu_audio`.
 - `sip_mock.py` — `MockSipAudioSource`: тестовый тон без терминала.
-  **TODO:** нативный hook-up `push_sip_pcm` к audio-port pjsua2 активного
-  вызова (нужен SIP-терминал/sipp для проверки).
 
 ### 2.11. SFU mediasoup: сигналинг, браузер, стек одной командой
 
@@ -277,6 +282,14 @@ Python не перехватывает. Аудит согласованных к
 «терминал соединился, но звука нет» (Sony/Polycom, Windows-wheel) возвращается.
 Регрессии — `tests/test_sip_engine_media_state.py` (9).
 
+### 3.13. Тест с `monkeypatch` проходит под pytest и падает под раннером
+Тесты жизненного цикла моста SIP (`test_web_server_*`) принимали pytest-
+фикстуру `monkeypatch`: под `pytest` зелёные, под обязательным
+`tests/_runner.py` — 4 падения, потому что раннер передаёт только `tmp_path`.
+Проверять обязательно раннером (`python3 tests/_runner.py`), а не только
+pytest'ом. Фикстуры в раннер не заводим; подмена атрибутов — собственным
+контекстным хелпером `_patched(obj, name, value)` в тестовом модуле.
+
 ### 3.7. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные
 расходы только при DEBUG.
@@ -316,9 +329,11 @@ Python не перехватывает. Аудит согласованных к
 - **Windows-сборка:** при падении на старте появляется MessageBox с путём к
   `mcu-client.log` (рядом с `.exe`); причина видна без консоли.
 - **WebRTC/SFU:** есть ingest, fan-out видео, **микширование аудио**,
-  **запись web**, TURN/STUN. Нет: **нативной обвязки SIP↔WebRTC-моста**
-  (media-port), **симулкаста**, джиттер-буферов. Симулкаст требует замены
-  SFU (mediasoup/Janus) — параллельно начат `mediasoup-sidecar/`.
+  **запись web**, TURN/STUN, **нативная обвязка SIP↔WebRTC-моста**
+  (`sip_bridge_service.py`, поднимается сама). Нет: **симулкаста**,
+  джиттер-буферов, прогона SIP↔веб живым терминалом (пока только фейки).
+  Симулкаст требует замены SFU (mediasoup/Janus) — параллельно начат
+  `mediasoup-sidecar/`.
 - **Видео в GUI:** известны жалобы — тайл «Своя камера» не всегда
   масштабируется под сетку, при смене устройства изображение может остаться
   старым, при муте видео показывает последний кадр. См. `VIDEO_STATUS.md`.

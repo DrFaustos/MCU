@@ -1023,6 +1023,27 @@ class SipEngine:
         if self._endpoint is not None and hasattr(self._endpoint, "libRegisterThread"):
             self._endpoint.libRegisterThread(name)
 
+    # Публичное имя той же операции: внешним владельцам портов (аудио-мост
+    # SIP<->веб, web-панель) нельзя лезть в приватное — иначе обвязка держится
+    # за случайную деталь реализации движка.
+    register_pjsip_thread = _register_pjsip_thread
+
+    def active_audio_calls(self) -> list:
+        """Живые pjsua2-вызовы, к которым можно подключать аудио-порты.
+
+        Отличается от `_active_calls` (сбор RTCP) только ролью: здесь список
+        нужен владельцу медиа-портов, поэтому порядок должен быть стабильным
+        между вызовами — иначе порты «переезжают» между вызовами. Сортируем
+        по id участника: порядок не зависит от обхода словаря комнаты.
+        """
+        items = []
+        for p in (self.room.participants.values() if self.room else []):
+            call = getattr(p, "_call", None)
+            if call is not None:
+                items.append((getattr(p, "id", 0) or 0, call))
+        items.sort(key=lambda x: x[0])
+        return [call for _, call in items]
+
     def poll_rtcp(self) -> Optional[int]:
         """Снять RTCP-метрики и применить ABR (через AbrService)."""
         return self._abr.poll()

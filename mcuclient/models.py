@@ -103,6 +103,19 @@ class EventBus:
         with self._lock:
             self._subs.append(cb)
 
+    def unsubscribe(self, cb: EventCallback) -> None:
+        """Отписаться. Нужно владельцам временных подписок (мосты, панели).
+
+        Без этого подписчик переживает остановку движка и вызывается на
+        уже нерабочих объектах; повторная подписка того же колбэка давала бы
+        двойную обработку события.
+        """
+        with self._lock:
+            try:
+                self._subs.remove(cb)
+            except ValueError:
+                pass
+
     def emit(self, event: str, **payload: Any) -> None:
         # Диагностика: фиксируем КАЖДОЕ событие шины. Error-события —
         # на уровне WARNING, остальные — DEBUG (видны при -v/MCU_DEBUG).

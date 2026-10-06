@@ -225,6 +225,8 @@ class WebSession:
         self._ms_signaling = None
         # RTP-мост SIP/H.323 <-> mediasoup (опционально).
         self._ms_rtp = None
+        # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
+        self._sip_bridge_service = None
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -317,6 +319,8 @@ class WebSession:
             "webrtc_sessions": self.webrtc.sessions(),
             "conference_participants": self.conference.participants(),
             "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
+            "sip_bridge": self.sip_bridge_stats(),
+            "sip_ports": self.sip_ports_stats(),
             "web_recording": self._web_recorder.is_recording,
         }
 
@@ -485,12 +489,47 @@ class WebSession:
         """Подключить нативный media-port SIP как приёмник веб-микса."""
         self.sip_bridge._sip_sink = sink  # noqa: SLF001 — осознанно: точка связи
 
+    def web_mix_for_sip(self) -> bytes:
+        """Веб-микс для SIP-терминала: все голоса, КРОМЕ самого SIP.
+
+        Иначе терминал слышит собственный голос (эхо): SIP-звук публикуется в
+        шину под :attr:`SIP_PUBLISHER_ID` и попал бы обратно в вызов.
+        """
+        try:
+            return self.audio_mix.mix_excluding(self.sip_bridge.SIP_PUBLISHER_ID)
+        except Exception:  # noqa: BLE001 — нет микшера: тишина лучше падения
+            log.debug("web_mix_for_sip: микс не собран", exc_info=True)
+            return b""
+
+    def attach_sip_bridge(self, service) -> None:
+        """Запомнить сервис нативного моста SIP (для статуса панели).
+
+        Ставится WebServer'ом: сессия не создаёт порты сама — ей от них
+        нужны только счётчики в :meth:`sip_ports_stats`.
+        """
+        self._sip_bridge_service = service
+
+    def sip_bridge_service(self):
+        """Поднятый сервис нативного моста или None."""
+        return self._sip_bridge_service
+
     def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1) -> None:
         """Точка входа для media-port движка: SIP-звук -> в общий микс веба."""
         self.sip_bridge.on_sip_audio(pcm, rate, channels)
 
     def sip_bridge_stats(self) -> Dict[str, Any]:
         return self.sip_bridge.stats()
+
+    def sip_ports_stats(self) -> Dict[str, Any]:
+        """Состояние нативных аудио-портов SIP (0 портов — мост не поднят)."""
+        service = self._sip_bridge_service
+        stats = getattr(service, "stats", None)
+        if not callable(stats):
+            return {"enabled": False, "ports": 0}
+        try:
+            return dict(stats() or {})
+        except Exception:  # noqa: BLE001 — статус не должен падать
+            return {"enabled": False, "ports": 0}
 
     def _recording_dir(self) -> str:
         try:
@@ -1117,6 +1156,9 @@ class WebServer:
         self._engine = engine
         self._config = config
         self._h323 = h323
+        # Нативный аудио-мост SIP<->веб: живёт ровно столько, сколько
+        # панель (без браузеров мост в вакууме не нужен).
+        self._sip_bridge = None
         # Держим ICE-серверы: restart() пересоздаёт сессию и обязан их
         # сохранить, иначе после включения HTTPS браузер остаётся без TURN.
         self._ice_servers = list(ice_servers or [])
@@ -1182,8 +1224,46 @@ class WebServer:
             self.session.attach_frame_listener()
         except Exception:  # noqa: BLE001
             log.debug("Подписка на кадры источника не удалась", exc_info=True)
+        self._start_sip_bridge()
         log.info("Web-панель: %s (host=%s, port=%s)", self.url, self.host, self.port)
         return True
+
+    def _start_sip_bridge(self) -> None:
+        """Поднять нативный аудио-мост SIP<->веб (порты на живые вызовы).
+
+        Без этого шага весь тракт SIP<->веб собран, но не вызывается:
+        браузеры не слышат терминал и наоборот. Мост поднимается только
+        при доступном pjsua2; без стека — тихий no-op (базовый режим не
+        меняется), поэтому панель работает и в заглушке.
+        """
+        if self._sip_bridge is not None:
+            return
+        engine = self._engine
+        if engine is None or not bool(_prop(engine, "pjsip_available", False)):
+            log.debug("pjsua2 недоступен — аудио-мост SIP<->веб не поднимается")
+            return
+        try:
+            from .sip_bridge_service import SipBridgeService  # noqa: PLC0415
+            service = SipBridgeService(
+                self.session, engine,
+                get_calls=getattr(engine, "active_audio_calls", None),
+                register_thread=getattr(engine, "register_pjsip_thread", None),
+            )
+            if not service.start():
+                return
+            self._sip_bridge = service
+            self.session.attach_sip_bridge(service)
+        except Exception:  # noqa: BLE001 — панель не должна падать из-за моста
+            log.debug("Аудио-мост SIP<->веб не поднят", exc_info=True)
+
+    def _stop_sip_bridge(self) -> None:
+        service, self._sip_bridge = self._sip_bridge, None
+        if service is None:
+            return
+        try:
+            service.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("Остановка аудио-моста SIP упала", exc_info=True)
 
     def stop(self) -> None:
         httpd, thread = self._httpd, self._thread
@@ -1196,6 +1276,8 @@ class WebServer:
                 log.debug("Остановка web-сервера с ошибкой", exc_info=True)
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
+        # Мост раньше сессии: порты должны уйти, пока медиа и шина живы.
+        self._stop_sip_bridge()
         self.session.close()
         log.info("Web-панель остановлена")
 

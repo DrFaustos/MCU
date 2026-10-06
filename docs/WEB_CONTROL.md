@@ -101,7 +101,7 @@ GET:
 
 | Путь | Ответ |
 |------|-------|
-| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version |
+| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
 | `/api/devices/video` | `{devices:[{id,name,driver}]}` |
