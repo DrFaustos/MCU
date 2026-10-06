@@ -311,8 +311,19 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     server = stun.get("server", "")
     if not isinstance(server, str):
         raise ConfigError("sip.stun.server: ожидалась строка")
-    if server and ":" not in server.split("//")[-1]:
-        raise ConfigError("sip.stun.server: укажите хост:порт, например stun.l.google.com:19302")
+    # Принимаем обе формы: STUN-URI `stun:host:port` (как в README и
+    # документации) и голый `host:port` (формат pjsua2). Порт обязателен:
+    # без него pjsip адрес не разберёт.
+    host = server.strip()
+    for scheme in ("stuns:", "stun:"):
+        if host.lower().startswith(scheme):
+            host = host[len(scheme):]
+            break
+    if host and ":" not in host.split("?")[0]:
+        raise ConfigError(
+            "sip.stun.server: укажите хост:порт, например "
+            "stun:stun.l.google.com:19302 или stun.l.google.com:19302"
+        )
     if not isinstance(stun.get("enable_ice", True), bool):
         raise ConfigError("sip.stun.enable_ice: ожидалось true/false")
     _check_str_list("sip.allowed_peers", sip.get("allowed_peers"))
@@ -570,7 +581,17 @@ class Config:
 
     @property
     def stun_server(self) -> str:
-        return str(self.raw["sip"].get("stun", {}).get("server", ""))
+        """STUN в формате pjsua2: `host:port` без схемы и ?transport=.
+
+        В конфиге разрешены обе формы (`stun:host:port` и голый
+        `host:port`), наружу отдаём каноническую.
+        """
+        server = str(self.raw["sip"].get("stun", {}).get("server", "")).strip()
+        for scheme in ("stuns:", "stun:"):
+            if server.lower().startswith(scheme):
+                server = server[len(scheme):]
+                break
+        return server.split("?")[0].strip()
 
     @property
     def ice_enabled(self) -> bool:
@@ -656,6 +677,12 @@ class Config:
         """
         cfg = self.web
         urls = [u for u in (cfg.get("ice_servers") or []) if isinstance(u, str)]
+        # Общий STUN из `sip.stun.server` подключаем, если его не перечислили
+        # в `features.web.ice_servers`: держать два разных списка серверов
+        # для одного звонка смысла нет.
+        sip_stun = self.stun_server
+        if sip_stun and not any(sip_stun in str(u) for u in urls):
+            urls.append(f"stun:{sip_stun}")
         if not urls:
             return []
         user = str(cfg.get("turn_user", "") or "")

@@ -165,6 +165,11 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
   `rewrite_contact`, `ice_trickle` (`off` для аппаратных терминалов,
   `half`/`full` для веба), `report_nat_type_in_sdp`;
   `sip.stun.server` + `sip.stun.enable_ice` — сам STUN-сервер и включение ICE.
+  `sip.stun.server` принимает обе формы — `stun:stun.l.google.com:19302` и
+  `stun.l.google.com:19302` (порт обязателен). Этот же сервер автоматически
+  подставляется в WebRTC (`features.web.ice_servers`), если вы не перечислили
+  его там отдельно: один зал с SIP-терминалами и браузерами должен ходить
+  через один STUN.
   > ICE/TURN в uaConfig не настраиваются: в pjsua2 2.16 там нет таких полей.
 * `features.allow_screen_share` — включить/выключить демонстрацию экрана;
 * `features.allow_recording` — включить/выключить запись конференции;

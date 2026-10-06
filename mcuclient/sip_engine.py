@@ -252,6 +252,40 @@ def turn_conn_type(pj_module, transport: str) -> int:
     return _pj_enum(pj_module, name, TURN_TRANSPORT_DEFAULT_BY_NAME.get(key, 17))
 
 
+def normalize_stun_server(value: str) -> str:
+    """STUN-адрес в формате pjsua2: "HOST:PORT" без схемы и ?transport=.
+
+    В конфиге принимаются обе формы (STUN-URI `stun:host:port`, как в
+    документации, и голый `host:port`), в нативные поля и логи отдаём
+    каноническую.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    for scheme in ("stuns:", "stun:"):
+        if raw.lower().startswith(scheme):
+            raw = raw[len(scheme):]
+            break
+    return raw.split("?")[0].strip()
+
+
+def make_string_vector(pj_module, values):
+    """StringVector из списка строк; None, если типа нет в сборке.
+
+    ГРАБЛИ: `uaConfig.stunServer` в pjsua2 — это НЕ строка, а
+    std::vector<std::string>. Присваивание строки возвращает TypeError,
+    а любая ошибка в `_configure_nat` отменяет весь блок NAT — STUN,
+    ICE и TURN молча не применяются вообще.
+    """
+    cls = getattr(pj_module, "StringVector", None)
+    if cls is None:
+        return None
+    vec = cls()
+    for value in values:
+        vec.append(str(value))
+    return vec
+
+
 def normalize_turn_server(value: str) -> str:
     """TURN-адрес в формате, который ждёт pjsua2: "HOST:PORT" без схемы.
 
@@ -537,7 +571,7 @@ class SipEngine:
         self._configure_codecs(ep)
         self._start_account(ep)
 
-    def _configure_nat(self, ep_cfg) -> None:  # pragma: no cover
+    def _configure_nat(self, ep_cfg) -> None:
         """Настраивает STUN, потолок вызовов и natTypeInSdp в uaConfig.
 
         ВАЖНО: в pjsua2 2.16 у UaConfig НЕТ полей enableIce/turn — ICE и TURN
@@ -559,10 +593,18 @@ class SipEngine:
                 log.info("Лимит одновременных вызовов: %d", max_calls)
             except Exception as exc:  # noqa: BLE001
                 log.warning("uaConfig.maxCalls не применён (%d): %s", max_calls, exc)
-        server = self.config.stun_server
+        server = normalize_stun_server(self.config.stun_server)
         if server and hasattr(ua, "stunServer"):
-            ua.stunServer = server
-            log.info("STUN-сервер: %s", server)
+            # Поле типа vector<string>: строка была бы TypeError, и она
+            # отменила бы всю остальную настройку NAT ниже.
+            try:
+                vec = make_string_vector(_pj, [server])
+                if vec is None:
+                    raise TypeError("нет типа StringVector в сборке")
+                ua.stunServer = vec
+                log.info("STUN-сервер: %s", server)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("STUN-сервер %s не применён: %s", server, exc)
         # natTypeInSdp: 0 — не печатать, 1 — номер типа NAT, 2 — номер+имя.
         # Номера в логах терминалов (Polycom/Sony) сильно ускоряют разбор
         # "звук в одну сторону": NAT_TYPE symmetric (5) vs open (1).

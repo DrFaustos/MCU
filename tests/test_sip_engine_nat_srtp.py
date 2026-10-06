@@ -23,6 +23,8 @@ from mcuclient.config import DEFAULT_CONFIG, Config  # noqa: E402
 from mcuclient.sip_engine import (  # noqa: E402
     SipEngine,
     ice_trickle_value,
+    make_string_vector,
+    normalize_stun_server,
     normalize_turn_server,
     srtp_use_value,
     turn_conn_type,
@@ -41,6 +43,9 @@ class _FakePj:
     PJ_ICE_SESS_TRICKLE_DISABLED = 20
     PJ_ICE_SESS_TRICKLE_HALF = 21
     PJ_ICE_SESS_TRICKLE_FULL = 22
+    class StringVector(list):  # как нативный vector<string>
+        pass
+
     PJ_TURN_TP_UDP = 30
     PJ_TURN_TP_TCP = 31
     PJ_TURN_TP_TLS = 32
@@ -98,12 +103,31 @@ def test_normalize_turn_server_strips_scheme_and_defaults_port():
     assert normalize_turn_server("") == ""
 
 
+def test_normalize_stun_server_strips_scheme_and_transport():
+    # Варианты из README и из документации pjsua2 должны приводиться
+    # к одному виду host:port.
+    assert normalize_stun_server("stun:stun.l.google.com:19302") == "stun.l.google.com:19302"
+    assert normalize_stun_server("stun.l.google.com:19302") == "stun.l.google.com:19302"
+    assert normalize_stun_server(" stuns:sec.example.org:5349?x=1 ") == "sec.example.org:5349"
+    assert normalize_stun_server("") == ""
+
+
+def test_make_string_vector_appends_values():
+    vec = make_string_vector(_FakePj, ["a", "b"])
+    assert list(vec) == ["a", "b"]
+    # Без типа в сборке вернём None: вызывающий сам его перехватывает.
+    assert make_string_vector(object(), ["a"]) is None
+    assert make_string_vector(None, ["a"]) is None
+
+
 # --- _configure_nat: uaConfig ------------------------------------------------
 
 
 class _Ua:
     def __init__(self):
-        self.stunServer = ""
+        # Нативное поле — vector<string>: строка в него незаконна
+        # (раньше именно это маскировало баг).
+        self.stunServer = _FakePj.StringVector()
         self.maxCalls = 4
         self.natTypeInSdp = 0
 
@@ -124,7 +148,7 @@ def test_configure_nat_sets_max_calls_and_stun_and_nat_type():
     ep_cfg = _EpCfg()
     eng._configure_nat(ep_cfg)
     assert ep_cfg.uaConfig.maxCalls == 24
-    assert ep_cfg.uaConfig.stunServer == "stun.example.org:3478"
+    assert list(ep_cfg.uaConfig.stunServer) == ["stun.example.org:3478"]
     assert ep_cfg.uaConfig.natTypeInSdp == 2
 
 
@@ -230,3 +254,52 @@ def test_ua_config_ice_field_contract():
     ua = pj.EpConfig().uaConfig
     assert hasattr(ua, "maxCalls"), "UaConfig.maxCalls обязал быть"
     assert not hasattr(ua, "enableIce"), "enableIce вернулся: NAT-настройки пересмотреть"
+
+
+def test_configure_nat_normalizes_stun_scheme_from_config():
+    """Конфиг `stun:host:port` не должен уходить в натив со схемой."""
+    eng = _engine(_cfg(sip_patch={"stun": {"server": "stun:stun.example.org:3478"}}))
+    ep_cfg = _EpCfg()
+    eng._configure_nat(ep_cfg)
+    assert list(ep_cfg.uaConfig.stunServer) == ["stun.example.org:3478"]
+
+
+def test_configure_nat_survives_missing_string_vector(monkeypatch):
+    """Сборка без StringVector: только warning, maxCalls применяется."""
+    import mcuclient.sip_engine as se
+
+    monkeypatch.setattr(se, "_pj", object())
+    eng = _engine(_cfg(sip_patch={"max_calls": 7,
+                                  "stun": {"server": "stun.example.org:3478"}}))
+    ep_cfg = _EpCfg()
+    eng._configure_nat(ep_cfg)
+    assert ep_cfg.uaConfig.maxCalls == 7
+    assert list(ep_cfg.uaConfig.stunServer) == []
+
+
+def test_configure_nat_real_pjsua2_stun_is_vector():
+    """На настоящем pjsua2: строка в stunServer — TypeError, vector — нет.
+
+    Этот тест и поймал баг: движок писал строку, TypeError перехватывался
+    в _start_pjsip, и вся настройка NAT (STUN, ICE, потолок вызовов) молча
+    не применялась.
+    """
+    pj = _pjsua2()
+    if pj is None:
+        return
+    eng = _engine(_cfg(sip_patch={
+        "max_calls": 12,
+        "stun": {"server": "stun:stun.l.google.com:19302", "enable_ice": True},
+    }))
+    ep_cfg = pj.EpConfig()
+    eng._configure_nat(ep_cfg)
+    assert [str(s) for s in ep_cfg.uaConfig.stunServer] == ["stun.l.google.com:19302"]
+    assert ep_cfg.uaConfig.maxCalls == 12
+    # Прямой признак типа поля: строка неприменима.
+    try:
+        ep_cfg.uaConfig.stunServer = "stun.l.google.com:19302"
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("stunServer принял строку: контракт pjsua2 изменился")
+
