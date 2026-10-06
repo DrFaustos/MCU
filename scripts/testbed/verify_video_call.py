@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 
 VIDEO_TYPE = 2  # PJMEDIA_TYPE_VIDEO
 
@@ -46,22 +46,17 @@ def main(argv: list[str]) -> int:
     report: dict = {"mode": mode, "port": port}
 
     if mode == "listen":
-        deadline = time.time() + 40
-        while time.time() < deadline:
-            time.sleep(1)
-            if any(n == "call.incoming" for n, _ in events):
-                break
-        time.sleep(6)  # дать медиа согласоваться
+        # Ожидание только через pump: иначе INVITE остаётся в буфере сокета.
+        pump(engine, 40, lambda: any(n == "call.incoming" for n, _ in events))
+        pump(engine, 6)  # дать медиа согласоваться
     elif mode == "call":
         target = int(argv[2]) if len(argv) > 2 else 15062
         call_id = engine.call(f"sip:15062@127.0.0.1:{target}")
         report["call_id"] = call_id
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            time.sleep(1)
-            if any(n == "call.state" and p.get("state") == "CONFIRMED" for n, p in events):
-                break
-        time.sleep(4)
+        pump(engine, 20,
+             lambda: any(n == "call.state" and p.get("state") == "CONFIRMED"
+                         for n, p in events))
+        pump(engine, 4)
 
     # Собираем типы медиа по всем участникам
     media_types: list[int] = []

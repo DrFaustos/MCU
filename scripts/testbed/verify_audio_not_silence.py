@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 from scripts.testbed.lib.tone_source import generate_tone  # noqa: E402
 from scripts.testbed.lib.wav_metrics import measure_wav  # noqa: E402
 
@@ -54,12 +55,12 @@ def main() -> int:
     cfg.raw["features"]["recording_path"] = "/tmp/mcu_r3_rec"
     engine = SipEngine(cfg)
     engine.start()
-    time.sleep(2)
+    pump(engine, 2)  # см. lib/pump.py: без libHandleEvents() события не идут
     call_id = engine.call(ASTERISK_URI)
     if call_id is None:
         engine.stop()
         return _finish(report, "FAIL", "не удалось инициировать вызов")
-    time.sleep(4)
+    pump(engine, 4)
     report["steps"].append({"call_id": call_id, "state": "dialed"})
 
     import pjsua2 as pj  # noqa: E402
@@ -76,7 +77,7 @@ def main() -> int:
         player.stopTransmit(call_media)
         engine.stop()
         return _finish(report, "FAIL", "запись не стартовала")
-    time.sleep(3)
+    pump(engine, 3)
     engine.stop_audio_recording()
     time.sleep(0.5)  # дать pjsua2 закрыть WAV перед чтением
 

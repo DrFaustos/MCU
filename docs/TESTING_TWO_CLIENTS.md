@@ -139,6 +139,18 @@ scripts/dev/smoke_local.sh
 
 Переменные: `LISTEN_PORT`, `CALL_PORT`.
 
+> **Правило стенда (важно для агентов и новичков).** PJSIP поднят с
+> `threadCnt = 0`, поэтому без `libHandleEvents()` он не разбирает ни INVITE,
+> ни ответы, ни медиа. Ждать события вызова через `time.sleep` в стендовых
+> скриптах **нельзя** — вызов «никогда» не подтвердится. Используйте
+> `scripts/testbed/lib/pump.py`:
+> ```python
+> from scripts.testbed.lib.pump import pump
+> pump(engine, 25, lambda: any(e == "call.confirmed" for e, _ in events))
+> ```
+> `pump` ещё и регистрирует текущий поток в pjlib — без этого любой вызов
+> PJSIP API из «чужого» потока завершает процесс assertion'ом.
+
 ---
 
 ## 2a. Видео-стенд (2 процесса, синтетический источник Colorbar)

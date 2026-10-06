@@ -75,6 +75,43 @@
 
 ## Журнал исправлений
 
+### 2026-10-06 — стенд MCU<->MCU снова проходит: накачка событий вместо sleep + контракт регистратора
+
+Долгое молчание стенда (`run_two_instance_test.sh` / `..._video_test.sh`
+«вызов не подтверждён») коренится не в SIP-логике, а в том, как скрипты
+**ждали** события. Движок намеренно стартует PJSIP с `threadCnt = 0`
+(pjsua2-из-Python не переносит внутренние worker-потоки — нативный abort
+через ~10 с), и без `libHandleEvents()` пакеты не разбираются вообще:
+INVITE лежал в буфере сокета, а обе стороны «спали» через `time.sleep`.
+Поэтому тестовые скрипты раньше не проходили **никогда**, даже когда
+боевой путь был исправен.
+
+- Добавлен `scripts/testbed/lib/pump.py` (`pump(engine, sec, until)`): качает
+  `engine.process_events()` и регистрирует поток в pjlib (`libRegisterThread`) —
+  без регистрации любой вызов API из «чужого» потока завершает процесс
+  assertion'ом, а не исключением.
+- Все ожидания во всех стендовых скриптах переведены на `pump` (7 файлов:
+  `test_mcu_sip_call`, `two_instance_call`, `two_instance_video_call`,
+  `verify_audio_not_silence`, `verify_chat_message`, `verify_video_call`).
+  Правило зафиксировано в докстринге модуля: в стенде ждать события вызова
+  через `time.sleep` нельзя — только через `pump`.
+- **Реальный баг исходящего вызова**: `CallService.call()` звал
+  `register_participant(call, uri)` без `state`, а движковый
+  `_register_participant(call, remote_uri, state)` требует state обязательно —
+  живой исходящий вызов падал с `TypeError`. Юнит-тесты это не ловили, потому
+  что фейк принимал только `(call, uri)`. Теперь состояние передаётся сразу
+  (участник рождается `CONNECTING`, а не `IDLE` с дозаписью), а фейк в
+  `tests/test_call_service.py` повторяет **реальную** сигнатуру движка — иначе
+  тесты снова будут «зелёными» поверх падающего рантайма.
+  Регрессии: `test_call_passes_state_to_registrar`,
+  `test_call_survives_engine_style_registrar`.
+
+Проверено живьём: `scripts/testbed/run_two_instance_test.sh` —
+`[+] MCU<->MCU OK` (CONFIRMED на обеих сторонах);
+`scripts/testbed/run_two_instance_video_test.sh` — `[+] MCU<->MCU VIDEO OK`
+(`call.video active=True` на обоих концах). Итог: **816 passed, 0 failed** —
+и под pytest, и под обязательным `tests/_runner.py`.
+
 ### 2026-10-06 — аудио-мост SIP <-> веб наконец поднимается сам
 
 Весь тракт SIP<->веб (`SipAudioPort`, `SipWebAudioBridge`, `AudioMixSession`)
