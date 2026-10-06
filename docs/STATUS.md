@@ -74,6 +74,34 @@
 
 ## Журнал исправлений
 
+### 2026-10-06 — приоритет SDP-кодеков, детект H.323, ICE при рестарте панели
+
+- **Порядок кодеков из SDP больше не ломается** (`mcuclient/codec_negotiation.py`):
+  `parse_sdp_codecs()` возвращал список, отсортированный по payload type.
+  В SDP порядок `a=rtpmap` повторяет порядок PT в `m=`-строке, то есть является
+  приоритетом терминала. Сортировка молча меняла его и согласовывала другой,
+  часто худший кодек (типично для Polycom `104/103/102` и Sony). Теперь порядок
+  сохраняется, позиция PT фиксируется первым вхождением.
+- **Честный детект H.323** (`mcuclient/h323_gateway.py`): `h323_plugins_available()`
+  запускал `gst-inspect-1.0` без аргументов и искал подстроку `h323` в полном
+  дампе реестра (~80 КБ), где она встречается в произвольном тексте. Ложное
+  «H.323 готов» приводило к старту заведомо падающего пайплайна. Теперь элементы
+  проверяются по именам (`gst-inspect-1.0 h323src|h323sink|openh323src`, RC==0).
+- **Web-панель: STUN/TURN переживают рестарт** (`mcuclient/web_server.py`):
+  `restart()` пересоздавал `WebSession` без `ice_servers`, поэтому после
+  включения HTTPS браузер оставался без TURN — в одной подсети всё работало,
+  через NAT WebRTC не поднимался. Список ICE хранится на сервере и передаётся
+  в каждую новую сессию.
+- **Быстрая остановка панели**: `serve_forever(poll_interval=0.1)` вместо
+  дефолтных 0.5 с — раньше каждая остановка/рестарт стоили полсекунды простоя.
+- **Тесты**: 6 регрессий — `test_parse_sdp_preserves_sdp_order`,
+  `test_parse_sdp_order_and_negotiation_end_to_end`,
+  `test_parse_sdp_duplicate_pt_keeps_first_position`,
+  `test_plugins_false_when_element_missing`,
+  `test_plugins_false_when_all_elements_absent`, `test_plugins_false_on_oserror`,
+  `test_restart_keeps_ice_servers`, `test_restart_without_ice_servers_is_safe`,
+  `test_stop_returns_quickly`. Итог: **757 passed, 0 failed**.
+
 ### 2026-09-26 — единый источник видео, тайл «Вы», debug-сборка
 
 - **Тайл «Вы» всегда** в сетке; без превью — заглушка. Превью включается
