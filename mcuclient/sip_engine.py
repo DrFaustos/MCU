@@ -638,29 +638,53 @@ class SipEngine:
         except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
             log.exception("Ошибка обработки состояния вызова")
 
-    def _on_call_media_state(self, call, prm) -> None:  # pragma: no cover
+    def _on_call_media_state(self, call, prm) -> None:
         """Обработка onCallMediaState.
 
         В pjsua2 у OnCallMediaStateParam НЕТ поля callInfo — информация о
         медиа берётся у самого вызова через call.getInfo(). Раньше здесь
         читалось prm.callInfo, из-за чего колбэк всегда падал и видео-поток
         НИКОГДА не детектился (тайлы пустые, call.video не приходил).
+
+        Аудит согласованных кодеков делаем ВСЕГДА, а не только при поддержке
+        видео: иначе на сборках PJSIP без видео (например, Windows-wheel)
+        теряется главная диагностика «терминал соединился, но звука нет» для
+        Sony/Polycom (Этап 5 ADR-0002).
         """
-        # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
-        # нативному access violation (Python-исключение его не ловит).
-        if not self._video_supported:
-            return
         try:
             ci = call.getInfo()
         except Exception as exc:  # noqa: BLE001
             log.debug("_on_call_media_state: getInfo не удался: %s", exc)
             return
+        # Аудит кодеков читаем до видеогарда: mi.codecName безопасен всегда.
+        self._log_negotiated_codecs(ci)
+        # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
+        # нативному access violation (Python-исключение его не ловит), поэтому
+        # разбор видеопотоков оставляем под флагом _video_supported.
+        if not self._video_supported:
+            return
+        # Одно применение состояния на событие. Раньше apply_media_state
+        # вызывался дважды (второй — без call), из-за чего участник не
+        # находился по объекту вызова, окно подключалось/сбрасывалось
+        # повторно и в шину уходили два противоположных call.video.
         try:
             self._calls.apply_media_state(ci, call)
         except Exception:  # noqa: BLE001
             log.debug("apply_media_state: ошибка", exc_info=True)
-        # Фиксируем в логе фактические кодеки, согласованные по SDP
-        # offer/answer (PJMEDIA держит один активный кодек на поток).
+        # Как только у вызова поднялся видеопоток — подключаем выбранную
+        # камеру к его кодирующему порту (иначе PJSIP берёт устройство по
+        # умолчанию, dev 0, и Colorbar/SDL не используются). Бинд делаем
+        # ОДИН раз: раньше он выполнялся дважды на одно событие и каждый
+        # проход шёл по всем живым вызовам (vidSetStream → re-INVITE).
+        dev = self.media_state.camera_id
+        if dev is not None:
+            try:
+                self._bind_capture_to_calls(int(dev))
+            except Exception:  # noqa: BLE001
+                log.debug("bind capture on media state failed", exc_info=True)
+
+    def _log_negotiated_codecs(self, ci) -> None:
+        """Залогировать фактические кодеки и, если не согласовались — почему."""
         try:
             from .call_manager import active_codecs  # noqa: PLC0415
             codecs = active_codecs(getattr(ci, "media", None), _pj)
@@ -684,24 +708,6 @@ class SipEngine:
             )
         except Exception:  # noqa: BLE001
             log.debug("active_codecs: ошибка", exc_info=True)
-        # Как только у вызова поднялся видеопоток — подключаем выбранную
-        # камеру к его кодирующему порту.
-        dev = self.media_state.camera_id
-        if dev is not None:
-            try:
-                self._bind_capture_to_calls(int(dev))
-            except Exception:  # noqa: BLE001
-                log.debug("bind capture on media state failed", exc_info=True)
-        self._calls.apply_media_state(ci)
-        # Как только у вызова поднялся видеопоток — подключаем выбранную
-        # камеру к его кодирующему порту (иначе PJSIP берёт устройство по
-        # умолчанию, dev 0, и Colorbar/SDL не используются).
-        dev = self.media_state.camera_id
-        if dev is not None:
-            try:
-                self._bind_capture_to_calls(int(dev))
-            except Exception:  # noqa: BLE001
-                log.debug("bind capture on media state failed", exc_info=True)
 
     def get_video_window(self, participant_id: int):
         return self._registry.get_video_window(participant_id)
