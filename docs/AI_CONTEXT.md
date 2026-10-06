@@ -108,7 +108,8 @@
 `mcuclient/webui/index.html`. Браузер подключается к ПК/серверу и управляет
 сессией (участники, вызовы, муты, раскладка, запись, чат, устройства).
 
-* REST: `/api/status`, `/api/participants`, `/api/chat`, `/api/devices/*`,
+* REST: `/api/status`, `/api/participants`, `/api/chat`, `/api/dtmf`,
+  `/api/devices/*`,
   `/api/layouts`; команды — POST (`/api/call`, `/api/hangup`, `/api/mute`,
   `/api/layout`, `/api/recording`, `/api/chat`, `/api/camera`, ...).
 * SSE: `/api/events` — события шины движка.

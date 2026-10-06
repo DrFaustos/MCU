@@ -104,6 +104,7 @@ GET:
 | `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
+| `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`) |
 | `/api/devices/video` | `{devices:[{id,name,driver}]}` |
 | `/api/devices/audio` | `{devices:[...]}` |
 | `/api/layouts` | `{layouts:[...]}` |
@@ -125,6 +126,7 @@ POST (тело — JSON):
 | `/api/layout` | `{layout}` | сменить раскладку |
 | `/api/recording` | `{enabled?}` | запись вкл/выкл/toggle |
 | `/api/chat` | `{text, id?}` | сообщение всем или участнику |
+| `/api/dtmf` | `{digits, id?, method?}` | DTMF: участнику или всем (`id` не указывать); `method`: `auto`/`rfc2833`/`sip-info` |
 | `/api/camera` | `{enabled}` | камера вкл/выкл |
 | `/api/microphone` | `{enabled}` | микрофон вкл/выкл |
 | `/api/video_send` | `{enabled}` | передача видео в эфир |
@@ -308,3 +310,23 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
   `docker/sfu/README.md`.
 * Запуск/проверка сайдкара: `cd mediasoup-sidecar && npm install &&  npm run smoke`.
 * Это **дополнение**, а не замена: базовый `aiortc`-SFU (микс, запись,  мост SIP↔WebRTC) продолжает работать без Node.
+
+---
+
+## DTMF (тоны набора)
+
+Аппаратные терминалы и телефоны (Polycom, Yealink, ISDN-шлюзы) передают
+номер зала, PIN и сигналы IVR **только** DTMF, поэтому МСУ обязан их
+принимать и отправлять:
+
+* приём: `onDtmfDigit` / `onDtmfEvent` → событие `dtmf.digits`
+  (`digits`, `direction=in`, `participant_id`, `peer`, `method`) и в
+  историю, отдаётся `GET /api/dtmf`;
+* отправка: `POST /api/dtmf` или `engine.send_dtmf(digits, id=None)`.
+  Без `id` тоны идут всем активным вызовам — так правильно «набрать PIN
+  в IVR для всего зала».
+
+Метод по умолчанию `auto`: RFC 2833, при ошибке SIP INFO. Только
+RFC 2833 — и старый шлюз не услышит тоны; только SIP INFO — не услышит
+половину парка Polycom.
+

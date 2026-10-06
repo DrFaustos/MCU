@@ -76,6 +76,7 @@ class _PropertyEngine:
     def list_audio_devices(self):
         return []
 
+    @property
     def chat_history(self):
         return []
 

@@ -22,6 +22,7 @@ from .call_manager import CallManager, normalize_uri
 from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
+from .dtmf_service import DtmfService
 from .media_control_service import MediaControlService
 from .call_service import CallService
 from .video_source_service import VideoSourceService
@@ -401,6 +402,16 @@ class SipEngine:
             pj_module=_pj,
             is_available=is_available,
             get_participant=self._get_participant,
+        )
+        # DTMF (RFC 2833 / SIP INFO): без тонов аппаратные терминалы не
+        # могут набрать номер зала или PIN в IVR.
+        self._dtmf = DtmfService(
+            self.events,
+            pj_module=_pj,
+            is_available=is_available,
+            get_participant=self._get_participant,
+            list_participant_ids=self._registry.all_ids,
+            find_by_call=self._registry.find_by_call,
         )
         self._mediacontrol = MediaControlService(
             self.events,
@@ -819,6 +830,12 @@ class SipEngine:
 
             def onCallState(self, prm) -> None:  # noqa: N802
                 engine._on_call_state(self, prm)
+
+            def onDtmfDigit(self, prm) -> None:  # noqa: N802
+                engine._on_dtmf_digit(self, prm)
+
+            def onDtmfEvent(self, prm) -> None:  # noqa: N802
+                engine._on_dtmf_event(self, prm)
 
             def onInstantMessage(self, prm) -> None:  # noqa: N802
                 engine._on_instant_message(self, prm)
@@ -1533,6 +1550,28 @@ class SipEngine:
     def send_message(self, participant_id: int, text: str) -> bool:
         """Отправить текстовое сообщение в активный вызов."""
         return self._chat.send_message(participant_id, text)
+
+    # --- DTMF (RFC 2833 / SIP INFO) ---
+    @property
+    def dtmf_history(self):
+        """Последние DTMF-посылки комнаты (входящие и исходящие)."""
+        return self._dtmf.history
+
+    def send_dtmf(self, digits, participant_id=None, method: str = "auto") -> bool:
+        """Отправить DTMF-тоны: конкретному участнику или всем (IVR/PIN).
+
+        :param method: ``auto`` — RFC 2833 с откатом на SIP INFO; можно
+            задать ``rfc2833`` или ``sip-info`` явно.
+        """
+        return self._dtmf.send_dtmf(participant_id, digits, method)
+
+    def _on_dtmf_digit(self, call, prm) -> None:  # pragma: no cover
+        """Входящий DTMF-тон (onDtmfDigit)."""
+        self._dtmf.on_dtmf_digit(call, prm)
+
+    def _on_dtmf_event(self, call, prm) -> None:  # pragma: no cover
+        """Входящий DTMF (onDtmfEvent: часть сборок шлёт только его)."""
+        self._dtmf.on_dtmf_event(call, prm)
 
     def _on_instant_message(self, call, prm) -> None:  # pragma: no cover
         """Входящее SIP MESSAGE."""

@@ -331,7 +331,12 @@ class WebSession:
         return list(getattr(self._config, "available_layouts", []) or [])
 
     def chat_history(self) -> List[Dict[str, Any]]:
-        return self._call(lambda: [_chat_to_dict(m) for m in (self._engine.chat_history() or [])])
+        # ВАЖНО: `chat_history` — свойство, а не метод: скобки после него
+        # превращали GET /api/chat в 500 (вызов list).
+        return self._call(lambda: [_chat_to_dict(m) for m in (self._engine.chat_history or [])])
+
+    def dtmf_history(self) -> List[Dict[str, Any]]:
+        return self._call(lambda: [_dtmf_to_dict(e) for e in (self._engine.dtmf_history or [])])
 
     def video_devices(self) -> List[Dict[str, Any]]:
         return self._call(lambda: list(self._engine.list_video_devices() or []))
@@ -417,6 +422,22 @@ class WebSession:
             self._require_pid(pid)
             self._call(lambda: self._engine.send_message(pid, text))
         return {"ok": True}
+
+    def send_dtmf(self, digits: str, pid: Optional[int] = None,
+                  method: str = "auto") -> Dict[str, Any]:
+        """POST /api/dtmf: тона в конкретный вызов или всем (IVR/PIN).
+
+        `pid=None` — рассылка всем активным: так работает «набрать PIN в
+        IVR для всего зала».
+        """
+        if not digits or not str(digits).strip():
+            raise ApiError("Нет DTMF-тонов")
+        if pid is not None:
+            self._require_pid(pid)
+        ok = self._call(lambda: bool(self._engine.send_dtmf(str(digits), pid, method)))
+        if not ok:
+            raise ApiError("Не удалось отправить тоны: нет активного вызова", status=409)
+        return {"ok": True, "digits_sent": True}
 
     def set_camera(self, enabled: bool) -> Dict[str, Any]:
         return {"ok": True, "camera": bool(self._call(lambda: self._engine.set_camera_enabled(bool(enabled))))}
@@ -816,6 +837,19 @@ def _chat_to_dict(m: Any) -> Dict[str, Any]:
     }
 
 
+def _dtmf_to_dict(ev: Any) -> Dict[str, Any]:
+    if isinstance(ev, dict):
+        return _jsonable(ev)
+    as_dict = getattr(ev, "as_dict", None)
+    if callable(as_dict):
+        return _jsonable(as_dict())
+    return {
+        "digits": getattr(ev, "digits", ""),
+        "direction": getattr(ev, "direction", ""),
+        "participant_id": getattr(ev, "participant_id", None),
+    }
+
+
 def _media_flag(engine: Any, name: str) -> bool:
     state = getattr(engine, "media_state", None)
     if state is None:
@@ -960,6 +994,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"participants": s.participants()})
             elif path == "/api/chat":
                 self._send_json({"messages": s.chat_history()})
+            elif path == "/api/dtmf":
+                self._send_json({"events": s.dtmf_history()})
             elif path == "/api/devices/video":
                 self._send_json({"devices": s.video_devices()})
             elif path == "/api/devices/audio":
@@ -1006,6 +1042,9 @@ class _Handler(BaseHTTPRequestHandler):
             return s.toggle_recording(_opt_bool(data.get("enabled")))
         if path == "/api/chat":
             return s.send_chat(str(data.get("text", "")), _opt_int(data.get("id")))
+        if path == "/api/dtmf":
+            return s.send_dtmf(str(data.get("digits", "")), _opt_int(data.get("id")),
+                               str(data.get("method", "auto")))
         if path == "/api/camera":
             return s.set_camera(bool(data.get("enabled", True)))
         if path == "/api/microphone":

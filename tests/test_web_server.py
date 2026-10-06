@@ -98,6 +98,7 @@ class _FakeEngine:
         self.messages.append((pid, text))
         return True
 
+    @property
     def chat_history(self):
         return self.chat
 
