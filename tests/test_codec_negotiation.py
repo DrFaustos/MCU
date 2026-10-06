@@ -62,10 +62,12 @@ def test_parse_sdp_combines_rtpmap_and_fmtp():
     assert codecs[0].fmtp['profile-level-id'] == '42e01f'
 
 
-def test_parse_sdp_multiple_sorted_by_pt():
+def test_parse_sdp_preserves_sdp_order():
+    # Регрессия: порядок rtpmap = приоритет терминала (читается из m=-строки).
+    # Сортировка по payload type раньше ломала приоритет и выбивала худший кодек.
     lines = ['a=rtpmap:97 PCMA/8000', 'a=rtpmap:0 PCMU/8000']
     codecs = parse_sdp_codecs(lines)
-    assert [c.payload_type for c in codecs] == [0, 97]
+    assert [c.payload_type for c in codecs] == [97, 0]
 
 
 def test_parse_sdp_fmtp_without_rtpmap_ignored():
@@ -199,3 +201,27 @@ def test_supported_audio_filters_video():
 def test_supported_video_filters_audio():
     out = supported_video_from_config(['PCMU/8000/1', 'H264/90000', 'H263/90000'])
     assert out == ['H264/90000', 'H263/90000']
+def test_parse_sdp_order_and_negotiation_end_to_end():
+    # Регрессия (Polycom/Tandberg): в m= строке первым стоит 103 (Baseline),
+    # хотя по номеру он не самый маленький. Сортировка по PT тащила 102 (Main),
+    # который наш стек не тянет -> видео не было вовсе.
+    lines = [
+        'a=rtpmap:102 H264/90000',
+        'a=fmtp:102 profile-level-id=4d001f',
+        'a=rtpmap:103 H264/90000',
+        'a=fmtp:103 profile-level-id=42e01f',
+    ]
+    remote = parse_sdp_codecs(lines)
+    assert [c.payload_type for c in remote] == [102, 103]
+    # Переставим порядок — приоритет терминала обязан остаться его.
+    remote.reverse()
+    r = negotiate(remote, ['H264/90000'], want='video')
+    assert r.chosen is not None and r.chosen.payload_type == 103
+
+
+def test_parse_sdp_duplicate_pt_keeps_first_position():
+    # Дубль rtpmap на один PT (встречается у реализаций, дублирующих секции):
+    # позиция фиксируется первым вхождением, описание — последним.
+    lines = ['a=rtpmap:97 PCMA/8000', 'a=rtpmap:0 PCMU/8000', 'a=rtpmap:97 PCMA/8000']
+    codecs = parse_sdp_codecs(lines)
+    assert [c.payload_type for c in codecs] == [97, 0]

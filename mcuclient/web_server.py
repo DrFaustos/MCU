@@ -1117,6 +1117,9 @@ class WebServer:
         self._engine = engine
         self._config = config
         self._h323 = h323
+        # Держим ICE-серверы: restart() пересоздаёт сессию и обязан их
+        # сохранить, иначе после включения HTTPS браузер остаётся без TURN.
+        self._ice_servers = list(ice_servers or [])
         self.session = WebSession(engine, config, h323, ice_servers=ice_servers)
         self.host = host
         self.port = int(port)
@@ -1166,7 +1169,13 @@ class WebServer:
         httpd.events = self.events            # type: ignore[attr-defined]
         httpd.auth_token = self.auth_token    # type: ignore[attr-defined]
         self._httpd = httpd
-        self._thread = threading.Thread(target=httpd.serve_forever, name="mcu-web", daemon=True)
+        # poll_interval=0.1: у serve_forever дефолт 0.5 с. stop() дергает shutdown(),
+        # который ждёт конца текущего цикла — любая остановка/рестарт панели
+        # стоили ~0.5 с (в тестовом прогоне web-тесты дают ~13 с простоя).
+        self._thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.1},
+            name="mcu-web", daemon=True,
+        )
         self._thread.start()
         # Подписываемся на кадры видеоисточника (если движок умеет).
         try:
@@ -1206,8 +1215,10 @@ class WebServer:
             self.host = host
         if port is not None:
             self.port = int(port)
-        # Свежая сессия: старый dispatcher остановлен в stop().
-        self.session = WebSession(self._engine, self._config, self._h323)
+        # Свежая сессия: старый dispatcher остановлен в stop(). ICE-серверы
+        # передаём явно — иначе после включения HTTPS браузер теряет TURN.
+        self.session = WebSession(self._engine, self._config, self._h323,
+                                  ice_servers=self._ice_servers)
         return self.start()
 
     def __enter__(self) -> "WebServer":

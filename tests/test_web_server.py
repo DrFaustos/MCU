@@ -625,3 +625,44 @@ def test_http_conference_join_empty_name_is_guest():
         assert data["participant"]["name"] == "Гость"
     finally:
         srv.stop()
+# --- рестарт панели (HTTP <-> HTTPS) ---------------------------------------
+
+def test_restart_keeps_ice_servers():
+    # Регрессия: restart() пересоздавал WebSession без ice_servers. После
+    # включения HTTPS браузер оставался без STUN/TURN — в одной сети всё
+    # работало, через NAT соединение не поднималось.
+    ice = [{"urls": ["stun:stun.example.org:3478"]},
+           {"urls": ["turn:turn.example.org:3478"], "username": "u", "credential": "c"}]
+    srv = WebServer(_FakeEngine(), _FakeConfig(), host="127.0.0.1", port=0, ice_servers=ice)
+    assert srv.start()
+    try:
+        assert srv.session._ice_servers == ice
+        assert srv.restart(tls=False) is True
+        assert srv.session._ice_servers == ice
+        # Проверка глубже: дошёл ли список до самого WebRTC-менеджера.
+        assert srv.session.webrtc._ice_servers == ice
+    finally:
+        srv.stop()
+
+
+def test_restart_without_ice_servers_is_safe():
+    # Панель без TURN должна рестартоваться, а не падать на None.
+    srv = WebServer(_FakeEngine(), _FakeConfig(), host="127.0.0.1", port=0)
+    assert srv.start()
+    try:
+        assert srv.session._ice_servers == []
+        assert srv.restart(tls=False) is True
+        assert srv.session._ice_servers == []
+    finally:
+        srv.stop()
+
+
+def test_stop_returns_quickly():
+    # serve_forever(poll_interval=0.1): с дефолтным 0.5 с каждая остановка/
+    # рестарт панели стоили полсекунды простоя (на десятках web-тестов —
+    # заметные секунды).
+    import time
+    srv = _start_server()
+    t0 = time.monotonic()
+    srv.stop()
+    assert time.monotonic() - t0 < 0.45

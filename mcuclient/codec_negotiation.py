@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .log import get_logger
 
@@ -73,8 +73,20 @@ def parse_rtpmap(value):
 
 
 def parse_sdp_codecs(sdp_lines):
-    # Parses SDP lines into a list of CodecInfo (rtpmap + fmtp).
-    by_pt = {}
+    """Parse SDP lines into a list of CodecInfo (rtpmap + fmtp).
+
+    SDP ORDER IS PRESERVED and that is not cosmetic. In an ``m=`` line the
+    payload types are listed most-preferred first, so the order of the
+    ``a=rtpmap`` lines *is* the remote endpoint's priority. Sorting by payload
+    type (the previous behaviour) silently reorders it and negotiates a worse
+    codec: a Polycom offering ``104 (H.264 High), 103 (Baseline), 102 (Main)``
+    used to end up on whichever PT happened to be numerically smallest.
+
+    Payload types are unique within a media section, so the first occurrence
+    of a PT fixes its position.
+    """
+    by_pt: Dict[int, CodecInfo] = {}
+    order: List[int] = []
     for raw in sdp_lines or []:
         line = (raw or '').strip()
         if line.startswith('a=rtpmap:'):
@@ -82,6 +94,8 @@ def parse_sdp_codecs(sdp_lines):
             if parsed is None:
                 continue
             pt, name, clock, ch = parsed
+            if pt not in by_pt:
+                order.append(pt)
             by_pt[pt] = CodecInfo(payload_type=pt, name=name, clock_rate=clock, channels=ch)
         elif line.startswith('a=fmtp:'):
             body = line[len('a=fmtp:'):]
@@ -94,7 +108,7 @@ def parse_sdp_codecs(sdp_lines):
                 continue
             if pt in by_pt:
                 by_pt[pt].fmtp = parse_fmtp(parts[1])
-    return [by_pt[k] for k in sorted(by_pt)]
+    return [by_pt[k] for k in order]
 
 
 def h264_profile(profile_level_id):
@@ -135,7 +149,7 @@ class NegotiationResult:
     # Negotiation outcome with a per-codec diagnostic.
 
     chosen: Optional[CodecInfo]
-    rejected: List[tuple]
+    rejected: List[Tuple[str, str]]
 
 
 def _normalize_supported(codec):
