@@ -154,8 +154,10 @@
 * **TURN/STUN**: `docker/turn/` (coturn + compose) для интернета/NAT.
 * **Мост SIP↔WebRTC (аудио)**: `SipWebAudioBridge` (`sip_web_bridge.py`) +
   `SipAudioPort` (`sip_audio_port.py`, `pjsua2.AudioMediaPort`);
-  `WebSession.attach_sip_call_port` связывает их. TODO: create/startTransmit
-  из `sip_engine` на медиа вызова (нужен SIP-терминал для e2e).
+  `WebSession.attach_sip_call_port` связывает их. Поднимается **сам** из
+  рантайма: `SipBridgeService` (`sip_bridge_service.py`) реагирует на
+  `call.confirmed`/`call.closed` и живёт вместе с web-панелью (`WebServer`).
+  Осталось: подтвердить звук ушами на реальном SIP-терминале.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
@@ -346,6 +348,8 @@ pytest'ом. Фикстуры в раннер не заводим; подмен�
 
 | Коммит | Что |
 |--------|-----|
+| `5e47c47` | исходящий вызов: state в register_participant; стенды: pump вместо sleep |
+| `b4d22ee` | аудио-мост SIP<->веб поднимается сам (SipBridgeService) |
 | `57861b5` | onCallMediaState: один разбор медиа, аудит кодеков без видео |
 | `0cb69f2` | SDP-приоритет кодеков, детект H.323, ICE при restart панели |
 | `8a409f2` | диагностика падений: MessageBox + лог рядом с .exe |
@@ -376,6 +380,13 @@ pytest'ом. Фикстуры в раннер не заводим; подмен�
 
 - Проект **pre-alpha**, стабильных релизов нет; цель — **MCU (сервер+клиент),
   ВКС**, интероп с аппаратными терминалами по SIP/H.323.
+- **PJSIP с `threadCnt = 0`**: без `libHandleEvents()` пакеты не разбираются.
+  В стендовых скриптах ждать события через `time.sleep` нельзя — только через
+  `scripts/testbed/lib/pump.py` (он же регистрирует поток в pjlib; без этого
+  вызов API из чужого потока = abort процесса, не исключение).
+- **Фейки в юнит-тестах обязаны совпадать с реальными сигнатурами.** Фейк
+  `register_participant(call, uri)` при живом `_register_participant(call,
+  uri, state)` давал зелёные тесты и `TypeError` в рантайме.
 - Были ложные «отчёты о готовности» без артефактов — **всегда проверять факты**:
   читать файлы, гонять тесты, смотреть `git log`/`diff`, а не верить тексту.
 - **Web-клиент** — только как второй клиент поверх headless-сервера, не вместо
