@@ -9,7 +9,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 # --- Границы допустимых значений (используются валидацией и сеттерами) ---
@@ -1172,7 +1172,7 @@ class Config:
         codecs["video"] = list(chosen["video"])
         return list(chosen["audio"]) + list(chosen["video"])
 
-    def set_web_tls(self, mode) -> str:
+    def set_web_tls(self, mode: Union[str, bool]) -> str:
         """TLS web-панели: bool (legacy) или 'off'|'self_signed'|'custom'."""
         if isinstance(mode, bool):
             clean = "self_signed" if mode else "off"
