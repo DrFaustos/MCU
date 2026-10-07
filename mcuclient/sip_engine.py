@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import Config
 from .log import get_logger
@@ -23,6 +23,12 @@ from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
 from .dtmf_service import DtmfService
+from .sip_registration import (
+    RegistrationManager,
+    build_id_uri,
+    configure_account as configure_account_registration,
+    registration_status,
+)
 from .media_control_service import MediaControlService
 from .call_service import CallService
 from .video_source_service import VideoSourceService
@@ -372,6 +378,8 @@ class SipEngine:
         self._calls = CallManager(self._registry, self.events, _pj)
         self._running = False
         self._video_supported = False
+        #: Менеджер регистрации на регистраторе (None, если регистрация выкл.)
+        self._registration: Optional[RegistrationManager] = None
         # Передача видео (независимо от захвата/превью): мут видео
         # на своём тайле шлёт recv-only, не трогая локальное превью.
         self._video_send_enabled = True
@@ -965,6 +973,9 @@ class SipEngine:
             def onIncomingCall(self, prm) -> None:  # noqa: N802
                 engine._on_incoming(prm)
 
+            def onRegState(self, prm) -> None:  # noqa: N802
+                engine._on_reg_state(prm)
+
         acc_cfg = _pj.AccountConfig()
         acc_cfg.idUri = self._build_id_uri()
         # Видео: авто-передача/приём, если видео включено в конфиге.
@@ -1000,9 +1011,71 @@ class SipEngine:
         # ICE/TURN/keep-alive — на уровне аккаунта (в uaConfig их нет).
         self._configure_account_nat(acc_cfg)
         self._configure_account_interop(acc_cfg)
+        # Регистрация: regConfig + authCreds + proxies. Делаем ДО create():
+        # pjsip шлёт REGISTER сразу при добавлении аккаунта, и без
+        # проставленных полей он уйдёт в саморегистрацию на хост idUri.
+        self._registration = configure_account_registration(
+            _pj, acc_cfg, self.config, log, emit=self.events.emit
+        )
         self._acc_cfg = acc_cfg
         self._account = _Account()
         self._account.create(acc_cfg)
+
+    def _on_reg_state(self, prm) -> None:  # pragma: no cover
+        """Колбэк pjsua2 о состоянии регистрации на регистраторе.
+
+        Исключение отсюда обязательно проглатываем: оно из нативного
+        колбэка роняет процесс (см. остальные _on_*).
+        """
+        manager = self._registration
+        if manager is None:
+            # Регистрация не включена в конфиге, но регистратор нам что-то
+            # отвечает (например, аккаунт добавлен с registrar из прошлой сборки).
+            manager = self._registration = RegistrationManager(log, self.events.emit)
+        try:
+            manager.handle(
+                getattr(prm, "code", 0),
+                getattr(prm, "reason", ""),
+                getattr(prm, "expiration", 0),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("Ошибка обработки onRegState")
+
+    @property
+    def registration(self) -> Dict[str, Any]:
+        """Текущее состояние регистрации — для /api/status и панели оператора.
+
+        Читаем `Account.getInfo()` (актуальный expiry/код), а не только то,
+        что видел колбэк: refresh pjsip делает сам, и колбэк при этом молчит.
+        """
+        state: Dict[str, Any] = {
+            "enabled": bool(getattr(self.config, "registration_enabled", False)),
+            "registrar": "",
+            "username": "",
+            "registered": False,
+            "hint": "",
+        }
+        try:
+            state["registrar"] = self.config.registration_registrar
+            state["username"] = self._registration_user()
+        except Exception:  # noqa: BLE001 — старый конфиг без секции
+            pass
+        if self._registration is not None:
+            state.update(self._registration.state)
+        live = registration_status(self._account)
+        if live["configured"] or live["active"]:
+            state["registered"] = bool(live["active"])
+            state["code"] = int(live["last_error"] or live["status"] or 0)
+            state["expires_sec"] = int(live["expires_sec"] or 0)
+            state["status_text"] = live["status_text"]
+        return state
+
+    def _registration_user(self) -> str:
+        """Имя абонента, под которым МСУ виден регистратору."""
+        return (
+            self.config.registration_username
+            or self._sanitized_room_user()
+        )
 
     def _on_call_state(self, call, prm) -> None:  # pragma: no cover
         try:
@@ -1102,14 +1175,33 @@ class SipEngine:
         """Совместимость: нативное окно показывает PJSIP (autoShowIncoming)."""
         return False
 
-    def _build_id_uri(self) -> str:
+    def _sanitized_room_user(self) -> str:
+        """Имя комнаты как SIP-user: без пробелов и спецсимволов."""
         import re
-        user = re.sub(r"[^A-Za-z0-9._-]+", "-", self.config.room_name).strip("-")
-        user = user or "mcu"
-        host = self.config.sip_listen
-        if host in ("", "0.0.0.0", "::", "*"):
-            host = self._local_ip()
-        return f"sip:{user}@{host}"
+
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", self.config.room_name).strip("-")
+
+    def _build_id_uri(self) -> str:
+        """SIP-URI аккаунта.
+
+        Без регистрации — как раньше: ``sip:<имя комнаты>@<IP МСУ>`` (звонок по
+        IP). С регистрацией хостом становится ДОМЕН, а пользователем — имя
+        абонента из конфига: на CUCM/Voisica линия ищется как ``user@domain``,
+        и URI с IP-хостом регистратор отбивает («404 not found» либо 403).
+        """
+        try:
+            enabled = bool(self.config.registration_enabled)
+            username = self.config.registration_username if enabled else ""
+            domain = self.config.registration_domain if enabled else ""
+        except Exception:  # noqa: BLE001 — конфиг без секции registration
+            enabled, username, domain = False, "", ""
+        if not enabled:
+            host = self.config.sip_listen
+            if host in ("", "0.0.0.0", "::", "*"):
+                host = self._local_ip()
+            return build_id_uri("", "", self._sanitized_room_user(), host)
+        return build_id_uri(username, domain, self._sanitized_room_user(),
+                            self._local_ip())
 
     @staticmethod
     def _local_ip() -> str:

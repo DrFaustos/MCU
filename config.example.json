@@ -58,6 +58,16 @@
         "VP8/90000",
         "VP9/90000"
       ]
+    },
+    "registration": {
+      "enabled": false,
+      "registrar": "",
+      "domain": "",
+      "username": "",
+      "password": "",
+      "expires_sec": 3600,
+      "proxies": [],
+      "retry_interval_sec": 60
     }
   },
   "media": {

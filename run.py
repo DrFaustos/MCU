@@ -56,6 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--protocol", "--proto", choices=["auto", "sip", "h323", "h323_native"], default=None,
         help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
     )
+    p.add_argument("--register", metavar="URI",
+                   help="регистратор, напр. sip:voip.corp:5060 (без него MCU "
+                        "отвечает только на прямые вызовы по IP)")
+    p.add_argument("--reg-user", help="имя абонента/номер зала для регистрации")
+    p.add_argument("--reg-password",
+                   help="пароль абонента (надёжнее env MCU_REG_PASSWORD — в "
+                        "cmdline его видно через ps)")
+    p.add_argument("--reg-domain",
+                   help="домен для SIP-URI (по умолчанию хост регистратора)")
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--h323-socket", help="unix-сокет C++-хоста mcu_h323d (Вариант B, ADR-0002)")
@@ -213,6 +222,21 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["sip"]["null_audio"] = True
     if args.auto_answer is not None:
         config.raw["sip"]["auto_answer"] = bool(args.auto_answer)
+    # --- Регистрация на регистраторе: CLI важнее конфига -------------------
+    # Пароль можно взять из окружения: в shell-истории и в cmdline (его видно
+    # через ps) он светился бы всем, кто залогинен на сервере МСУ.
+    if args.register or args.reg_user or args.reg_password:
+        reg = config.raw["sip"].setdefault("registration", {})
+        if args.register:
+            reg["registrar"] = args.register
+        if args.reg_user:
+            reg["username"] = args.reg_user
+        password = args.reg_password or os.environ.get("MCU_REG_PASSWORD", "")
+        if password:
+            reg["password"] = password
+        if args.reg_domain:
+            reg["domain"] = args.reg_domain
+        reg["enabled"] = True
     if args.h323:
         config.raw["h323"]["enabled"] = True
     if args.h323_port:

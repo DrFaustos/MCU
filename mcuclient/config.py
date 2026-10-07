@@ -33,6 +33,11 @@ PRACK_MODES = ("off", "optional", "mandatory")
 SESSION_TIMER_MODES = ("inactive", "optional", "required", "always")
 HOLD_TYPES = ("rfc3264", "rfc2543")
 RTCP_MUX_MODES = ("off", "on")
+# Регистрация на SIP-регистраторе (CUCM/Voisica/FreePBX/Asterisk). Без неё МСУ
+# доступен только по IP; с ней — набирается по имени/номеру из адресной книги
+# терминала. Подробности: mcuclient/sip_registration.py, docs/SIP_INTEROP.md.
+REG_EXPIRES_MIN, REG_EXPIRES_MAX = 60, 86400
+REG_RETRY_MIN, REG_RETRY_MAX = 3, 3600
 SESSION_EXPIRES_MIN, SESSION_EXPIRES_MAX = 0, 86400
 # RFC 4028: Session-Expires меньше 90 секунд быть не может.
 MIN_SE_MIN, MIN_SE_MAX = 90, 3600
@@ -132,6 +137,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "hold_type": "rfc3264",
             # rtcp-mux экономит порты, но ломается на старых шлюзах.
             "rtcp_mux": "off",
+        },
+        # Регистрация на регистраторе. По умолчанию выключена: в типовой
+        # лаборатории MCU звонят напрямую по IP, и включение регистрации без
+        # реального CUCM только замусорило бы лог 403-ми.
+        "registration": {
+            "enabled": False,
+            # Регистратор: sip:cucm.corp:5060 (порт обязателен только если
+            # он нестандартный — pjsip подставит 5060 сам).
+            "registrar": "",
+            # Домен для idUri/Contact. Если пусто — берётся хост registrar.
+            # На CUCM обязан совпадать с доменом линии, иначе «user not found».
+            "domain": "",
+            # Имя абонента = номер зала в плане нумерации (вместо него подставится
+            # имя комнаты, если пусто).
+            "username": "",
+            "password": "",
+            # Срок регистрации, сек. CUCM любит 3600, Asterisk — 120-300.
+            "expires_sec": 3600,
+            # Outbound-прокси (SBC), если регистрация идёт через него.
+            "proxies": [],
+            # Период повторной попытки после отказа, сек. 60 — компромисс:
+            # чаще — флуд регистратора, реже — долгое «не видно зал» после
+            # перезагрузки CUCM.
+            "retry_interval_sec": 60,
         },
         "codecs": {
             # Порядок = приоритет (сначала сверху). Набор подобран для
@@ -370,6 +399,34 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
                 "sip.interop.min_session_expires_sec не может быть больше "
                 "sip.interop.session_expires_sec"
             )
+    registration = sip.get("registration")
+    if registration is not None:
+        if not isinstance(registration, dict):
+            raise ConfigError("sip.registration должен быть объектом")
+        _check_bool("sip.registration.enabled", registration.get("enabled", False))
+        for key in ("registrar", "domain", "username", "password"):
+            if not isinstance(registration.get(key, ""), str):
+                raise ConfigError(f"sip.registration.{key}: ожидалась строка")
+        _check_int("sip.registration.expires_sec",
+                   registration.get("expires_sec", 3600),
+                   REG_EXPIRES_MIN, REG_EXPIRES_MAX)
+        _check_int("sip.registration.retry_interval_sec",
+                   registration.get("retry_interval_sec", 60),
+                   REG_RETRY_MIN, REG_RETRY_MAX)
+        _check_str_list("sip.registration.proxies", registration.get("proxies", []))
+        if registration.get("enabled"):
+            # Регистрация без адреса регистратора бессмысленна: pjsip уйдёт в
+            # саморегистрацию на хост idUri и будет молча получать 403.
+            if not str(registration.get("registrar", "")).strip():
+                raise ConfigError(
+                    "sip.registration.enabled=true, но sip.registration.registrar "
+                    "пуст — укажите регистратор, например sip:voip.corp:5060"
+                )
+            for pattern in registration.get("proxies", []) or []:
+                if not str(pattern).strip():
+                    raise ConfigError(
+                        "sip.registration.proxies: пустая строка в списке прокси"
+                    )
     _check_bool("sip.null_audio", sip.get("null_audio"))
     stun = sip.get("stun")
     if not isinstance(stun, dict):
@@ -663,6 +720,51 @@ class Config:
     @property
     def rtcp_mux(self) -> str:
         return str(self.interop.get("rtcp_mux", "off")).strip().lower()
+
+    @property
+    def registration(self) -> Dict[str, Any]:
+        """Секция sip.registration с дефолтами (отсутствующая секция = выключено)."""
+        merged = dict(DEFAULT_CONFIG["sip"]["registration"])
+        merged.update(self.raw["sip"].get("registration", {}) or {})
+        return merged
+
+    @property
+    def registration_enabled(self) -> bool:
+        return bool(self.registration.get("enabled", False))
+
+    @property
+    def registration_registrar(self) -> str:
+        return str(self.registration.get("registrar", "") or "").strip()
+
+    @property
+    def registration_domain(self) -> str:
+        """Домен idUri; при пустом — хост регистратора (он же realm по умолчанию)."""
+        domain = str(self.registration.get("domain", "") or "").strip()
+        if domain:
+            return domain
+        from .sip_registration import domain_from_registrar  # локально: цикл импорта
+
+        return domain_from_registrar(self.registration_registrar)
+
+    @property
+    def registration_username(self) -> str:
+        return str(self.registration.get("username", "") or "").strip()
+
+    @property
+    def registration_password(self) -> str:
+        return str(self.registration.get("password", "") or "").strip()
+
+    @property
+    def registration_expires_sec(self) -> int:
+        return int(self.registration.get("expires_sec", 3600) or 3600)
+
+    @property
+    def registration_proxies(self) -> List[str]:
+        return [str(p) for p in (self.registration.get("proxies") or []) if str(p).strip()]
+
+    @property
+    def registration_retry_interval_sec(self) -> int:
+        return int(self.registration.get("retry_interval_sec", 60) or 60)
 
     @property
     def null_audio(self) -> bool:

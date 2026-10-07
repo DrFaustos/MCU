@@ -60,6 +60,25 @@ _MIME = {
 }
 
 
+def _registration_dict(engine: Any) -> Dict[str, Any]:
+    """Состояние регистрации на регистраторе для панели/API.
+
+    Движок без секции `sip.registration` (старый конфиг, stub-сборка без
+    pjsua2) обязан вернуть выключенное состояние, а не уронить /api/status —
+    поэтому всё через getattr и try.
+    """
+    state = getattr(engine, "registration", None)
+    if isinstance(state, dict):
+        return state
+    return {
+        "enabled": False,
+        "registrar": "",
+        "username": "",
+        "registered": False,
+        "hint": "",
+    }
+
+
 class EngineDispatcher:
     """Сериализует доступ к движку в одном потоке, зарегистрированном в pjlib.
 
@@ -320,6 +339,7 @@ class WebSession:
             "conference_participants": self.conference.participants(),
             "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
             "sip_bridge": self.sip_bridge_stats(),
+            "registration": _registration_dict(eng),
             "sip_ports": self.sip_ports_stats(),
             "web_recording": self._web_recorder.is_recording,
         }
