@@ -55,6 +55,23 @@ Interop-стенд: `scripts/testbed/run_two_instance_interop_test.sh` (+ `two_i
 - `linux-dev` — Linux-специфика (упаковка/установка).
 - `fix/dtmf-tone-pump` — DTMF + pump (запушена в origin).
 - `feat/sip-interop-tuning` — секция `sip.interop` + `tests/test_sip_interop.py` + interop-стенд + `docs/SIP_INTEROP.md`.
+- `sip` и `h323` — две линии программы, обе ответвлены от `799fb02`, обе в origin.
+ Рабочие пространства разведены через `git worktree` (общая .git-база):
+ `~/Документы/Резюме/Portfolio/MCU` → `sip`, `../MCU-h323` → `h323`.
+ pytest в обоих: 987 тестов, failures=0, RC=0 (2026-10-07).
+- Синхронизация линий: `sip` — основная; в неё ничего из `h323` не мержится без
+ явного решения. Из `sip` в `h323` — merge (не rebase). Обратные переносы —
+ только cherry-pick конкретных коммитов.
+- Теги `v*` (запуск `release.yml`) — только из основной линии: workflow
+ реагирует на тег в любом месте репозитория, тег с h323 соберёт релиз с неё.
+- Два стенда одновременно: `scripts/dev/_common.sh` разводится через env
+ (`MCU_A_NAME`/`MCU_B_NAME`, `MCU_NET`, `MCU_SUBNET`, `MCU_SIP_PORT`), НО
+ `container_name` в `docker/sfu/docker-compose.yml` и `docker/turn/docker-compose.yml`
+ жёсткие (`mcu-mediasoup`, `mcu-coturn`) — вторая стойка SFU/TURN из другого
+ worktree не поднимется, пока имена не параметризованы.
+- В новый worktree не переносятся файлы вне git: `.gh_token` — симлинк на
+ основной worktree; `mediasoup-sidecar/node_modules` — после `npm install`
+ заново.
 
 Стенды call/dtmf/interop дают RC=0 на 2026-10-07. video-стенд в этот день
 падает И НА БАЗЕ fb904a5 (core dump в two_instance_video_call.py listen) —
