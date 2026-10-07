@@ -49,6 +49,7 @@ RealPresence Desktop/Mobile) — они ведь тоже регистрирую
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Callable
 from typing import Any
 
@@ -96,6 +97,51 @@ def normalize_sip_uri(uri: str) -> str:
         user, host = "", head
     head = f"{user}@{host.lower()}" if user else host.lower()
     return f"{scheme.lower()}:{head}{params}"
+
+
+def _bracket_ipv6(target: str) -> str:
+    """Голый IPv6 в скобки: ``::1`` -> ``[::1]``, ``[::1]:5060`` как есть.
+
+    Проверяем сначала ВЕСЬ адрес: ``::1`` — это адрес, а не «хост :: и порт 1»,
+    и rpartition по ':' испортил бы его молча.
+    """
+    try:
+        ipaddress.IPv6Address(target)
+    except ValueError:
+        pass
+    else:
+        return f"[{target}]"
+    host, sep, port = target.rpartition(":")
+    if sep:
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return target
+        return f"[{host}]:{port}"
+    return target
+
+
+def registrar_uri(uri: str) -> str:
+    """SIP-URI регистратора/прокси **со схемой** — то, что требует pjsua2.
+
+    В конфиг пишут «10.0.0.5:5060» — без схемы, как адрес АТС в любой
+    документации. ``normalize_sip_uri`` схему не добавляет (он общий с
+    разбором хоста), а ``Account.create()`` на URI без схемы бросает
+    ``PJSIP_EINVALIDSCHEME`` прямо из ``_start_account`` — и МСУ не стартует
+    вообще: не «не регистрируется», а именно не поднимается. Проверено на
+    pjsua2 2.16; это и ловит scripts/testbed/verify_registration.py.
+
+    Схема по умолчанию ``sip:``; ``sips:`` сохраняем, если оператор её указал
+    (она же означает TLS и порт 5061 по умолчанию). Голый IPv6 уводим в
+    скобки: без них URI неразбираем (RFC 3261, 25.1).
+    """
+    text = normalize_sip_uri(uri)
+    if not text:
+        return ""
+    scheme, sep, _ = text.partition(":")
+    if sep and scheme in ("sip", "sips"):
+        return text
+    return "sip:" + _bracket_ipv6(text)
 
 
 def host_of_uri(uri: str) -> str:
@@ -340,7 +386,7 @@ def configure_account(
 
     try:
         if registrar:
-            acc_cfg.regConfig.registrarUri = normalize_sip_uri(registrar)
+            acc_cfg.regConfig.registrarUri = registrar_uri(registrar)
         # pjsua2 по умолчанию ждёт 3600; короткий expiry (200 с у Asterisk) без
         # этого поля приводит к «регистрация протухла» ровно посреди конференции.
         acc_cfg.regConfig.timeoutSec = expires
@@ -363,7 +409,7 @@ def configure_account(
             )
 
         proxies = [
-            normalize_sip_uri(p)
+            registrar_uri(p)
             for p in (getattr(config, "registration_proxies", []) or [])
             if str(p).strip()
         ]
@@ -381,7 +427,7 @@ def configure_account(
             username or "<нет>",
             expires,
             ",".join(
-                normalize_sip_uri(p)
+                registrar_uri(p)
                 for p in (getattr(config, "registration_proxies", []) or [])
             ) or "-",
         )

@@ -31,6 +31,7 @@ from mcuclient.sip_registration import (
     explain_registration_failure,
     host_of_uri,
     normalize_sip_uri,
+    registrar_uri,
     registration_status,
     vector_from,
 )
@@ -118,6 +119,77 @@ class _Cfg:
 
 
 # ---------------------------------------------------------------- URI/хосты
+# ----------------------------------------------------- URI регистратора (схема)
+def test_registrar_uri_adds_scheme_for_bare_host():
+    """Регистратор без схемы — норма жизни, и он обязан подняться.
+
+    Боевой баг: в ``sip.registration.registrar`` пишут «10.0.0.5:5060» (так
+    адрес АТС выглядит в любой документации), а pjsua2 на URI без схемы
+    бросает PJSIP_EINVALIDSCHEME из ``Account.create()``. Движок при этом НЕ
+    стартует вообще — не «не регистрируется», а именно падает на старте, и
+    включение регистрации в конфиге убивало МСУ целиком.
+    """
+    assert registrar_uri("10.0.0.5:5060") == "sip:10.0.0.5:5060"
+    assert registrar_uri("voip.corp") == "sip:voip.corp"
+    # мусор и регистр режутся тем же правилом, что и в normalize_sip_uri
+    assert registrar_uri("  SIP: VoIP.Corp ") == "sip:voip.corp"
+
+
+def test_registrar_uri_keeps_explicit_scheme_and_params():
+    # sips: = TLS и порт 5061 по умолчанию, подменять его sip: нельзя
+    assert registrar_uri("sips:cucm.corp") == "sips:cucm.corp"
+    assert registrar_uri("sip:voip.corp") == "sip:voip.corp"
+    # транспортный параметр — не схема, его не трогаем
+    assert registrar_uri("cucm.corp;transport=tcp") == "sip:cucm.corp;transport=tcp"
+
+
+def test_registrar_uri_brackets_ipv6():
+    """Голый IPv6 без скобок — неразбираемый URI (RFC 3261, 25.1).
+
+    ``::1`` при наивном разборе по последней ':' превращается в «хост ``::`` и
+    порт 1», поэтому адрес проверяется ЦЕЛИКОМ до любой нарезки.
+    """
+    assert registrar_uri("::1") == "sip:[::1]"
+    assert registrar_uri("2001:db8::5") == "sip:[2001:db8::5]"
+    assert registrar_uri("[::1]:5060") == "sip:[::1]:5060"
+    # Порт к голому IPv6 приписать нельзя: "2001:db8::5:5060" — САМ по себе
+    # корректный адрес (5060 — валидная шестнадцатеричная группа), а не
+    # «адрес + порт». Разрешить неоднозначность нечем, поэтому трактоваем
+    # строку целиком как адрес; оператор обязан писать скобки сам.
+    assert registrar_uri("2001:db8::5:5060") == "sip:[2001:db8::5:5060]"
+
+
+def test_registrar_uri_empty_stays_empty():
+    """Пустой регистратор = «не настраивать».
+
+    ``sip:`` приписывать нельзя: pjsip принял бы такой URI и ушёл в вечный
+    цикл несостоявшейся регистрации вместо честного «регистрация выключена».
+    """
+    assert registrar_uri("") == ""
+    assert registrar_uri("   ") == ""
+    assert registrar_uri(None) == ""
+
+
+def test_configure_account_writes_registrar_with_scheme():
+    """Схема обязана доезжать до AccountConfig, а не только до юнитов.
+
+    Фейк-сборка pjsua2 схему не проверяет (в отличие от настоящей), поэтому
+    прежний тест проходил случайно: там схема уже была в исходной строке.
+    """
+    cfg = _Cfg(registrar="10.0.0.5:5060")
+    acc, log = _FakeAccCfg(), _FakeLog()
+    configure_account(_FakePj, acc, cfg, log)
+    assert acc.regConfig.registrarUri == "sip:10.0.0.5:5060"
+
+
+def test_configure_account_proxies_get_scheme_too():
+    """Прокси — тот же AccountConfig, та же проверка схемы в pjsua2."""
+    cfg = _Cfg(registrar="voip.corp", proxies=["sbc1.corp:5062", "sip:sbc2.corp"])
+    acc, log = _FakeAccCfg(), _FakeLog()
+    configure_account(_FakePj, acc, cfg, log)
+    assert list(acc.sipConfig.proxies) == ["sip:sbc1.corp:5062", "sip:sbc2.corp"]
+
+
 def test_normalize_sip_uri_cuts_junk():
     assert normalize_sip_uri("  <SIP: VoIP.Corp:5060 > ") == "sip:voip.corp:5060"
     assert normalize_sip_uri("") == ""
