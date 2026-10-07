@@ -61,3 +61,10 @@ https://polycom-moscow.ru/polycom-realpresence-mobile.php
   Вывод: Execution completed successfully
   Файлы: .agent/trace_msgs.sh, mcuclient/call_service.py
 <!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: Продолжай
+  Причина: [tool] save_knowledge
+error: empty text
+  Вывод: Execution finished with errors
+<!-- source: code-agent -->
