@@ -45,6 +45,49 @@ MIN_SE_MIN, MIN_SE_MAX = 90, 3600
 PJSUA_MAX_CALLS_DEFAULT = 32
 MAX_CALLS_HARD_LIMIT = 64
 
+# --- Профили кодеков -------------------------------------------------
+# Порядок в списке = приоритет при согласовании SDP.
+#  * "max_compat" — набор по умолчанию: максимум вариантов, чтобы
+#    согласиться и с Polycom/Sony/Cisco 2009 года, и с софт-клиентами.
+#    Лишние варианты в SDP безвредны: отвечает тот, кто звонит.
+#  * "g711_only"  — аварийный режим для старых H.323-шлюзов и DECT,
+#    которые падают на нетипичном наборе (только PCMU/PCMA + H.264 BP).
+#  * "wideband"   — однородная современная сеть: G.722/opus + H.264 HP.
+#    Один «унифицированный» профиль проще диагностировать, но старый
+#    парк в него не позвонит — поэтому он НЕ по умолчанию.
+CODEC_PROFILES: Dict[str, Dict[str, List[str]]] = {
+    "max_compat": {
+        "audio": [
+            "PCMU/8000/1", "PCMA/8000/1", "G722/16000/1",
+            "G7221/16000/1", "G7221/32000/1", "G7221/48000/1",
+            "G719/48000/1", "G723/8000/1", "G728/8000/1",
+            "G729/8000/1", "opus/48000/2", "speex/16000/1",
+            "speex/8000/1", "speex/32000/1", "iLBC/8000/1",
+            "GSM/8000/1",
+        ],
+        "video": ["H264/90000", "H263/90000", "H263-1998/90000",
+                  "H261/90000", "H265/90000", "VP8/90000", "VP9/90000"],
+    },
+    "g711_only": {
+        "audio": ["PCMU/8000/1", "PCMA/8000/1"],
+        "video": ["H264/90000", "H263/90000"],
+    },
+    "wideband": {
+        "audio": ["G722/16000/1", "opus/48000/2", "G7221/16000/1",
+                  "G719/48000/1", "PCMU/8000/1", "PCMA/8000/1"],
+        "video": ["H264/90000", "VP8/90000"],
+    },
+}
+CODEC_PROFILE_MODES = tuple(CODEC_PROFILES)
+DEFAULT_CODEC_PROFILE = "max_compat"
+
+# TLS для web-панели. 'off' — обычный HTTP (дефолт для закрытого контура:
+# ни предупреждений браузера, ни протухших сертификатов, ни отказа работы).
+WEB_TLS_MODES = ("off", "self_signed", "custom")
+
+# Разрешённые символы SIP-user/домена (см. mcuclient/sip_address.py).
+IDENTITY_HOST_RE = r"^[A-Za-z0-9._:\[\]\-]+$"
+
 
 def default_recording_dir() -> Path:
     """Кроссплатформенный путь по умолчанию для записей конференций.
@@ -68,6 +111,35 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "listen": "0.0.0.0",
         "port": 5060,
         "transport": "udp",
+        # Адрес МСУ в SIP — «домен/адрес», который набирают терминалы.
+        # Меняется на горячую из нативного GUI и из web-панели
+        # (POST /api/address); подробности — docs/SIP_ADDRESSING.md.
+        "identity": {
+            # Домен или IP МСУ. ПУСТО = вызов по IP: берётся sip.listen,
+            # а если там 0.0.0.0 — фактический IP машины. Специально НЕ
+            # подставляем DNS-имя хоста: в закрытом контуре DNS может не
+            # быть, и терминал наберёт адрес, которого нет в плане.
+            "domain": "",
+            # SIP-user (номер зала). Пусто — sanitized имя комнаты.
+            "user": "",
+            # Имя в From/To (Human-Readable). На панель не влияет,
+            # но его видно в CUCM/на терминале.
+            "display_name": "",
+        },
+        # TLS для SIP (транспорт "tls"). В закрытом контуре не нужен, но
+        # если включён — сертификат НЕ должен быть причиной отказа: без
+        # своих файлов генерируется самоподписанный, верификация пира по
+        # умолчанию выключена (иначе pjsip срывает TLS-handshake с
+        # терминалом без нашей CA).
+        "tls": {
+            "cert_file": "",
+            "key_file": "",
+            "verify_peer": False,
+            # Срок самоподписанного сертификата, дней. 3650 = «не протухнет
+            # за время жизни стенда»: протухший сертификат = отказ звонка,
+            # а в закрытом контуре это ровно то, чего быть не должно.
+            "self_signed_days": 3650,
+        },
         "allowed_peers": [],
         "require_encryption": False,
         # Шифрование медиа (SRTP). Для совместимости с аппаратным парком
@@ -163,6 +235,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "retry_interval_sec": 60,
         },
         "codecs": {
+            # Профиль набора: см. CODEC_PROFILES. Явные audio/video ниже
+            # = содержимое профиля по умолчанию; если поменяете профиль в
+            # GUI/web, список перезапишется.
+            "profile": DEFAULT_CODEC_PROFILE,
             # Порядок = приоритет (сначала сверху). Набор подобран для
             # максимальной совместимости с парком ВКС Polycom/Sony и
             # спецификацией Polycom RealPresence Desktop:
@@ -175,6 +251,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             #  * opus — современные SIP-клиенты.
             # Проприетарные Polycom Siren 14 / Siren LPR в PJSIP отсутствуют;
             # если терминал их предлагает, сработает согласование по G.722/G.711.
+            # Полный набор = профиль "max_compat" (см. CODEC_PROFILES).
+            # Чем больше вариантов в SDP, тем выше шанс пересечься с редким
+            # терминалом: предложение лишнего кодека ничем не "платит" —
+            # выбирает вызываемая сторона. PJSIP включает только реально
+            # собранные в библиотеке кодеки (зонд 2.16: G7221*/G719/G723/
+            # G728/G729 в сборке отсутствуют и молча игнорируются, speex/
+            # iLBC/GSM/opus есть) — поэтому такой список безопасен.
             "audio": [
                 "PCMU/8000/1",
                 "PCMA/8000/1",
@@ -187,6 +270,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "G728/8000/1",
                 "G729/8000/1",
                 "opus/48000/2",
+                "speex/16000/1",
+                "speex/8000/1",
+                "speex/32000/1",
+                "iLBC/8000/1",
+                "GSM/8000/1",
             ],
             # Порядок = приоритет. Спецификация Polycom RealPresence Desktop:
             #  * H.264 / H.264 High Profile — основной (Polycom 720p/1080p).
@@ -327,6 +415,23 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ConfigError(
             f"sip.transport: '{transport}' не поддерживается, ожидается одно из {SUPPORTED_TRANSPORTS}"
         )
+    tls = sip.get("tls")
+    if tls is not None:
+        if not isinstance(tls, dict):
+            raise ConfigError("sip.tls должен быть объектом")
+        for key in ("cert_file", "key_file"):
+            if not isinstance(tls.get(key, ""), str):
+                raise ConfigError(f"sip.tls.{key}: ожидалась строка")
+        _check_bool("sip.tls.verify_peer", tls.get("verify_peer", False))
+        _check_int("sip.tls.self_signed_days", tls.get("self_signed_days", 3650),
+                   1, 36500)
+    identity = sip.get("identity")
+    if identity is not None:
+        if not isinstance(identity, dict):
+            raise ConfigError("sip.identity должен быть объектом")
+        for key in ("domain", "user", "display_name"):
+            if not isinstance(identity.get(key, ""), str):
+                raise ConfigError(f"sip.identity.{key}: ожидалась строка")
     _check_bool("sip.require_encryption", sip.get("require_encryption"))
     srtp = sip.get("srtp", "")
     if not isinstance(srtp, str) or srtp.strip().lower() not in SRTP_MODES:
@@ -512,7 +617,15 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         token = web.get("auth_token", "")
         if not isinstance(token, str):
             raise ConfigError("features.web.auth_token: ожидалась строка")
-        _check_bool("features.web.tls", web.get("tls", False))
+        tls_mode = web.get("tls", False)
+        if isinstance(tls_mode, bool):
+            pass  # legacy: True == self_signed
+        elif not isinstance(tls_mode, str) or tls_mode.strip().lower() \
+                not in WEB_TLS_MODES:
+            raise ConfigError(
+                f"features.web.tls: '{tls_mode}' не поддерживается, "
+                f"ожидается одно из {WEB_TLS_MODES} или true/false"
+            )
         for key in ("cert_file", "key_file"):
             if not isinstance(web.get(key, ""), str):
                 raise ConfigError(f"features.web.{key}: ожидалась строка")
@@ -637,6 +750,53 @@ class Config:
     @property
     def sip_transport(self) -> str:
         return str(self.raw["sip"]["transport"]).lower()
+
+    @property
+    def sip_tls(self) -> Dict[str, Any]:
+        """Секция sip.tls со значениями по умолчанию."""
+        base = dict(DEFAULT_CONFIG["sip"]["tls"])
+        base.update(self.raw["sip"].get("tls", {}) or {})
+        return base
+
+    @property
+    def identity(self) -> Dict[str, Any]:
+        """Секция sip.identity со значениями по умолчанию (пустой = IP-режим)."""
+        base = dict(DEFAULT_CONFIG["sip"]["identity"])
+        base.update(self.raw["sip"].get("identity", {}) or {})
+        return base
+
+    @property
+    def sip_domain(self) -> str:
+        """Домен/адрес МСУ. '' = звоним по IP (историческое поведение)."""
+        return str(self.identity.get("domain", "") or "").strip()
+
+    @property
+    def sip_user(self) -> str:
+        """SIP-user МСУ (номер зала). '' = производим от имени комнаты."""
+        return str(self.identity.get("user", "") or "").strip()
+
+    @property
+    def sip_display_name(self) -> str:
+        return str(self.identity.get("display_name", "") or "").strip()
+
+    @property
+    def codec_profile(self) -> str:
+        profile = str(self.raw["sip"]["codecs"].get("profile", "") or "").strip().lower()
+        return profile if profile in CODEC_PROFILE_MODES else DEFAULT_CODEC_PROFILE
+
+    @property
+    def web_tls_mode(self) -> str:
+        """'off' | 'self_signed' | 'custom' (legacy bool -> self_signed)."""
+        raw = self.web.get("tls", False)
+        if isinstance(raw, bool):
+            return "self_signed" if raw else "off"
+        mode = str(raw or "").strip().lower()
+        return mode if mode in WEB_TLS_MODES else "off"
+
+    @property
+    def web_tls(self) -> bool:
+        """Нужен ли SSLContext (любой режим, кроме 'off')."""
+        return self.web_tls_mode != "off"
 
     @property
     def require_encryption(self) -> bool:
@@ -776,11 +936,32 @@ class Config:
 
     @property
     def audio_codecs(self) -> List[str]:
-        return list(self.raw["sip"]["codecs"]["audio"])
+        """Аудиокодеки: явный список win над профилем.
+
+        Логика: если пользователь руками перечислил `sip.codecs.audio`,
+        его список и есть истина. Если секция пришла из профиля (совпадает
+        с ним) или пуста — берём профиль целиком. Так кнопка «максимум
+        совместимости» в GUI/web реально меняёт набор, а не упирается в
+        закешированный JSON.
+        """
+        return self._codecs_of("audio")
 
     @property
     def video_codecs(self) -> List[str]:
-        return list(self.raw["sip"]["codecs"]["video"])
+        return self._codecs_of("video")
+
+    def _codecs_of(self, kind: str) -> List[str]:
+        raw = list(self.raw["sip"]["codecs"].get(kind) or [])
+        profile = CODEC_PROFILES.get(self.codec_profile, CODEC_PROFILES[DEFAULT_CODEC_PROFILE])
+        wanted = list(profile.get(kind) or [])
+        if not raw:
+            return wanted
+        # Совпадение с другим профилем = «это не ручная настройка, а след
+        # от профиля»: слушаем текущий профиль.
+        for other in CODEC_PROFILES.values():
+            if raw == list(other.get(kind) or []) and raw != wanted:
+                return wanted
+        return raw
 
     @property
     def stun_server(self) -> str:
@@ -914,6 +1095,100 @@ class Config:
 
     def set_bandwidth(self, kbps: int) -> None:
         self.raw["media"]["bandwidth_kbps"] = max(BANDWIDTH_MIN, int(kbps))
+
+    # --- адрес МСУ, шифрование, кодеки: используются GUI и web-панелью ---
+    def set_sip_address(self, *, domain: Optional[str] = None,
+                        user: Optional[str] = None,
+                        display_name: Optional[str] = None) -> Dict[str, str]:
+        """Меняет домен/адрес МСУ (nil = не трогаем поле).
+
+        Значение НОРМАЛИЗУЕТСЯ так же, как это делает движок при сборке
+        idUri (см. mcuclient/sip_address.py), поэтому в конфиг не попадёт
+        'sip:MCU@Hall 1 ' вместо 'mcu@hall-1'.
+        """
+        from .sip_address import (
+            format_host_port,
+            normalize_domain,
+            parse_host_port,
+            sanitize_sip_user,
+        )
+
+        identity = self.raw["sip"].setdefault("identity", {})
+        applied: Dict[str, str] = {}
+        if domain is not None:
+            raw = str(domain).strip()
+            # Порт из адреса — «набирать сюда», а НЕ «слушать здесь»: в
+            # sip.port не пишем, иначе MCU оглохнет на стандартном 5060, а
+            # в Contact порт наоборот пропадёт. Храним 'хост:порт' как есть,
+            # беря порт из СТРОКИ ДО нормализации (normalize_domain его режет).
+            _h, port = parse_host_port(raw, 0)
+            host = normalize_domain(raw) or raw
+            if host and port:
+                host = format_host_port(host, port)
+            identity["domain"] = host
+            applied["domain"] = host
+            if port:
+                applied["port"] = str(port)
+        if user is not None:
+            cleaned = sanitize_sip_user(user, "")
+            identity["user"] = cleaned
+            applied["user"] = cleaned
+        if display_name is not None:
+            identity["display_name"] = str(display_name).strip()
+            applied["display_name"] = identity["display_name"]
+        return applied
+
+    def set_listen(self, listen: str, port: Optional[int] = None) -> None:
+        self.raw["sip"]["listen"] = str(listen or "0.0.0.0").strip()
+        if port is not None:
+            self.raw["sip"]["port"] = max(PORT_MIN, min(PORT_MAX, int(port)))
+
+    def set_srtp(self, mode: str) -> None:
+        """Режим SRTP: 'off' | 'optional' | 'mandatory' ('auto' = '' по-старому).
+
+        Заодно синхронизирует legacy-флаг require_encryption, чтобы
+        старые конфиги/CLI не противоречили новому полю.
+        """
+        clean = str(mode or "").strip().lower()
+        if clean in ("auto", ""):
+            clean = ""
+        if clean not in SRTP_MODES:
+            raise ConfigError(
+                f"режим SRTP '{mode}' не поддерживается, ожидается {SRTP_MODES}")
+        self.raw["sip"]["srtp"] = clean
+        self.raw["sip"]["require_encryption"] = clean == "mandatory"
+
+    def set_codec_profile(self, profile: str) -> List[str]:
+        """Применить профиль кодеков; возвращает новый набор (audio+video)."""
+        clean = str(profile or "").strip().lower()
+        if clean not in CODEC_PROFILE_MODES:
+            raise ConfigError(
+                f"профиль кодеков '{profile}' не поддерживается, "
+                f"ожидается одно из {CODEC_PROFILE_MODES}")
+        codecs = self.raw["sip"].setdefault("codecs", {})
+        chosen = CODEC_PROFILES[clean]
+        codecs["profile"] = clean
+        codecs["audio"] = list(chosen["audio"])
+        codecs["video"] = list(chosen["video"])
+        return list(chosen["audio"]) + list(chosen["video"])
+
+    def set_web_tls(self, mode) -> str:
+        """TLS web-панели: bool (legacy) или 'off'|'self_signed'|'custom'."""
+        if isinstance(mode, bool):
+            clean = "self_signed" if mode else "off"
+        else:
+            clean = str(mode or "").strip().lower()
+        if clean not in WEB_TLS_MODES:
+            raise ConfigError(
+                f"features.web.tls '{mode}' не поддерживается, "
+                f"ожидается одно из {WEB_TLS_MODES}")
+        self.raw.setdefault("features", {}).setdefault("web", {})["tls"] = clean
+        return clean
+
+    def set_web_port(self, port: int) -> int:
+        port_i = max(PORT_MIN, min(PORT_MAX, int(port)))
+        self.raw.setdefault("features", {}).setdefault("web", {})["port"] = port_i
+        return port_i
 
     def set_video_quality(self, width: int, height: int, fps: int) -> None:
         self.raw["media"]["video"].update(width=width, height=height, fps=fps)

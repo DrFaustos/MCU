@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,13 @@ from .recorder_service import RecorderService
 from .call_registry import CallRegistry
 from .chat_service import ChatService
 from .dtmf_service import DtmfService
+from .sip_address import (
+    ANY_BIND_HOSTS,
+    AddressReport,
+    local_host_ip,
+    resolve_identity,
+    sanitize_sip_user,
+)
 from .sip_registration import (
     RegistrationManager,
     build_id_uri,
@@ -836,21 +844,115 @@ class SipEngine:
             return getattr(tt, name.upper(), None)
         return None
 
-    def _configure_transport(self, ep) -> None:  # pragma: no cover
-        transport = self.config.sip_transport
+    def _build_transport_config(self, transport: Optional[str] = None,
+                                port: Optional[int] = None,
+                                listen: Optional[str] = None):  # pragma: no cover
+        """TransportConfig + TLS-материалы. Возвращает (ttype, cfg, warning).
+
+        Требование закрытого контура: сертификат НИКОГДА не должен ронять
+        МСУ. Поэтому для ``tls``:
+          * свои файлы берутся из ``sip.tls.cert_file/key_file``;
+          * если их нет или они нечитаемы — генерируется самоподписанный с
+            сроком ~10 лет (протухший сертификат = отказ звонка, что в
+            закрытой сети тем более неприемлемо);
+          * ``verify_peer`` по умолчанию False: терминалы без нашей CA иначе
+            не проходят TLS-handshake, и зал «не дозванивается» без внятной
+            ошибки.
+        """
+        transport = str(transport or self.config.sip_transport).lower()
         cfg = _pj.TransportConfig()
-        cfg.port = self.config.sip_port
+        cfg.port = int(port if port is not None else self.config.sip_port)
         # Привязка к конкретному адресу из sip.listen. Без этого pjsua2
         # биндится на 0.0.0.0 и игнорирует заданный интерфейс (в закрытом
         # контуре это нежелательно, а в тестах мешает изоляции инстансов).
-        listen = (self.config.sip_listen or "").strip()
-        if listen and listen not in ("0.0.0.0", "::", "*"):
+        raw_listen = (listen if listen is not None else self.config.sip_listen or "")
+        bound = str(raw_listen).strip()
+        if bound and bound not in ANY_BIND_HOSTS:
             if hasattr(cfg, "boundAddress"):
-                cfg.boundAddress = listen
+                cfg.boundAddress = bound
         ttype = self._transport_type(transport)
         if ttype is None:
             raise RuntimeError(f"Неизвестный тип транспорта: {transport}")
-        ep.transportCreate(ttype, cfg)
+        warning = ""
+        if transport == "tls":
+            warning = self._apply_tls_material(cfg, bound or self._cached_local_ip())
+        return ttype, cfg, warning
+
+    def _apply_tls_material(self, cfg, host: str) -> str:  # pragma: no cover
+        """Проставить cert/key/verify в TransportConfig.tlsConfig.
+
+        Возвращает текстовое предупреждение (или '' если всё чисто). Никаких
+        исключений наружу: отказ генерации сертификата = возврат на UDP, а
+        не падение МСУ.
+        """
+        tls_cfg = getattr(cfg, "tlsConfig", None)
+        if tls_cfg is None:
+            log.warning("pjsua2 без tlsConfig: TLS недоступен, идём на UDP")
+            return "в этой сборке pjsua2 нет tlsConfig — TLS выключен"
+        try:
+            tls = self.config.sip_tls
+        except Exception:  # noqa: BLE001 — старый конфиг без секции tls
+            tls = {}
+        cert = str(tls.get("cert_file", "") or "").strip()
+        key = str(tls.get("key_file", "") or "").strip()
+        days = int(tls.get("self_signed_days", 3650) or 3650)
+        if not (cert and key and Path(cert).is_file() and Path(key).is_file()):
+            try:
+                from .tls_utils import ensure_sip_tls_cert
+
+                cert_p, key_p = ensure_sip_tls_cert(host=host, days=days)
+                cert, key = str(cert_p), str(key_p)
+                log.info("SIP-TLS: сгенерирован самоподписанный сертификат %s", cert)
+            except Exception as exc:  # noqa: BLE001
+                log.error("SIP-TLS: сертификат не готов (%s) — откат на UDP", exc)
+                return f"сертификат SIP-TLS недоступен ({exc}) — транспорт UDP"
+        try:
+            tls_cfg.certFile = cert
+            tls_cfg.privKeyFile = key
+            # ВАЖНО: CA не требуем, пира не проверяем — иначе любой терминал
+            # без нашего корневого сертификата отсекается на handshake.
+            tls_cfg.verifyServer = False
+            tls_cfg.verifyClient = bool(tls.get("verify_peer", False))
+            if hasattr(tls_cfg, "requireClientCert"):
+                tls_cfg.requireClientCert = bool(tls.get("verify_peer", False))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tlsConfig не применился полностью: %s", exc)
+        return ""
+
+    def _create_transport(self, ep, transport: Optional[str] = None,
+                          port: Optional[int] = None,
+                          listen: Optional[str] = None) -> int:  # pragma: no cover
+        """Создать транспорт; TLS без сертификата молча деградирует в UDP.
+
+        Возвращает id транспорта (0 — если pjsua2 не вернул). Идемпотентен для
+        горячего применения настроек: вызывается и на старте, и при смене
+        адреса/порта из GUI/web.
+        """
+        wanted = str(transport or self.config.sip_transport).lower()
+        ttype, cfg, warning = self._build_transport_config(
+            transport=wanted, port=port, listen=listen)
+        try:
+            tid = ep.transportCreate(ttype, cfg)
+        except Exception as exc:  # noqa: BLE001
+            if wanted != "tls":
+                raise
+            log.error("TLS-транспорт не поднялся (%s) — поднимаем UDP", exc)
+            warning = f"TLS не поднялся ({exc}) — транспорт UDP"
+            ttype, cfg, _ = self._build_transport_config(
+                transport="udp", port=port, listen=listen)
+            tid = ep.transportCreate(ttype, cfg)
+        if warning:
+            self.events.emit("sip.transport.fallback", reason=warning)
+        try:
+            self._transport_id = int(tid)
+        except (TypeError, ValueError):
+            self._transport_id = 0
+        log.info("SIP-транспорт: %s порт %s (id=%s)",
+                 wanted, cfg.port, tid)
+        return self._transport_id
+
+    def _configure_transport(self, ep) -> None:  # pragma: no cover
+        self._create_transport(ep)
 
     def _aud_mgr(self, ep=None):  # pragma: no cover
         return self._media.aud_mgr()
@@ -934,6 +1036,56 @@ class SipEngine:
             pass
         return False
 
+    def _build_account_config(self):  # pragma: no cover
+        """Собрать AccountConfig из текущего Config.
+
+        Отдельный метод — чтобы горячая смена адреса/регистрации делала
+        `account.modify(self._build_account_config())` вместо перезапуска
+        движка (второй start/stop pjsua2 в одном процессе валит процесс).
+        """
+        acc_cfg = _pj.AccountConfig()
+        acc_cfg.idUri = self._build_id_uri()
+        # Видео: авто-передача/приём, если видео включено в конфиге.
+        vcfg = getattr(acc_cfg, "videoConfig", None)
+        if vcfg is not None and self._video_supported:
+            try:
+                vcfg.autoTransmitOutgoing = bool(self.config.video_call_enabled)
+                vcfg.autoShowIncoming = True
+                # Выбранное устройство захвата для ВСЕХ звонков аккаунта.
+                # Это правильная точка выбора источника: PJSIP иначе открывает
+                # дефолтный dev 0 (реальную камеру) ещё до vidSetStream.
+                if hasattr(vcfg, "defaultCaptureDevice"):
+                    vcfg.defaultCaptureDevice = self._selected_capture_device()
+                log.info(
+                    "Видео-аккаунт: autoTransmit=%s, captureDev=%s",
+                    vcfg.autoTransmitOutgoing,
+                    getattr(vcfg, "defaultCaptureDevice", "?"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("videoConfig недоступен: %s", exc)
+        # SRTP. Три режима, а не два: 'optional' — единственный вариант,
+        # при котором и Polycom с включённым SRTP, и старый шлюз без
+        # шифрования остаются в звонке. Значение берём ИМЕНЕМ константы,
+        # т.к. в разных сборках pjsua2 числа enum'ов не совпадают.
+        media_cfg = getattr(acc_cfg, "mediaConfig", None)
+        srtp_mode = self.config.srtp
+        if media_cfg is not None and hasattr(media_cfg, "srtpUse"):
+            try:
+                media_cfg.srtpUse = srtp_use_value(_pj, srtp_mode)
+                log.info("SRTP: режим '%s' -> srtpUse=%d", srtp_mode, media_cfg.srtpUse)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("SRTP '%s' не применён: %s", srtp_mode, exc)
+        # ICE/TURN/keep-alive — на уровне аккаунта (в uaConfig их нет).
+        self._configure_account_nat(acc_cfg)
+        self._configure_account_interop(acc_cfg)
+        # Регистрация: regConfig + authCreds + proxies. Делаем ДО create():
+        # pjsip шлёт REGISTER сразу при добавлении аккаунта, и без
+        # проставленных полей он уйдёт в саморегистрацию на хост idUri.
+        self._registration = configure_account_registration(
+            _pj, acc_cfg, self.config, log, emit=self.events.emit
+        )
+        return acc_cfg
+
     def _start_account(self, ep) -> None:  # pragma: no cover
         engine = self
 
@@ -976,47 +1128,7 @@ class SipEngine:
             def onRegState(self, prm) -> None:  # noqa: N802
                 engine._on_reg_state(prm)
 
-        acc_cfg = _pj.AccountConfig()
-        acc_cfg.idUri = self._build_id_uri()
-        # Видео: авто-передача/приём, если видео включено в конфиге.
-        vcfg = getattr(acc_cfg, "videoConfig", None)
-        if vcfg is not None and self._video_supported:
-            try:
-                vcfg.autoTransmitOutgoing = bool(self.config.video_call_enabled)
-                vcfg.autoShowIncoming = True
-                # Выбранное устройство захвата для ВСЕХ звонков аккаунта.
-                # Это правильная точка выбора источника: PJSIP иначе открывает
-                # дефолтный dev 0 (реальную камеру) ещё до vidSetStream.
-                if hasattr(vcfg, "defaultCaptureDevice"):
-                    vcfg.defaultCaptureDevice = self._selected_capture_device()
-                log.info(
-                    "Видео-аккаунт: autoTransmit=%s, captureDev=%s",
-                    vcfg.autoTransmitOutgoing,
-                    getattr(vcfg, "defaultCaptureDevice", "?"),
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.debug("videoConfig недоступен: %s", exc)
-        # SRTP. Три режима, а не два: 'optional' — единственный вариант,
-        # при котором и Polycom с включённым SRTP, и старый шлюз без
-        # шифрования остаются в звонке. Значение берём ИМЕНЕМ константы,
-        # т.к. в разных сборках pjsua2 числа enum'ов не совпадают.
-        media_cfg = getattr(acc_cfg, "mediaConfig", None)
-        srtp_mode = self.config.srtp
-        if media_cfg is not None and hasattr(media_cfg, "srtpUse"):
-            try:
-                media_cfg.srtpUse = srtp_use_value(_pj, srtp_mode)
-                log.info("SRTP: режим '%s' -> srtpUse=%d", srtp_mode, media_cfg.srtpUse)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("SRTP '%s' не применён: %s", srtp_mode, exc)
-        # ICE/TURN/keep-alive — на уровне аккаунта (в uaConfig их нет).
-        self._configure_account_nat(acc_cfg)
-        self._configure_account_interop(acc_cfg)
-        # Регистрация: regConfig + authCreds + proxies. Делаем ДО create():
-        # pjsip шлёт REGISTER сразу при добавлении аккаунта, и без
-        # проставленных полей он уйдёт в саморегистрацию на хост idUri.
-        self._registration = configure_account_registration(
-            _pj, acc_cfg, self.config, log, emit=self.events.emit
-        )
+        acc_cfg = self._build_account_config()
         self._acc_cfg = acc_cfg
         self._account = _Account()
         self._account.create(acc_cfg)
@@ -1181,43 +1293,216 @@ class SipEngine:
 
         return re.sub(r"[^A-Za-z0-9._-]+", "-", self.config.room_name).strip("-")
 
-    def _build_id_uri(self) -> str:
-        """SIP-URI аккаунта.
+    def _identity_kwargs(self) -> Dict[str, Any]:
+        """Параметры адреса МСУ из конфига (безопасно для старых конфигов)."""
+        try:
+            domain = self.config.sip_domain
+        except Exception:  # noqa: BLE001 — старый конфиг без секции identity
+            domain = ""
+        try:
+            user = self.config.sip_user
+        except Exception:  # noqa: BLE001
+            user = ""
+        try:
+            display = self.config.sip_display_name
+        except Exception:  # noqa: BLE001
+            display = ""
+        return {
+            "user": user,
+            "domain": domain,
+            "display_name": display,
+            "listen": self.config.sip_listen,
+            "port": self.config.sip_port,
+            "transport": self.config.sip_transport,
+            "public_address": self.config.nat_public_address,
+            "fallback_user": self._sanitized_room_user(),
+        }
 
-        Без регистрации — как раньше: ``sip:<имя комнаты>@<IP МСУ>`` (звонок по
-        IP). С регистрацией хостом становится ДОМЕН, а пользователем — имя
-        абонента из конфига: на CUCM/Voisica линия ищется как ``user@domain``,
-        и URI с IP-хостом регистратор отбивает («404 not found» либо 403).
+    def address_report(self) -> AddressReport:
+        """Отчёт «как нас набирают»: домен, IP, URI, предупреждения.
+
+        Тот же объект уходит в GUI (панель «Адрес МСУ») и в web
+        (``GET /api/status`` -> ``address``), поэтому значение из любой точки
+        одинаковое.
         """
+        kwargs = self._identity_kwargs()
+        kwargs["local_ip"] = self._cached_local_ip()
+        return resolve_identity(**kwargs)
+
+    def _cached_local_ip(self) -> str:
+        """IP один раз на процесс: дёргать socket на каждый /api/status — шум."""
+        cached = getattr(self, "_local_ip_cached", None)
+        if not cached:
+            cached = self._local_ip()
+            self._local_ip_cached = cached
+        return cached
+
+    def _build_id_uri(self) -> str:
+        """SIP-URI аккаунта (idUri -> Contact/From).
+
+        Приоритет хоста: ``sip.identity.domain`` (домен из GUI/web) ->
+        ``sip.nat.public_address`` -> конкретный ``sip.listen`` -> IP машины.
+        Пустой домен = прежнее поведение (звонок по IP), ничего не ломаем.
+
+        С регистрацией пользователем становится имя абонента, а хостом —
+        ДОМЕН: на CUCM/Voisica линия ищется как ``user@domain``, и URI с
+        IP-хостом регистратор отбивает («404 not found» либо 403).
+        """
+        report = self.address_report()
+        host = report.host
         try:
             enabled = bool(self.config.registration_enabled)
-            username = self.config.registration_username if enabled else ""
-            domain = self.config.registration_domain if enabled else ""
         except Exception:  # noqa: BLE001 — конфиг без секции registration
-            enabled, username, domain = False, "", ""
-        if not enabled:
-            host = self.config.sip_listen
-            if host in ("", "0.0.0.0", "::", "*"):
-                host = self._local_ip()
-            return build_id_uri("", "", self._sanitized_room_user(), host)
-        return build_id_uri(username, domain, self._sanitized_room_user(),
-                            self._local_ip())
+            enabled = False
+        if enabled:
+            username = self.config.registration_username
+            domain = self.config.registration_domain or report.domain
+            return build_id_uri(username, domain, report.user, host)
+        return build_id_uri(report.user, report.domain or host,
+                            report.user, host)
 
     @staticmethod
     def _local_ip() -> str:
-        import socket
+        """IP машины (см. :func:`mcuclient.sip_address.local_host_ip`)."""
+        return local_host_ip()
+
+    # --- горячая смена адреса МСУ, шифрования и кодеков -------------------
+    def current_address(self) -> Dict[str, Any]:
+        """Отчёт об адресе в виде JSON-словаря (для GUI/web)."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
-            finally:
-                s.close()
+            return self.address_report().to_dict()
+        except Exception:  # noqa: BLE001 — панель не должна падать из-за конфига
+            log.exception("Не удалось собрать отчёт об адресе")
+            return {"uri": "", "warnings": ["не удалось разобрать настройки адреса"]}
+
+    @property
+    def address(self) -> Dict[str, Any]:
+        return self.current_address()
+
+    @property
+    def codec_report(self) -> Dict[str, Any]:
+        """Что реально включено в pjsip: для панели и диагностики «нет звука»."""
+        report: Dict[str, Any] = {
+            "profile": "",
+            "audio_wanted": [],
+            "video_wanted": [],
+            "audio_enabled": [],
+            "video_enabled": [],
+        }
+        try:
+            report["profile"] = self.config.codec_profile
+            report["audio_wanted"] = list(self.config.audio_codecs)
+            report["video_wanted"] = list(self.config.video_codecs)
         except Exception:  # noqa: BLE001
+            pass
+        ep = self._endpoint
+        if endpoint_ready(ep):
             try:
-                return socket.gethostbyname(socket.gethostname())
+                report["audio_enabled"] = sorted(
+                    str(c.codecId) for c in ep.codecEnum2() if int(c.priority) > 0)
             except Exception:  # noqa: BLE001
-                return "127.0.0.1"
+                pass
+            try:
+                report["video_enabled"] = sorted(
+                    str(c.codecId) for c in ep.videoCodecEnum2()
+                    if int(getattr(c, "priority", 0)) > 0)
+            except Exception:  # noqa: BLE001
+                pass
+        return report
+
+    def apply_sip_settings(self, *, domain=None, user=None, display_name=None,
+                           listen=None, srtp=None, codec_profile=None,
+                           save: bool = True) -> Dict[str, Any]:
+        """Применить адрес/шифрование/кодеки БЕЗ перезапуска движка.
+
+        Что происходит:
+          * конфиг в памяти обновляется (опционально пишется на диск);
+          * кодеки переставляются сразу (``codecSetPriority`` живые);
+          * аккаунт перезаписывается через ``account.modify`` — новый idUri,
+            SRTP и регистрация подхватываются на лету, активные вызовы не
+            рвутся;
+          * меняются только listen/порт/транспорт — поднимаем новый транспорт,
+            старые вызовы он не трогает.
+
+        Возвращает ``{"address": {...}, "applied": [...], "warnings": [...]}``.
+        Исключений наружу не бросает: панель оператора должна получать внятный
+        ответ, а не 500.
+        """
+        cfg = self.config
+        old = {
+            "listen": cfg.sip_listen,
+            "port": cfg.sip_port,
+            "transport": cfg.sip_transport,
+            "srtp": cfg.srtp,
+            "profile": cfg.codec_profile,
+            "domain": cfg.sip_domain,
+            "user": cfg.sip_user,
+        }
+        warnings: List[str] = []
+        applied: List[str] = []
+        try:
+            touched = cfg.set_sip_address(domain=domain, user=user,
+                                          display_name=display_name)
+            applied.extend(sorted(touched))
+            if listen is not None:
+                cfg.set_listen(str(listen))
+                applied.append("listen")
+            if srtp is not None:
+                cfg.set_srtp(str(srtp))
+                applied.append("srtp")
+            if codec_profile is not None:
+                cfg.set_codec_profile(str(codec_profile))
+                applied.append("codecs")
+        except Exception as exc:  # noqa: BLE001 — валидация/парсинг
+            return {"ok": False, "error": str(exc),
+                    "address": self.current_address(), "warnings": [str(exc)]}
+
+        port_changed = (old["port"] != cfg.sip_port)
+        listen_changed = (old["listen"] != cfg.sip_listen) or port_changed
+        ep = self._endpoint
+        if endpoint_ready(ep):
+            if codec_profile is not None and old["profile"] != cfg.codec_profile:
+                try:
+                    self._configure_codecs(ep)
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"кодеки не применены: {exc}")
+            if listen_changed:
+                try:
+                    self._create_transport(ep, port=cfg.sip_port,
+                                           listen=cfg.sip_listen)
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(
+                        f"новый транспорт не поднят ({exc}); слушаем "
+                        f"{old['listen']}:{old['port']}")
+            if applied and self._account is not None:
+                try:
+                    self._account.modify(self._build_account_config())
+                    # Аккаунт пересобран: регистрация пересоздаётся вместе с ним.
+                    if not cfg.registration_enabled:
+                        self._registration = None
+                except Exception as exc:  # noqa: BLE001
+                    reason = _pj_error_reason(exc) or str(exc)
+                    warnings.append(f"аккаунт не обновлён: {reason}")
+                    log.warning("apply_sip_settings: modify не удался: %s", exc)
+        if save and getattr(cfg, "path", None):
+            try:
+                cfg.save()
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"конфиг не сохранён: {exc}")
+        report = self.current_address()
+        warnings.extend(report.get("warnings") or [])
+        self.events.emit("sip.address.changed", address=report,
+                         applied=applied, warnings=warnings)
+        log.info("Адрес/настройки применены: %s (%s)",
+                 report.get("uri"), ", ".join(applied) or "без изменений")
+        # ok = настройки применены. warnings не делают ok=False:
+        # при пустом домене предупреждение "звоним по IP" появляется
+        # всегда, а панель не имеет права показывать рабочий режим как
+        # ошибку. Ошибка — это поле "error".
+        return {"ok": True, "applied": applied,
+                "warnings": warnings, "address": report,
+                "srtp": cfg.srtp, "codec_profile": cfg.codec_profile}
+
 
     def _on_incoming(self, prm) -> None:  # pragma: no cover
         # onIncomingCall вызывается в потоке pjsua2. getInfo()/создание Call

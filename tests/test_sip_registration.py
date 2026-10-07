@@ -513,3 +513,13 @@ def test_engine_on_reg_state_without_manager_uses_live_bus():
     eng._on_reg_state(_Params(403, "Forbidden", 0))
     assert eng._registration is not None
     assert eng._registration.state["code"] == 403
+
+
+# ---------------------------------------------------------------- IPv6
+def test_build_id_uri_wraps_ipv6_in_brackets():
+    """Чистка '[^A-Za-z0-9._-]+' из IPv6 делала «2001-db8--1»: регистратор
+    такую линию не находит, а выглядит как «конфиг правильный, не работает»."""
+    assert build_id_uri("vcu", "2001:db8::1", "mcu", "") == "sip:vcu@[2001:db8::1]"
+    assert build_id_uri("vcu", "", "mcu", "fe80::1") == "sip:vcu@[fe80::1]"
+    # уже в скобках — не удваиваем
+    assert build_id_uri("vcu", "[2001:db8::1]", "mcu", "") == "sip:vcu@[2001:db8::1]"

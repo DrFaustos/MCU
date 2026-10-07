@@ -52,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--listen", help="адрес приёма вызовов, напр. 0.0.0.0:5060")
     p.add_argument("--display-name", help="имя комнаты/дисплея")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"], help="SIP-транспорт")
+    p.add_argument("--domain", metavar="ДОМЕН",
+                   help="домен/адрес МСУ, который набирают терминалы "
+                        "(по умолчанию — вызов по IP)")
+    p.add_argument("--sip-user", metavar="USER",
+                   help="SIP-user МСУ (номер зала); по умолчанию — имя комнаты")
+    p.add_argument("--srtp", choices=["off", "optional", "mandatory"],
+                   help="шифрование медиа; по умолчанию off (закрытый контур)")
+    p.add_argument("--codec-profile", choices=["max_compat", "wideband", "g711_only"],
+                   help="набор кодеков (max_compat = максимум совместимости)")
     p.add_argument(
         "--protocol", "--proto", choices=["auto", "sip", "h323", "h323_native"], default=None,
         help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
@@ -218,6 +227,13 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["room"]["name"] = args.display_name
     if args.transport:
         config.raw["sip"]["transport"] = args.transport
+    # --- Адрес МСУ и совместимость: CLI важнее конфига ---------------------
+    if args.domain is not None or args.sip_user is not None:
+        config.set_sip_address(domain=args.domain, user=args.sip_user)
+    if args.srtp:
+        config.set_srtp(args.srtp)
+    if args.codec_profile:
+        config.set_codec_profile(args.codec_profile)
     if args.null_audio:
         config.raw["sip"]["null_audio"] = True
     if args.auto_answer is not None:

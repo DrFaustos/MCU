@@ -79,6 +79,81 @@ def _registration_dict(engine: Any) -> Dict[str, Any]:
     }
 
 
+def _web_port(config: Any) -> int:
+    """Порт web-панели из конфига (для подсказки в интерфейсе)."""
+    try:
+        return int((getattr(config, "web", {}) or {}).get("port", 8080) or 8080)
+    except Exception:  # noqa: BLE001
+        return 8080
+
+
+def _address_dict(engine: Any) -> Dict[str, Any]:
+    """Отчёт об адресе МСУ для панели. Движок без метода -> пустой словарь.
+
+    Панель не имеет права падать/отказывать из-за отсутствия поля: старые
+    сборки движка и stub-режим (без pjsua2) обязаны отдавать статус.
+    """
+    getter = getattr(engine, "current_address", None)
+    if callable(getter):
+        try:
+            data = getter()
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            log.debug("current_address не отработал", exc_info=True)
+    return {}
+
+
+def _codec_dict(engine: Any, config: Any = None) -> Dict[str, Any]:
+    """Кодеки: что хотим (профиль) и что реально включил pjsip."""
+    report = getattr(engine, "codec_report", None)
+    if isinstance(report, dict) and report:
+        data = dict(report)
+    else:
+        data = {"profile": "", "audio_wanted": [], "video_wanted": [],
+                "audio_enabled": [], "video_enabled": []}
+    if not data.get("profile"):
+        data["profile"] = str(getattr(config, "codec_profile", "") or "")
+    if not data.get("audio_wanted"):
+        data["audio_wanted"] = list(getattr(config, "audio_codecs", []) or [])
+    if not data.get("video_wanted"):
+        data["video_wanted"] = list(getattr(config, "video_codecs", []) or [])
+    try:
+        from .config import CODEC_PROFILES
+
+        data["profiles"] = {
+            name: {"audio": len(p["audio"]), "video": len(p["video"])}
+            for name, p in CODEC_PROFILES.items()
+        }
+    except Exception:  # noqa: BLE001
+        data["profiles"] = {}
+    return data
+
+
+def _encryption_dict(config: Any) -> Dict[str, Any]:
+    """Состояние шифрования для панели (SRTP + TLS web + транспорт SIP)."""
+    out: Dict[str, Any] = {
+        "srtp": "off", "srtp_modes": ["off", "optional", "mandatory"],
+        "web_tls": "off",
+        "web_tls_modes": ["off", "self_signed", "custom"],
+        "sip_transport": "",
+    }
+    if config is None:
+        return out
+    try:
+        out["srtp"] = str(getattr(config, "srtp", "") or "off")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["web_tls"] = str(getattr(config, "web_tls_mode", "off") or "off")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["sip_transport"] = str(getattr(config, "sip_transport", "") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 class EngineDispatcher:
     """Сериализует доступ к движку в одном потоке, зарегистрированном в pjlib.
 
@@ -212,6 +287,9 @@ class WebSession:
         self._config = config
         self._h323 = h323
         self._ice_servers = list(ice_servers or [])
+        # WebServer подставляет себя: переключать TLS/порт панель умеет
+        # только имея доступ к серверу (restart()).
+        self._server: Any = None
         self._dispatcher = EngineDispatcher(engine)
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
@@ -340,6 +418,11 @@ class WebSession:
             "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
             "sip_bridge": self.sip_bridge_stats(),
             "registration": _registration_dict(eng),
+            "address": _address_dict(eng),
+            "encryption": _encryption_dict(self._config),
+            "codecs": _codec_dict(eng, self._config),
+            "web_port": _web_port(self._config),
+            "web_url": getattr(self._server, "url", ""),
             "sip_ports": self.sip_ports_stats(),
             "web_recording": self._web_recorder.is_recording,
         }
@@ -410,6 +493,182 @@ class WebSession:
             for p in self._call(lambda: _participants(getattr(self._engine, "room", None))):
                 self._call(lambda pid=p.id: self._engine.mute_participant_video(pid, True))
         return {"ok": True}
+
+    # --- адрес МСУ, шифрование, кодеки ------------------------------------
+    def address(self) -> Dict[str, Any]:
+        """Как нас набирают: домен/IP/URI + предупреждения."""
+        return self._call(lambda: _address_dict(self._engine))
+
+    def codecs(self) -> Dict[str, Any]:
+        return self._call(lambda: _codec_dict(self._engine, self._config))
+
+    def encryption(self) -> Dict[str, Any]:
+        return _encryption_dict(self._config)
+
+    def set_address(self, *, domain=None, user=None, display_name=None,
+                    listen=None, save: bool = True) -> Dict[str, Any]:
+        """Сменить домен/адрес МСУ на лету (то же, что делает нативный GUI).
+
+        Всё применение (account.modify, новый транспорт, запись конфига)
+        живёт в движке — здесь только разбор тела запроса, чтобы у GUI и
+        web не появилось двух разных реализаций.
+        """
+        apply = getattr(self._engine, "apply_sip_settings", None)
+        if not callable(apply):
+            raise ApiError("Движок не поддерживает смену адреса на лету", 501)
+        payload: Dict[str, Any] = {}
+        if domain is not None:
+            payload["domain"] = str(domain)
+        if user is not None:
+            payload["user"] = str(user)
+        if display_name is not None:
+            payload["display_name"] = str(display_name)
+        if listen is not None:
+            payload["listen"] = str(listen)
+        if not payload:
+            raise ApiError("Не указано ни одного поля адреса "
+                           "(domain/user/display_name/listen)")
+        result = self._call(lambda: apply(save=bool(save), **payload))
+        if isinstance(result, dict) and result.get("error"):
+            raise ApiError(str(result["error"]), 400)
+        return result if isinstance(result, dict) else {"ok": True}
+
+    def set_codecs(self, profile: str) -> Dict[str, Any]:
+        """Профиль кодеков: max_compat | g711_only | wideband."""
+        apply = getattr(self._engine, "apply_sip_settings", None)
+        if callable(apply):
+            res = self._call(lambda: apply(codec_profile=str(profile)))
+            if isinstance(res, dict) and res.get("error"):
+                raise ApiError(str(res["error"]), 400)
+            if isinstance(res, dict):
+                res["codecs"] = _codec_dict(self._engine, self._config)
+                return res
+        cfg = self._config
+        if cfg is None:
+            raise ApiError("Конфиг недоступен", 500)
+        try:
+            cfg.set_codec_profile(str(profile))
+            if getattr(cfg, "path", None):
+                cfg.save()
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(str(exc), 400) from exc
+        return {"ok": True, "codecs": _codec_dict(self._engine, cfg)}
+
+    def set_encryption(self, *, srtp=None, web_tls=None) -> Dict[str, Any]:
+        """Шифрование: SRTP (медиа) и TLS web-панели.
+
+        В закрытом контуре это переключатели «на всякий случай»: по умолчанию
+        всё выключено, вызовы идут по RTP, панель — по HTTP, и сертификаты
+        вообще не участвуют в установлении соединения.
+        """
+        out: Dict[str, Any] = {"ok": True, "warnings": []}
+        if srtp is not None:
+            apply = getattr(self._engine, "apply_sip_settings", None)
+            if callable(apply):
+                res = self._call(lambda: apply(srtp=str(srtp)))
+                if isinstance(res, dict):
+                    out["warnings"].extend(res.get("warnings") or [])
+                    out["srtp"] = res.get("srtp")
+                    if res.get("error"):
+                        raise ApiError(str(res["error"]), 400)
+                else:
+                    out["srtp"] = str(srtp)
+            else:
+                cfg = self._config
+                if cfg is None:
+                    raise ApiError("Конфиг недоступен", 500)
+                try:
+                    cfg.set_srtp(str(srtp))
+                    out["srtp"] = cfg.srtp
+                except Exception as exc:  # noqa: BLE001
+                    raise ApiError(str(exc), 400) from exc
+        if web_tls is not None:
+            tls_res = self.set_web_tls(web_tls)
+            out["web_tls"] = tls_res.get("web_tls")
+            out["warnings"].extend(tls_res.get("warnings") or [])
+        out["encryption"] = _encryption_dict(self._config)
+        return out
+
+    def set_web_tls(self, mode) -> Dict[str, Any]:
+        """TLS web-панели: 'off' | 'self_signed' | 'custom' | bool.
+
+        Панель обязана остаться доступной: если HTTPS не поднялся (нет
+        openssl, битый/протухший сертификат), сервер перезапускается на
+        HTTP. Отказ web-панели из-за сертификата — худший сценарий для
+        закрытого контура, поэтому он исключён конструктивно.
+        """
+        cfg = self._config
+        clean = bool(mode) if isinstance(mode, bool) else str(mode or "").strip().lower()
+        try:
+            applied = cfg.set_web_tls(clean) if cfg is not None else clean
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(str(exc), 400) from exc
+        warnings: List[str] = []
+        server = self._server
+        if server is not None and getattr(server, "running", False):
+            ok = False
+            try:
+                ok = bool(server.restart(tls_mode=applied))
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"перезапуск не удался: {exc}")
+            if not ok:
+                warnings.append("HTTPS недоступен — панель поднята на HTTP")
+                try:
+                    server.restart(tls_mode="off")
+                    if cfg is not None:
+                        cfg.set_web_tls("off")
+                        applied = "off"
+                except Exception:  # noqa: BLE001
+                    warnings.append("не удалось вернуться на HTTP (см. лог)")
+        self._save_config(warnings)
+        return {"ok": True, "web_tls": applied, "warnings": warnings,
+                "url": getattr(self._server, "url", "")}
+
+    def set_web_port(self, port: int) -> Dict[str, Any]:
+        """Перевесить web-панель на другой порт (с сохранением в конфиг)."""
+        cfg = self._config
+        if cfg is None:
+            raise ApiError("Конфиг недоступен", 500)
+        try:
+            applied = cfg.set_web_port(int(port))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(f"Некорректный порт: {port!r}") from exc
+        result: Dict[str, Any] = {"ok": True, "port": applied, "warnings": []}
+        server = self._server
+        if server is not None and getattr(server, "running", False):
+            old_port = int(getattr(server, "port", applied))
+            host = str(getattr(server, "host", "0.0.0.0"))
+            ok = False
+            try:
+                ok = bool(server.restart(host=host, port=applied))
+            except Exception as exc:  # noqa: BLE001
+                result["warnings"].append(f"перезапуск не удался: {exc}")
+            if not ok:
+                result["warnings"].append(
+                    f"порт {applied} недоступен — панель осталась на {old_port}")
+                try:
+                    server.restart(host=host, port=old_port)
+                except Exception:  # noqa: BLE001
+                    pass
+                if cfg is not None:
+                    cfg.set_web_port(old_port)
+                    result["port"] = old_port
+                result["ok"] = False
+        self._save_config(result["warnings"])
+        result["url"] = getattr(self._server, "url", "")
+        return result
+
+    def _save_config(self, warnings: Optional[List[str]] = None) -> None:
+        """Сохранить конфиг, если он был загружен из файла (ошибка — warning)."""
+        cfg = self._config
+        if cfg is None or not getattr(cfg, "path", None):
+            return
+        try:
+            cfg.save()
+        except Exception as exc:  # noqa: BLE001
+            if warnings is not None:
+                warnings.append(f"конфиг не сохранён: {exc}")
+            log.warning("Не удалось сохранить конфиг: %s", exc)
 
     def set_layout(self, layout: str) -> Dict[str, Any]:
         available = self.layouts()
@@ -1022,6 +1281,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"devices": s.audio_devices()})
             elif path == "/api/layouts":
                 self._send_json({"layouts": s.layouts()})
+            elif path == "/api/address":
+                self._send_json(s.address())
+            elif path == "/api/codecs":
+                self._send_json(s.codecs())
+            elif path == "/api/encryption":
+                self._send_json(s.encryption())
             elif path == "/api/web_recording":
                 self._send_json(s.web_recording_state())
             elif path == "/api/conference":
@@ -1058,6 +1323,20 @@ class _Handler(BaseHTTPRequestHandler):
             return s.mute_all(audio=bool(data.get("audio", True)), video=bool(data.get("video", False)))
         if path == "/api/layout":
             return s.set_layout(str(data.get("layout", "")))
+        if path == "/api/address":
+            return s.set_address(domain=data.get("domain"), user=data.get("user"),
+                                 display_name=data.get("display_name"),
+                                 listen=data.get("listen"),
+                                 save=True if data.get("save") is None
+                                 else bool(data.get("save")))
+        if path == "/api/codecs":
+            return s.set_codecs(str(data.get("profile", "")))
+        if path == "/api/encryption":
+            return s.set_encryption(srtp=data.get("srtp"), web_tls=data.get("web_tls"))
+        if path == "/api/web_tls":
+            return s.set_web_tls(data.get("mode", "off"))
+        if path == "/api/web_port":
+            return s.set_web_port(_opt_int(data.get("port")) or 0)
         if path == "/api/recording":
             return s.toggle_recording(_opt_bool(data.get("enabled")))
         if path == "/api/chat":
@@ -1209,7 +1488,7 @@ class WebServer:
     def __init__(self, engine: Any, config: Any = None, h323: Any = None,
                  host: str = "0.0.0.0", port: int = 8080,
                  auth_token: Optional[str] = None,
-                 tls: bool = False, certfile: Optional[str] = None,
+                 tls=False, certfile: Optional[str] = None,
                  keyfile: Optional[str] = None,
                  ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
@@ -1225,12 +1504,33 @@ class WebServer:
         self.host = host
         self.port = int(port)
         self.auth_token = auth_token
-        self.tls = bool(tls)
+        # tls принимает и legacy bool, и режим 'off'|'self_signed'|'custom'.
+        # Смысл разделения: 'off' — HTTP без сертификатов ВООБЩЕ (закрытый
+        # контур, никаких предупреждений браузера и протухших дат), а любой
+        # другой режим — HTTPS с авто-генерацией, если своих файлов нет.
+        self.tls_mode = self._normalize_tls_mode(tls)
+        self.tls_warning = ""
         self.certfile = certfile
         self.keyfile = keyfile
         self.events = _EventHub(engine)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _normalize_tls_mode(value) -> str:
+        if isinstance(value, bool):
+            return "self_signed" if value else "off"
+        mode = str(value or "").strip().lower()
+        return mode if mode in ("off", "self_signed", "custom") else "off"
+
+    @property
+    def tls(self) -> bool:
+        """Нужен ли SSLContext (совместимость со старым кодом/GUI)."""
+        return self.tls_mode != "off"
+
+    @tls.setter
+    def tls(self, value) -> None:
+        self.tls_mode = self._normalize_tls_mode(value)
 
     @property
     def scheme(self) -> str:
@@ -1259,14 +1559,19 @@ class WebServer:
         if self.tls:
             try:
                 context = _make_ssl_context(self.certfile, self.keyfile)
+                httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+                self.tls_warning = ""
             except Exception as exc:  # noqa: BLE001
-                log.error("TLS включён, но контекст не создан: %s", exc)
-                httpd.server_close()
-                return False
-            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+                # КЛЮЧЕВОЕ: отказ TLS не имеет права лишать оператора панели.
+                # Откатываемся на HTTP и говорим об этом прямо.
+                log.error("TLS не поднялся (%s) — запускаем панель на HTTP", exc)
+                self.tls_mode = "off"
+                self.tls_warning = f"HTTPS недоступен: {exc} — панель на HTTP"
         httpd.daemon_threads = True
         # Пробрасываем зависимости в хендлер через атрибуты сервера.
         httpd.session = self.session          # type: ignore[attr-defined]
+        # Сессии нужен сервер, чтобы перезапускать себя при смене TLS/порта.
+        self.session._server = self           # type: ignore[attr-defined]
         httpd.events = self.events            # type: ignore[attr-defined]
         httpd.auth_token = self.auth_token    # type: ignore[attr-defined]
         self._httpd = httpd
@@ -1340,7 +1645,7 @@ class WebServer:
         self.session.close()
         log.info("Web-панель остановлена")
 
-    def restart(self, *, tls: Optional[bool] = None, host: Optional[str] = None,
+    def restart(self, *, tls=None, tls_mode=None, host: Optional[str] = None,
                 port: Optional[int] = None) -> bool:
         """Перезапустить сервер (например, при переключении HTTP/HTTPS).
 
@@ -1350,8 +1655,10 @@ class WebServer:
         was_running = self._httpd is not None
         if was_running:
             self.stop()
-        if tls is not None:
-            self.tls = bool(tls)
+        if tls_mode is not None:
+            self.tls_mode = self._normalize_tls_mode(tls_mode)
+        elif tls is not None:
+            self.tls = tls
         if host is not None:
             self.host = host
         if port is not None:
@@ -1370,6 +1677,14 @@ class WebServer:
         self.stop()
 
 
+def _tls_mode_of(config: Any, web_cfg: Dict[str, Any]) -> str:
+    """Режим TLS панели: доверяем Config.web_tls_mode, иначе разбираем JSON."""
+    mode = getattr(config, "web_tls_mode", None)
+    if isinstance(mode, str) and mode:
+        return mode
+    return WebServer._normalize_tls_mode(web_cfg.get("tls", False))
+
+
 def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
     """Собрать WebServer из конфига БЕЗ проверки enabled.
 
@@ -1383,7 +1698,7 @@ def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
         host=str(web_cfg.get("host", "0.0.0.0")),
         port=int(web_cfg.get("port", 8080)),
         auth_token=token,
-        tls=bool(web_cfg.get("tls", False)),
+        tls=_tls_mode_of(config, web_cfg),
         certfile=web_cfg.get("cert_file") or None,
         keyfile=web_cfg.get("key_file") or None,
         ice_servers=getattr(config, "web_ice_servers", None),
@@ -1396,7 +1711,7 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
     if not web_cfg.get("enabled", False):
         return None
     token = web_cfg.get("auth_token") or os.environ.get("MCU_WEB_TOKEN") or None
-    tls = bool(web_cfg.get("tls", False))
+    tls = _tls_mode_of(config, web_cfg)
     certfile = web_cfg.get("cert_file") or None
     keyfile = web_cfg.get("key_file") or None
     return WebServer(

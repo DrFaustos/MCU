@@ -108,6 +108,9 @@ GET:
 | `/api/devices/video` | `{devices:[{id,name,driver}]}` |
 | `/api/devices/audio` | `{devices:[...]}` |
 | `/api/layouts` | `{layouts:[...]}` |
+| `/api/address` | адрес МСУ: `{uri, domain, host, host_source, port, dial_targets[], summary, ok, warnings[]}` — см. `docs/SIP_ADDRESSING.md` |
+| `/api/codecs` | `{audio:[...], video:[...]}` кодеки с приоритетом |
+| `/api/encryption` | `{srtp, web_tls, ...}` текущее шифрование |
 | `/api/events` | SSE-поток событий шины |
 | `/api/frame.png` | последний кадр источника, PNG (404, если кадров нет) |
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
@@ -134,6 +137,11 @@ POST (тело — JSON):
 | `/api/video_source` | `{kind, device?}` | источник: camera/screen/colorbar |
 | `/api/video_device` | `{device}` | выбрать камеру по id |
 | `/api/audio_device` | `{device}` | выбрать микрофон по id |
+| `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
+| `/api/codecs` | `{profile}` | профиль кодеков |
+| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`disable`/`optional`/`mandatory`) и TLS панели |
+| `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
+| `/api/web_port` | `{port}` | порт web-панели |
 
 Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
 

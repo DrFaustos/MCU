@@ -118,6 +118,44 @@
     </div>
 
     <div class="section">
+      <h2>Адрес МСУ (как нас набирают)</h2>
+      <div class="row"><input id="addrDomain" placeholder="домен или IP, напр. vcu.corp" autocomplete="off"></div>
+      <div class="row" style="margin-top:6px">
+        <input id="addrUser" placeholder="имя / номер зала (пусто = имя комнаты)" autocomplete="off">
+        <input id="addrDisplay" placeholder="отображаемое имя" autocomplete="off">
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button class="primary" id="btnAddrApply">Применить адрес</button>
+      </div>
+      <div id="addrHint" style="color:var(--muted);font-size:11px;margin-top:6px;white-space:pre-wrap"></div>
+    </div>
+
+    <div class="section">
+      <h2>Шифрование и кодеки</h2>
+      <div class="row">
+        <select id="srtpMode">
+          <option value="off">SRTP: выключено (закрытый контур)</option>
+          <option value="optional">SRTP: по запросу терминала</option>
+          <option value="mandatory">SRTP: обязателен</option>
+        </select>
+        <select id="codecProfile">
+          <option value="max_compat">Кодеки: максимум совместимости</option>
+          <option value="wideband">Кодеки: широкий звук (G.722/opus)</option>
+          <option value="g711_only">Кодеки: только G.711 (старые шлюзы)</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <select id="webTls">
+          <option value="off">Web: HTTP без сертификата</option>
+          <option value="self_signed">Web: HTTPS (самоподписанный)</option>
+        </select>
+        <input id="webPort" placeholder="порт web" autocomplete="off" style="max-width:110px">
+        <button id="btnWebApply">Применить web</button>
+      </div>
+      <div id="secHint" style="color:var(--muted);font-size:11px;margin-top:6px;white-space:pre-wrap"></div>
+    </div>
+
+    <div class="section">
       <h2>Раскладка</h2>
       <div class="row">
         <select id="layout"></select>
@@ -357,6 +395,7 @@ function renderStatus() {
   const layouts = status.layouts || [];
   if (sel.options.length !== layouts.length) { sel.innerHTML = layouts.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join(''); }
   sel.value = status.layout || '';
+  renderAddress();
 }
 
 async function refresh() {
@@ -403,6 +442,53 @@ function connectEvents() {
 }
 
 async function act(fn) { try { await fn(); await refresh(); } catch (e) { alert(e.message); } }
+
+// --- Адрес МСУ, шифрование, кодеки ----------------------------------------
+// Все три группы меняются на лету теми же методами движка, которые дергает
+// нативный GUI: расхождение между «что показывает Qt» и «что делает браузер»
+// исключено, потому что реализация одна — engine.apply_sip_settings().
+function renderAddress() {
+  const a = status.address || {};
+  const dom = $('addrDomain'), usr = $('addrUser'), disp = $('addrDisplay');
+  // Не перезаписываем поле, пока оператор печатает в нём.
+  if (dom && document.activeElement !== dom) dom.value = a.domain || '';
+  if (usr && document.activeElement !== usr) usr.value = a.user || '';
+  if (disp && document.activeElement !== disp) disp.value = a.display_name || '';
+  let hint = 'Звоните на: ' + (a.uri || '\u2014');
+  const alt = (a.dial_targets || []).slice(1);
+  if (alt.length) hint += '  (или ' + alt.join(', ') + ')';
+  if ((a.warnings || []).length) hint += '\n' + a.warnings.slice(0, 3).map(w => '\u2022 ' + w).join('\n');
+  $('addrHint').textContent = hint;
+
+  const enc = status.encryption || {};
+  const codecs = status.codecs || {};
+  const srtp = $('srtpMode');
+  if (srtp && document.activeElement !== srtp && enc.srtp) srtp.value = enc.srtp;
+  const tls = $('webTls');
+  if (tls && document.activeElement !== tls) tls.value = (enc.web_tls && enc.web_tls !== 'off') ? enc.web_tls : 'off';
+  const cp = $('codecProfile');
+  if (cp && document.activeElement !== cp && codecs.profile) cp.value = codecs.profile;
+
+  let sh = 'В PJSIP включено: ' + ((codecs.audio_enabled || []).length) + ' аудио / ' + ((codecs.video_enabled || []).length) + ' видео';
+  if ((codecs.video_wanted || []).length) sh += '  \u00b7 предлагаем: ' + codecs.video_wanted.join(', ');
+  if (enc.sip_transport) sh += '  \u00b7 SIP-транспорт: ' + enc.sip_transport;
+  $('secHint').textContent = sh;
+}
+
+$('btnAddrApply').onclick = () => act(() => api('/address', 'POST', {
+  domain: $('addrDomain').value.trim(),
+  user: $('addrUser').value.trim(),
+  display_name: $('addrDisplay').value.trim(),
+}));
+$('addrDomain').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnAddrApply').click(); });
+$('srtpMode').onchange = () => act(() => api('/encryption', 'POST', { srtp: $('srtpMode').value }));
+$('codecProfile').onchange = () => act(() => api('/codecs', 'POST', { profile: $('codecProfile').value }));
+$('btnWebApply').onclick = () => act(async () => {
+  const port = $('webPort').value.trim();
+  if (port) await api('/web_port', 'POST', { port: Number(port) });
+  const res = await api('/encryption', 'POST', { web_tls: $('webTls').value });
+  if ((res.warnings || []).length) alert(res.warnings.join('\n'));
+});
 
 $('btnCall').onclick = () => act(() => api('/call', 'POST', { uri: $('callUri').value.trim() }));
 $('callUri').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnCall').click(); });

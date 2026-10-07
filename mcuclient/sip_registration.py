@@ -134,14 +134,26 @@ def build_id_uri(
     """
     import re
 
+    from .sip_address import format_host_port, is_ip_literal
+
     def _clean(value: str | None, fallback: str) -> str:
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-")
         return cleaned or fallback
 
+    def _host(value: str | None) -> str:
+        """Хост idUri: IPv6 — всегда в квадратных скобках.
+
+        Обычная чистка '[^A-Za-z0-9._-]+ -> -' превращает IPv6 в
+        несуществующий хост (скобки и двоеточия -> полосочки), и
+        регистратор отвечает 403/404 без внятной причины.
+        """
+        raw = str(value or "").strip()
+        if is_ip_literal(raw):
+            return format_host_port(raw)
+        return _clean(raw, "")
+
     user = _clean(username, _clean(fallback_user, "mcu"))
-    host = _clean(domain, "")
-    if not host:
-        host = _clean(local_ip, "127.0.0.1")
+    host = _host(domain) or _host(local_ip) or "127.0.0.1"
     return f"sip:{user}@{host}"
 
 
