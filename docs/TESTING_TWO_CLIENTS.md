@@ -12,6 +12,7 @@
 | **2. Процессы** (`scripts/dev/smoke_local.sh`) | Контейнеры недоступны / быстрый smoke | Сигналинг, CONFIRMED, teardown |
 | **2a. Видео** (`scripts/testbed/run_two_instance_video_test.sh`) | Нужно проверить видеопоток без камеры | `call.video active=True` на обоих концах |
 | **2b. DTMF** (`scripts/testbed/run_two_instance_dtmf_test.sh`) | Нужно проверить тоны (набор номера зала, IVR/PIN) | `[+] DTMF MCU<->MCU OK`, вся строка тонов у адресата |
+| **2c. Interop** (`scripts/testbed/run_two_instance_interop_test.sh`) | Меняли `sip.interop` / настройки аккаунта | CONFIRMED при `prack: mandatory` + `session_timer: required` + `rtcp_mux: on` |
 | **3. Браузер** (`--web`, `aiortc`) | Нужно проверить web-конференцию (BBB-подобно) | вход по имени, публикация своей камеры/микрофона, раздача видео и аудио другим браузерам |
 
 Оба пути используют **один и тот же код** из рабочего дерева.
@@ -199,6 +200,35 @@ scripts/testbed/run_two_instance_dtmf_test.sh
 > `libHandleEvents()` возвращается на первом же обработанном пакете, поэтому
 > пауза между тонами держится по `time.monotonic()` маленькими шагами накачки
 > (`DTMF_PUMP_STEP_SEC` в `mcuclient/dtmf_service.py`).
+
+---
+
+## 2c. Interop-стенд (2 процесса, строгий набор настроек аккаунта)
+
+```bash
+scripts/testbed/run_two_instance_interop_test.sh
+```
+
+Оба конца поднимаются с `sip.interop` = `prack: mandatory`,
+`session_timer: required`, `session_expires_sec: 600`,
+`min_session_expires_sec: 90`, `rtcp_mux: on`. Успех: `[+] SIP-interop
+MCU<->MCU OK`, на обеих сторонах `CONFIRMED` и строка `SIP-interop: ...`
+в логе.
+
+Переменные: `LISTEN_PORT` (по умолч. 15086), `CALL_PORT` (15085).
+
+> **Зачем, если есть 2a/2b.** Движок ошибки прошивки `AccountConfig` глотает
+> (`try/except` + `hasattr` — иначе урезанная сборка не регистрируется),
+> поэтому юнит-тесты не отличают «настройка применена» от «настройка
+> проглочена». Стенд проверяет ровно это: в логе старта есть `SIP-interop:`
+> и нет ни одной строки «не применён», и при всём этом звонок доходит до
+> CONFIRMED. Так же он ловит и обратное — когда настройки совместимости сами
+> рвут звонок (так и был найден случай с `prack`, см.
+> [SIP_INTEROP.md](SIP_INTEROP.md)).
+>
+> Стенды делят `127.0.0.1` и чувствительны к таймингам: запускать строго по
+> одному, не параллельно с `pytest` (проверка DTMF на это особенно
+> обидная).
 
 ---
 

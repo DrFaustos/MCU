@@ -37,6 +37,7 @@
 | Аудио-мост SIP <-> браузеры | 🟡 | поднимается сам при включённой web-панели: терминал слышит веб-микс, браузеры — терминал. Проверено тестами, на реальном терминале ещё не прогонялось |
 | TLS (HTTPS) для web-панели | 🟡 | опционально, по умолчанию выключено |
 | ICE (STUN/TURN) для WebRTC | 🟡 | настраивается, по умолчанию только LAN |
+| Тонкая настройка SIP-interop (`sip.interop`) | ✅ | 100rel/PRACK, Session Timers, hold-метод и rtcp-mux доезжают до `AccountConfig`; значения по умолчанию = поведение стека. Проверено `tests/test_sip_interop.py` + `scripts/testbed/run_two_instance_interop_test.sh`. См. `docs/SIP_INTEROP.md` |
 
 ## Что НЕ реализовано / ограничено
 
@@ -75,6 +76,46 @@
 и укажите модель терминала, протокол (SIP/H.323) и шаги воспроизведения.
 
 ## Журнал исправлений
+
+### 2026-10-07 — SIP-interop: 100rel/PRACK, Session Timers, hold и rtcp-mux доезжают до pjsua2
+
+В `AccountConfig` не прошивалась ни одна настройка совместимости уровня
+сеанса: `prackUse`, `timerUse`, `timerSessExpiresSec`, `timerMinSESec`,
+`holdType`, `mediaConfig.rtcpMuxEnabled` оставались в дефолтах биндинга, хотя
+именно они решают «терминал соединился и молчит» vs работает.
+
+- `mcuclient/config.py`: секция `sip.interop` + валидация (значения только из
+  списков, `min_session_expires_sec` >= 90 по RFC 4028 и не больше самого
+  Session-Expires); свойства `prack_mode` / `session_timer_mode` /
+  `session_expires_sec` / `min_session_expires_sec` / `hold_type` / `rtcp_mux`.
+  Отсутствующая или частично заполненная секция = значения по умолчанию,
+  старые конфиги не ломаются.
+- `mcuclient/sip_engine.py`: чистые `prack_use_value()` / `session_timer_value()`
+  / `hold_type_value()` (константы читаются ПО ИМЕНАМ, как уже сделано для
+  SRTP/ICE/TURN) и `SipEngine._configure_account_interop()` — вызывается из
+  `_start_account()` сразу после `_configure_account_nat()`. Каждое поле в
+  `try/except` + `hasattr`: урезанная сборка не роняет регистрацию.
+- **Дефолт `prack` = `off`, и это не случайность.** Стенд
+  `run_two_instance_dtmf_test.sh` поймал регрессию: с `prack: optional` оба
+  конца (оба на pjsip) начинают торговаться PRACK'ом, порядок 1xx/200 OK
+  сдвигается и теряется первый DTMF-тон — вместо `1984#` приходило `1184#`.
+  На базе без этих настроек стенд проходит. `optional`/`mandatory` теперь
+  включают точечно и обязательно перепрогоняют DTMF-стенд.
+- **`mediaConfig.rtcpMuxEnabled` принимает строго bool**: запись `1` бросает
+  `TypeError` в SWIG-обёртке (тот же класс молчаливой поломки, что и
+  `uaConfig.stunServer`). Пишем только `True`, и только при `rtcp_mux: on`.
+- Стенд `scripts/testbed/{two_instance_interop.py,run_two_instance_interop_test.sh}`:
+  два процесса со строгим набором (`prack: mandatory`, `session_timer: required`,
+  `rtcp_mux: on`) доходят до CONFIRMED; дополнительно проверяется, что в логе
+  есть строка `SIP-interop: ...` и нет строк «не применён» (движок исключения
+  глотает, поэтому ловим по логу).
+- `docs/SIP_INTEROP.md` — что делает каждый ключ, когда что ставить (CUCM /
+  старый Polycom / мало портов) и список проверенных граблей биндинга.
+
+Проверки: `pytest tests/test_sip_interop.py -q` -> 22 passed (2 на настоящем
+pjsua2); `run_two_instance_interop_test.sh` -> RC=0; `run_two_instance_test.sh`
+-> RC=0; `run_two_instance_dtmf_test.sh` -> RC=0 (`1984#`); полный
+`pytest tests -q` -> RC=0.
 
 ### 2026-10-06 — стенд MCU<->MCU снова проходит: накачка событий вместо sleep + контракт регистратора
 

@@ -27,6 +27,14 @@
       "ice_trickle": "off",
       "report_nat_type_in_sdp": 1
     },
+    "interop": {
+      "prack": "off",
+      "session_timer": "optional",
+      "session_expires_sec": 1800,
+      "min_session_expires_sec": 900,
+      "hold_type": "rfc3264",
+      "rtcp_mux": "off"
+    },
     "codecs": {
       "audio": [
         "PCMU/8000/1",

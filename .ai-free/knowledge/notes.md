@@ -42,3 +42,21 @@ MCU<->MCU» не проходит никогда (INVITE лежит в буфе�
 video `run_two_instance_video_test.sh`, dtmf `run_two_instance_dtmf_test.sh`.
 Все три дают RC=0 на 2026-10-07.
 <!-- source: agent -->
+
+## Стенды run_two_instance_*_test.sh — строго по одному
+
+DTMF-стенд чувствителен к таймингам: под нагрузкой параллельного `pytest tests -q` он теряет тоны (`1984#` → `1184#`/`184#`) даже на коде, который в покое проходит. Правило: стенды (call/video/dtmf/interop) — строго последовательно, не одновременно с pytest и друг с другом.
+
+Interop-стенд: `scripts/testbed/run_two_instance_interop_test.sh` (+ `two_instance_interop.py`), порты LISTEN=15086 / CALL=15085, набор `prack: mandatory` + `session_timer: required` + `rtcp_mux: on`. Логгер движка — `mcuclient.sip` (`get_logger("sip")`), НЕ `mcuclient.sip_engine`: вешать handler на неверное имя бесполезно.
+
+## Git: ветки (актуально 2026-10-07)
+
+- `main` — стабильная, в origin; локально опережает origin/main.
+- `linux-dev` — Linux-специфика (упаковка/установка).
+- `fix/dtmf-tone-pump` — DTMF + pump (запушена в origin).
+- `feat/sip-interop-tuning` — секция `sip.interop` + `tests/test_sip_interop.py` + interop-стенд + `docs/SIP_INTEROP.md`.
+
+Стенды call/dtmf/interop дают RC=0 на 2026-10-07. video-стенд в этот день
+падает И НА БАЗЕ fb904a5 (core dump в two_instance_video_call.py listen) —
+проблема окружения (v4l2-камеры), а не кода interop.
+<!-- source: agent -->

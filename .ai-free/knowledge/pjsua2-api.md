@@ -48,3 +48,23 @@
 * Стенд: `scripts/testbed/run_two_instance_dtmf_test.sh` → `[+] DTMF MCU<->MCU OK`.
   Unit-тесты этого не ловят (они проверяют только вызовы pjsua2, не RTP).
 <!-- source: agent -->
+
+## sip.interop / interop-настройки AccountConfig
+
+## sip.interop: что прошивается и почему `prack` по умолчанию `off`
+
+Секция `sip.interop` (config.py) → `SipEngine._configure_account_interop()` прошивает `AccountConfig.callConfig.{prackUse,timerUse,timerSessExpiresSec,timerMinSESec,holdType}` и `mediaConfig.rtcpMuxEnabled`. Константы читаются ПО ИМЕНАМ (`PJSUA_100REL_OPTIONAL`, `PJSUA_SIP_TIMER_*`, `PJSUA_CALL_HOLD_TYPE_RFC*`) — значения enum'ов между сборками PJSIP различаются.
+
+**Дефолт `prack` = `off` (не `optional`) — проверенная грабля:** с `prack: optional` оба конца на pjsip начинают торговаться PRACK'ом, порядок 1xx/200 OK сдвигается и теряется **первый DTMF-тон** — `run_two_instance_dtmf_test.sh` вместо `1984#` слышал `1184#`/`184#`. На базе без interop-настроек стенд проходит (проверено git worktree). Любое изменение prack → обязателен прогон DTMF-стенда.
+
+**`mediaConfig.rtcpMuxEnabled` принимает строго `bool`** (SWIG): запись `1` → TypeError. Тот же класс молчаливой поломки, что `uaConfig.stunServer`.
+<!-- source: agent -->
+
+## pjsua2 2.16: ещё три проверенные грабли (зонд .agent/probe11.py)
+
+* `Account.create(acc_cfg)` **без созданного транспорта** → assertion в C: `pjsua_acc_add: Assertion 'pjsua_var.tpdata[0].data.ptr != NULL' failed` — процесс убивается (core dump) БЕЗ исключения. В движке порядок обязателен: `_configure_transport()` → `_start_account()`.
+* `pj.Account.__init__` принимает **только self** (никаких `(ep, cfg)`) — конфиг только в `create()`. У документации pjsua2 других сборок другой конструктор.
+* Вложенные поля `AccountConfig` (`callConfig`, `mediaConfig`) — **ссылка**, не копия: `acc.callConfig.prackUse = X` работает. Исключение — `UaConfig.stunServer` (vector).
+* `AccountCallConfig.updateUse` (a=update-connection) в 2.16 **нет**.
+* `Account.getConfig()` в SWIG-биндинге **нет** (только `getInfo()`, и у AccountInfo нет поля accConfig).
+<!-- source: agent -->

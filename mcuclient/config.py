@@ -26,6 +26,16 @@ SRTP_MODES = ("", "off", "optional", "mandatory")
 # понимают, поэтому по умолчанию выключен.
 ICE_TRICKLE_MODES = ("off", "half", "full")
 TURN_TRANSPORTS = ("udp", "tcp", "tls")
+# Тонкая настройка SIP-совместимости с аппаратным парком ВКС. В pjsua2 их
+# превращает sip_engine._configure_account_interop (там же — почему по
+# умолчанию стоят именно эти значения).
+PRACK_MODES = ("off", "optional", "mandatory")
+SESSION_TIMER_MODES = ("inactive", "optional", "required", "always")
+HOLD_TYPES = ("rfc3264", "rfc2543")
+RTCP_MUX_MODES = ("off", "on")
+SESSION_EXPIRES_MIN, SESSION_EXPIRES_MAX = 0, 86400
+# RFC 4028: Session-Expires меньше 90 секунд быть не может.
+MIN_SE_MIN, MIN_SE_MAX = 90, 3600
 # PJSUA_MAX_CALLS в типовой сборке = 32; больше — только пересборкой PJSIP.
 PJSUA_MAX_CALLS_DEFAULT = 32
 MAX_CALLS_HARD_LIMIT = 64
@@ -96,6 +106,32 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             # 0 — не печатать NAT type в SDP, 1 — номер, 2 — номер+имя
             # (2 удобно для разбора логов от Polycom/Sony).
             "report_nat_type_in_sdp": 1,
+        },
+        # SIP-interop. По умолчанию — режимы, которые НЕ ломают звонок ни с
+        # Polycom/Sony/Cisco, ни с мягкими клиентами: новое предлагаем, но не
+        # навязываем.
+        "interop": {
+            # 100rel + PRACK (RFC 3262): надёжная доставка 1xx. По умолчанию
+            # ВЫКЛ — это и есть дефолт pjsip, и любое иное значение меняет
+            # порядок 1xx/200/PRACK. Проверено стендом
+            # run_two_instance_dtmf_test.sh: с "optional" оба конца на pjsip
+            # начинают торговаться PRACK'ом и теряется первый DTMF-тон
+            # ("1984#" превращается в "1184#"). Включайте "optional", когда
+            # нужен гарантированный 183 с early media и вы готовы перепроверить
+            # тоны на своём парке.
+            "prack": "off",
+            # Session Timers (RFC 4028): refresh держит живыми и сессию, и
+            # NAT-binding. CUCM и ряд SBC без таймера рвут звонок через
+            # 15-30 минут. "optional" = предлагаем, но не требуем.
+            "session_timer": "optional",
+            # 0 = период не предлагать (только режим таймера).
+            "session_expires_sec": 1800,
+            "min_session_expires_sec": 900,
+            # hold: старые Polycom/Sony не понимают re-INVITE по RFC 3264,
+            # для них ставят "rfc2543".
+            "hold_type": "rfc3264",
+            # rtcp-mux экономит порты, но ломается на старых шлюзах.
+            "rtcp_mux": "off",
         },
         "codecs": {
             # Порядок = приоритет (сначала сверху). Набор подобран для
@@ -304,6 +340,36 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         _check_bool("sip.nat.rewrite_contact", nat.get("rewrite_contact", True))
         _check_int("sip.nat.report_nat_type_in_sdp",
                    nat.get("report_nat_type_in_sdp", 1), 0, 2)
+    interop = sip.get("interop")
+    if interop is not None:
+        if not isinstance(interop, dict):
+            raise ConfigError("sip.interop должен быть объектом")
+        defaults = DEFAULT_CONFIG["sip"]["interop"]
+        for key, allowed in (
+            ("prack", PRACK_MODES),
+            ("session_timer", SESSION_TIMER_MODES),
+            ("hold_type", HOLD_TYPES),
+            ("rtcp_mux", RTCP_MUX_MODES),
+        ):
+            # Ключ может отсутствовать (допилили секцию частично) — тогда
+            # проверяем значение по умолчанию, а не ругаемся на пустоту.
+            value = str(interop.get(key, defaults[key])).strip().lower()
+            if value not in allowed:
+                raise ConfigError(
+                    f"sip.interop.{key}: '{value}' не поддерживается, "
+                    f"ожидается одно из {allowed}"
+                )
+        expires = _check_int("sip.interop.session_expires_sec",
+                             interop.get("session_expires_sec", 1800),
+                             SESSION_EXPIRES_MIN, SESSION_EXPIRES_MAX)
+        min_se = _check_int("sip.interop.min_session_expires_sec",
+                            interop.get("min_session_expires_sec", 900),
+                            MIN_SE_MIN, MIN_SE_MAX)
+        if expires and min_se > expires:
+            raise ConfigError(
+                "sip.interop.min_session_expires_sec не может быть больше "
+                "sip.interop.session_expires_sec"
+            )
     _check_bool("sip.null_audio", sip.get("null_audio"))
     stun = sip.get("stun")
     if not isinstance(stun, dict):
@@ -562,6 +628,41 @@ class Config:
     @property
     def ice_trickle(self) -> str:
         return str(self.nat.get("ice_trickle", "off")).lower()
+
+    @property
+    def interop(self) -> Dict[str, Any]:
+        """Секция sip.interop, дополненная значениями по умолчанию.
+
+        Полностью отсутствующая секция (старый конфиг) не меняет поведения:
+        приезжает DEFAULT_CONFIG.
+        """
+        merged = dict(DEFAULT_CONFIG["sip"]["interop"])
+        merged.update(self.raw["sip"].get("interop", {}) or {})
+        return merged
+
+    @property
+    def prack_mode(self) -> str:
+        return str(self.interop.get("prack", "optional")).strip().lower()
+
+    @property
+    def session_timer_mode(self) -> str:
+        return str(self.interop.get("session_timer", "optional")).strip().lower()
+
+    @property
+    def session_expires_sec(self) -> int:
+        return int(self.interop.get("session_expires_sec", 0) or 0)
+
+    @property
+    def min_session_expires_sec(self) -> int:
+        return int(self.interop.get("min_session_expires_sec", 900) or 900)
+
+    @property
+    def hold_type(self) -> str:
+        return str(self.interop.get("hold_type", "rfc3264")).strip().lower()
+
+    @property
+    def rtcp_mux(self) -> str:
+        return str(self.interop.get("rtcp_mux", "off")).strip().lower()
 
     @property
     def null_audio(self) -> bool:

@@ -79,6 +79,27 @@ TURN_TRANSPORT_CONST_BY_NAME = {
 SRTP_DEFAULT_BY_MODE = {"off": 0, "optional": 1, "mandatory": 2}
 ICE_TRICKLE_DEFAULT_BY_MODE = {"off": 0, "half": 1, "full": 2}
 TURN_TRANSPORT_DEFAULT_BY_NAME = {"udp": 17, "tcp": 6, "tls": 56}
+# Interop: имена констант pjsua2 для 100rel/PRACK, Session Timers и hold.
+# Снова ИМЕНА, а не числа: значения enum'ов между сборками PJSIP не совпадают.
+PRACK_CONST_BY_MODE = {
+    "off": "PJSUA_100REL_NOT_USED",
+    "optional": "PJSUA_100REL_OPTIONAL",
+    "mandatory": "PJSUA_100REL_MANDATORY",
+}
+PRACK_DEFAULT_BY_MODE = {"off": 0, "optional": 2, "mandatory": 1}
+SESSION_TIMER_CONST_BY_MODE = {
+    "inactive": "PJSUA_SIP_TIMER_INACTIVE",
+    "optional": "PJSUA_SIP_TIMER_OPTIONAL",
+    "required": "PJSUA_SIP_TIMER_REQUIRED",
+    "always": "PJSUA_SIP_TIMER_ALWAYS",
+}
+SESSION_TIMER_DEFAULT_BY_MODE = {
+    "inactive": 0, "optional": 1, "required": 2, "always": 3}
+HOLD_TYPE_CONST_BY_NAME = {
+    "rfc3264": "PJSUA_CALL_HOLD_TYPE_RFC3264",
+    "rfc2543": "PJSUA_CALL_HOLD_TYPE_RFC2543",
+}
+HOLD_TYPE_DEFAULT_BY_NAME = {"rfc3264": 0, "rfc2543": 1}
 
 # Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
 # _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости.
@@ -251,6 +272,27 @@ def turn_conn_type(pj_module, transport: str) -> int:
     key = (transport or "udp").strip().lower()
     name = TURN_TRANSPORT_CONST_BY_NAME.get(key, TURN_TRANSPORT_CONST_BY_NAME["udp"])
     return _pj_enum(pj_module, name, TURN_TRANSPORT_DEFAULT_BY_NAME.get(key, 17))
+
+
+def prack_use_value(pj_module, mode: str) -> int:
+    """Значение callConfig.prackUse для режима 100rel/PRACK (RFC 3262)."""
+    key = (mode or "optional").strip().lower()
+    name = PRACK_CONST_BY_MODE.get(key, PRACK_CONST_BY_MODE["optional"])
+    return _pj_enum(pj_module, name, PRACK_DEFAULT_BY_MODE.get(key, 2))
+
+
+def session_timer_value(pj_module, mode: str) -> int:
+    """Значение callConfig.timerUse для режима Session Timers (RFC 4028)."""
+    key = (mode or "optional").strip().lower()
+    name = SESSION_TIMER_CONST_BY_MODE.get(key, SESSION_TIMER_CONST_BY_MODE["optional"])
+    return _pj_enum(pj_module, name, SESSION_TIMER_DEFAULT_BY_MODE.get(key, 1))
+
+
+def hold_type_value(pj_module, hold_type: str) -> int:
+    """Значение callConfig.holdType: rfc3264 (re-INVITE) | rfc2543 (инверсия)."""
+    key = (hold_type or "rfc3264").strip().lower()
+    name = HOLD_TYPE_CONST_BY_NAME.get(key, HOLD_TYPE_CONST_BY_NAME["rfc3264"])
+    return _pj_enum(pj_module, name, HOLD_TYPE_DEFAULT_BY_NAME.get(key, 0))
 
 
 def normalize_stun_server(value: str) -> str:
@@ -703,6 +745,72 @@ class SipEngine:
             except Exception as exc:  # noqa: BLE001
                 log.warning("public_address '%s' не применён: %s", public_address, exc)
 
+    def _configure_account_interop(self, acc_cfg) -> None:  # pragma: no cover
+        """Прошивает SIP-interop в AccountConfig.callConfig / mediaConfig.
+
+        Что и зачем (подробности в docs/SIP_INTEROP.md):
+
+        * prackUse — 100rel/PRACK (RFC 3262): надёжная доставка 180/183.
+          Значительная часть терминалов 100rel не умеет, поэтому по умолчанию
+          "optional": предлагаем, но звонок не рвём.
+        * timerUse / timerSessExpiresSec / timerMinSESec — Session Timers
+          (RFC 4028). Без refresh CUCM и ряд SBC рвут сессию через 15-30
+          минут, а заодно протухает NAT-binding.
+        * holdType — старые Polycom/Sony не понимают hold по RFC 3264.
+        * mediaConfig.rtcpMuxEnabled — экономия портов; по умолчанию выключен,
+          потому что на старых шлюзах rtcp-mux ломает медиа.
+
+        Всё в try/except: набор полей отличается между сборками, а отсутствие
+        опции не должно ронять регистрацию.
+        """
+        interop = self.config.interop
+        call_cfg = getattr(acc_cfg, "callConfig", None)
+        if call_cfg is not None:
+            try:
+                if hasattr(call_cfg, "prackUse"):
+                    call_cfg.prackUse = prack_use_value(_pj, self.config.prack_mode)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("callConfig.prackUse не применён: %s", exc)
+            try:
+                if hasattr(call_cfg, "timerUse"):
+                    call_cfg.timerUse = session_timer_value(
+                        _pj, self.config.session_timer_mode
+                    )
+                expires = self.config.session_expires_sec
+                if expires and hasattr(call_cfg, "timerSessExpiresSec"):
+                    call_cfg.timerSessExpiresSec = expires
+                min_se = self.config.min_session_expires_sec
+                if min_se and hasattr(call_cfg, "timerMinSESec"):
+                    call_cfg.timerMinSESec = min_se
+            except Exception as exc:  # noqa: BLE001
+                log.warning("callConfig (Session Timers) не применён: %s", exc)
+            try:
+                if hasattr(call_cfg, "holdType"):
+                    call_cfg.holdType = hold_type_value(_pj, self.config.hold_type)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("callConfig.holdType не применён: %s", exc)
+
+        # rtcp-mux. ВАЖНО: setter принимает строго bool (SWIG-обёртка: bool,
+        # не int) — запись 1/0 бросает TypeError и отменяет весь блок.
+        if str(interop.get("rtcp_mux", "off")).strip().lower() == "on":
+            media_cfg = getattr(acc_cfg, "mediaConfig", None)
+            try:
+                if media_cfg is not None and hasattr(media_cfg, "rtcpMuxEnabled"):
+                    media_cfg.rtcpMuxEnabled = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("mediaConfig.rtcpMuxEnabled не применён: %s", exc)
+
+        log.info(
+            "SIP-interop: prack=%s session_timer=%s expires=%ds min_se=%ds "
+            "hold=%s rtcp_mux=%s",
+            self.config.prack_mode,
+            self.config.session_timer_mode,
+            self.config.session_expires_sec,
+            self.config.min_session_expires_sec,
+            self.config.hold_type,
+            self.config.rtcp_mux,
+        )
+
     @staticmethod
     def _transport_type(name: str):  # pragma: no cover
         legacy_map = {
@@ -891,6 +999,7 @@ class SipEngine:
                 log.warning("SRTP '%s' не применён: %s", srtp_mode, exc)
         # ICE/TURN/keep-alive — на уровне аккаунта (в uaConfig их нет).
         self._configure_account_nat(acc_cfg)
+        self._configure_account_interop(acc_cfg)
         self._acc_cfg = acc_cfg
         self._account = _Account()
         self._account.create(acc_cfg)

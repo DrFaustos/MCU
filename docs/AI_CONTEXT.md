@@ -4,7 +4,7 @@
 какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
 до того, как трогать код. Обновлять при значимых изменениях.
 
-Дата последнего обновления: **2026-10-06 (сессия 4)**, версия проекта **0.2.33**.
+Дата последнего обновления: **2026-10-07 (сессия 5)**, версия проекта **0.2.33**.
 
 ---
 
@@ -16,6 +16,7 @@
 | Архитектура и слои | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Декомпозиция SipEngine на сервисы | [ARCHITECTURE.md](ARCHITECTURE.md), §11 |
 | Выбор протокола звонка | [CALL_PROTOCOL.md](CALL_PROTOCOL.md) |
+| SIP-interop (100rel, Session Timers, hold, rtcp-mux) | [SIP_INTEROP.md](SIP_INTEROP.md) |
 | H.323 (нативный хост) | [H323_STATUS.md](H323_STATUS.md), [ADR-0002](ADR-0002-h323plus-unified-media.md) |
 | Web-панель / конференция из браузера | [WEB_CONTROL.md](WEB_CONTROL.md) |
 | Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
