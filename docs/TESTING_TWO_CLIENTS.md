@@ -237,7 +237,11 @@ MCU<->MCU OK`, на обеих сторонах `CONFIRMED` и строка `SIP
 * `test_call.sh` → `ЗВОНОК ПОДТВЕРЖДЁН`;
 * в логах — `call.confirmed` / `CallState.CONFIRMED`;
 * **нет** `Assertion`, `Fatal Python error`, `Aborted` при завершении
-  (это регресс teardown — см. `_CALL_KEEPALIVE` в `mcuclient/sip_engine.py`).
+  (это регресс teardown — см. `_park_call()` / `_CALL_KEEPALIVE` в
+  `mcuclient/sip_engine.py`, проверяется `tests/test_call_parking.py`).
+  Отдельно: «полезная работа» сделалась, а процесс вернул `rc=134`
+  (SIGABRT) — это тот же регресс, а не «нормальный» выход; стенды
+  проверяют именно нулевой код возврата.
 
 ---
 
@@ -250,7 +254,7 @@ MCU<->MCU OK`, на обеих сторонах `CONFIRMED` и строка `SIP
 | GUI-окна не появляются | нет X-авторизации | `up.sh` сам уйдёт в headless; задайте `MCU_X11=headless` |
 | `PJMEDIA_EAUD_SYSERR` | нет рабочего аудио | используйте `--null-audio` (up.sh делает сам) |
 | Пустые тайлы видео на Wayland | pjsua2 требует XID/HWND | `run.py` сам ставит `QT_QPA_PLATFORM=xcb`; при чистом Wayland — предупреждение |
-| `Assertion pjsua_call_set_user_data` | деструктор `_Call` на разрушенном Endpoint | уже исправлено (`_CALL_KEEPALIVE`); обновите код |
+| `Assertion pjsua_call_set_user_data` (`rc=134`) | деструктор `_Call` отработал после `libDestroy()` | исправлено `_park_call()` (он же зовёт `__disown__`); просто держать ссылку в `_CALL_KEEPALIVE` недостаточно — при выходе интерпретатора глобальные переменные очищаются |
 
 ---
 

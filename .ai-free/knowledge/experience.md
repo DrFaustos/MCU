@@ -49,3 +49,15 @@ https://polycom-moscow.ru/polycom-realpresence-mobile.php
   Проблема: закоммить запуш
   Вывод: Execution completed successfully
 <!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: продолжай
+  Вывод: Execution completed successfully
+  Файлы: .agent/pytest_full.txt, docs/SIP_ADDRESSING.md, .agent/fix_docs_web.py, .agent/commit_msg_addr.txt
+<!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: продолжай
+  Вывод: Execution completed successfully
+  Файлы: .agent/trace_msgs.sh, mcuclient/call_service.py
+<!-- source: code-agent -->

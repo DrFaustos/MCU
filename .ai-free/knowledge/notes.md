@@ -99,3 +99,41 @@ Interop-стенд: `scripts/testbed/run_two_instance_interop_test.sh` (+ `two_i
 
 Docs: `docs/SIP_ADDRESSING.md`.
 <!-- source: agent -->
+
+## Стенд verify_registration: sipp обязан идти фоном, а не subprocess.run
+
+В `scripts/testbed/verify_registration.py` дозвон sipp на номер зала (6001 через
+Asterisk) нельзя запускать `subprocess.run`: пока он блокирует поток,
+`libHandleEvents()` не зовётся, INVITE лежит в буфере сокета, sipp по таймауту
+шлёт CANCEL, Asterisk — 487, а очнувшийся МСУ ловит в `answer()`
+`pjsua2.Error 171140 PJSIP_ESESSIONTERMINATED`. Выглядело как «МСУ не принимает
+вызовы через АТС», хотя REGISTER был в порядке. Правильно:
+`subprocess.Popen` + `pump(engine, N, pred)` + слив stdout в цикле `process_events`.
+
+Диагностика: `pjsip set logger on` (cli из `scripts/testbed/lib/asterisk.py`) +
+чтение `/tmp/mcu-asterisk/log/asterisk.log` (ANSI-коды вырезать regex `\x1b\[[0-9;]*m`).
+<!-- source: agent -->
+
+## Teardown pjsua2: держать ссылку на Call недостаточно — нужен `__disown__`
+
+Деструктор SWIG-обёртки `pjsua2.Call` зовёт `pjsua_call_set_user_data(call_id, NULL)`,
+а та проверяет `call_id < pjsua_var.ua_cfg.max_calls`. После `libDestroy()`
+`ua_cfg.max_calls == 0` → assertion для ЛЮБОГО завершённого вызова → SIGABRT
+(rc=134) уже после того, как всё завершилось корректно. `_CALL_KEEPALIVE`
+(«просто держать ссылку») не спасает: при завершении интерпретатора модульные
+переменные очищаются, список освобождается и деструкторы отработают.
+
+Правильно: `mcuclient/sip_engine.py::_park_call(call)` — сначала `call.__disown__()`,
+затем `_CALL_KEEPALIVE.append(call)`. Вызывается из `_drop_participant()` и
+`stop()`. Регрессии: `tests/test_call_parking.py` (в т.ч. ветка без `__disown__`
+для pybind11-сборок). Проверка в стендах: rc обязан быть 0, а не 134.
+<!-- source: agent -->
+
+## sipp-статистика: читать накопленную (последнюю) колонку
+
+sipp печатает `Successful call`/`Failed call` с ДВУМЯ числами — «за последний
+интервал» и «накопленное» (`Successful call | 0 | 1`). Регулярка «первое число»
+(`re.search(r"Successful call[^\d]*(\d+)")`) возвращает 0 из первой колонки —
+стенд выглядит упавшим при полностью успешном вызове. Берём ПОСЛЕДНЕЕ число
+строки: `scripts/testbed/verify_registration.py::_sipp_stat()`.
+<!-- source: agent -->
