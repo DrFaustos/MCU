@@ -28,3 +28,19 @@ https://polycom-moscow.ru/polycom-realpresence-mobile.php
   Вывод: Execution completed successfully
   Файлы: .ai-free/knowledge/notes.md
 <!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: разрешаю, делай
+  Вывод: Execution completed successfully
+  Файлы: .agent/patch_testing_doc.py, .agent/patch_aicontext.py, .agent/commit_msg.txt
+<!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: Как ревьювер и архитектор, из того, что ты увидел, что можно сделать реально нужного?
+
+Повторяю, нам нужен максимально совместимый MCU со всеми аппаратными и программными ВКС. Как пример polycom:
+https://polycom-moscow.ru/polycom-realpresence-desktop.php
+https://polycom-moscow.ru/polycom-realpresence-mobile.php
+  Вывод: Execution completed successfully
+  Файлы: docs/SIP_INTEROP.md
+<!-- source: code-agent -->

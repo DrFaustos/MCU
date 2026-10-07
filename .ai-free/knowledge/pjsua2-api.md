@@ -68,3 +68,11 @@
 * `AccountCallConfig.updateUse` (a=update-connection) в 2.16 **нет**.
 * `Account.getConfig()` в SWIG-биндинге **нет** (только `getInfo()`, и у AccountInfo нет поля accConfig).
 <!-- source: agent -->
+
+## Зонд pjsua2 2.16 (реальная сборка) — что есть для регистрации/TLS
+
+* `AccountConfig.regConfig` — СУЩЕСТВУЕТ (поля registrarUri/realm/username/password/timeout). В `mcuclient/` нет НИ ОДНОГО упоминания regConfig/registrar/register — регистрация на регистраторе не реализована вообще, MCU живёт только в IP-режиме.
+* `AccountConfig`: только `idUri`, `natConfig`, `presConfig`, `sipConfig`, `mediaConfig`, `callConfig`, `videoConfig`, `regConfig`. Полей `proxy`/`outbound` в AccountConfig НЕТ (аутбаунд-прокси — только через транспорт/pjsua-уровень).
+* TLS: `UaConfig.tlsConfig` НЕТ. Есть `TransportConfig.tlsConfig` (тип `pj.TlsConfig`) — TLS включается при `transportCreate(PJSIP_TRANSPORT_TLS, cfg)` с заполненным `cfg.tlsConfig`.
+* `CallOpParam()` и `CallOpParam(True)` оба дают `statusCode=0`: первый аргумент — НЕ statusCode (это opt.useSdp). `answer()` надо писать явно через `prm.statusCode = 200`, иначе поведение зависит от дефолтов биндинга.
+<!-- source: agent -->

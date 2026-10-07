@@ -60,3 +60,23 @@ Interop-стенд: `scripts/testbed/run_two_instance_interop_test.sh` (+ `two_i
 падает И НА БАЗЕ fb904a5 (core dump в two_instance_video_call.py listen) —
 проблема окружения (v4l2-камеры), а не кода interop.
 <!-- source: agent -->
+
+## Предсуществующий краш: второй start/stop SipEngine в одном процессе
+
+`terminate called after throwing an instance of 'pj::Error'` → `Aborted (core dumped)` на **втором** `SipEngine.start()/stop()` в одном Python-процессе. Проверено на базовой линии (`git stash`) — воспроизводится БЕЗ каких-либо правок, т.е. это не регрессия.
+
+Минимальное воспроизведение (без сети): `SipEngine(cfg).start(); process_events(0.2); stop()` дважды → abort. Чистый pjsua2 (`libCreate/libInit/transportCreate/libStart/libDestroy` дважды в одном процессе) — **не** падает, значит дело в объектах, которые держит движок (director-классы Call/Account).
+
+Практические следствия:
+* стенды и e2e-проверки: ОДИН движок на процесс, для второго сценария — новый процесс;
+* скрипты, дёргающие реальный `start()`, должны завершаться через `os._exit(rc)`;
+* `pytest tests/` «висит» после 100% по этой же причине (teardown pjsua2) — не связано с конкретным модулем.
+
+## Стенд Asterisk: REGISTER всегда получал 403 (исправлено)
+
+`scripts/testbed/asterisk/pjsip.conf`: endpoint `[1001]` и секции `auth`/`aor` имели ОДНО имя `1001` и не ссылались друг на друга (`auth=`/`aors=` отсутствовали). REGISTER с 127.0.0.1 по identify матчился на `echo-anon` (эндпоинт без AOR) → Asterisk отвечал 403 Forbidden. Следы — в `register_1001_*.log` в корне репо с 17 сентября. Починено: уникальные имена `1001-auth`/`1001-aor` + явные ссылки.
+
+## Проверенные факты pjsua2 2.16
+
+* Чистый pjsua2 + аккаунт с `regConfig.registrarUri`, отвечающий 403, — НЕ падает; колбэк `onRegState` получает `code=403`, `getInfo().regStatus=403`. Значит 403 от регистратора безопасен, а краш — именно про повторный старт движка.
+<!-- source: agent -->
