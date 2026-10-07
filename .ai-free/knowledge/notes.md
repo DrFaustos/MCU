@@ -154,3 +154,28 @@ sipp печатает `Successful call`/`Failed call` с ДВУМЯ числам
 стенд выглядит упавшим при полностью успешном вызове. Берём ПОСЛЕДНЕЕ число
 строки: `scripts/testbed/verify_registration.py::_sipp_stat()`.
 <!-- source: agent -->
+
+## Тестовый раннер tests/_runner.py: обязательная точка проверки не имеет права врать
+
+`docs/AI_CONTEXT.md` §4 требует перед коммитом гонять `python3 tests/_runner.py`,
+но раннер передавал только `tmp_path`. Итог на 2026-10-08: 9 «FAIL» с
+`TypeError: missing 1 required positional argument` (monkeypatch, parametrize)
+при зелёном pytest, и молча не собранные 30 файлов — 733 кейса вместо 987.
+Правильное направление правки — расширять раннер (monkeypatch с откатом,
+parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
+переписывать тесты под его ограничения.
+
+Грабли:
+* pytest 9.1: `Skipped.__module__ == 'builtins'` (MRO: Skipped →
+ OutcomeException → BaseException). Распознавать пропуск надо по имени класса в
+ `type(exc).__mro__`, не по `__module__`; `except Exception` его не видит вообще,
+ и честный пропуск вешает весь прогон.
+* покрытие сверять `--collect-only` с обеих сторон — иначе потерянные файлы не
+ видны ни в каком выводе.
+* счётчик кейсов читать из ФАЙЛА лога, а не из `cat` в terminal(): native-лог
+ pjsua2 и лимиты вывода обрезают текст, и казалось, что раннер потерял треть
+ набора (было 987, «виделось» 733).
+
+Регрессия: `tests/test_test_runner.py` (13) — семантика раннера на пробах в
+tmp_path, гоняется и pytest'ом, и самим раннером.
+<!-- source: agent -->
