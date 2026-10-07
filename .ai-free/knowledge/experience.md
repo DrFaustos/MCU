@@ -16,3 +16,9 @@ https://polycom-moscow.ru/polycom-realpresence-mobile.php
   Вывод: Execution completed successfully
   Файлы: .agent/docs_dtmf.py, scripts/testbed/two_instance_dtmf.py, scripts/testbed/run_two_instance_dtmf_test.sh, .agent/probe_dtmf_stream.py, .agent/probe_dtmf_stream2.py, .agent/fix_dtmf_dedup.py, .agent/add_dedup_tests.py
 <!-- source: code-agent -->
+
+- 2026-10-07
+  Проблема: разрешаю, делай
+  Вывод: Execution completed successfully
+  Файлы: .agent/patch_dtmf_register.py
+<!-- source: code-agent -->
