@@ -21,6 +21,7 @@ from mcuclient.dtmf import (  # noqa: E402
     normalize_digits,
     validate_digits,
 )
+from mcuclient import dtmf_service  # noqa: E402
 from mcuclient.dtmf_service import (  # noqa: E402
     DtmfService,
     describe_dtmf_method,
@@ -140,6 +141,7 @@ class _Call:
         self.fail_methods = set(fail_methods)
         self.dialed = []
         self.sent = []
+        self.durations = []
 
     def dialDtmf(self, digits):  # noqa: N802
         # dialDtmf — это RFC 2833 без выбора метода
@@ -151,6 +153,8 @@ class _Call:
         if prm.method in self.fail_methods:
             raise RuntimeError(f"метод {prm.method} недоступен")
         self.sent.append((prm.digits, prm.method))
+        # Длительность важна: тон за тоном имеет смысл только вместе с ней.
+        self.durations.append(getattr(prm, "duration", None))
 
 
 class _Participant:
@@ -180,7 +184,8 @@ class _Engine:
         return None
 
 
-def _service(participants, pj_module=_FakePj):
+def _service(participants, pj_module=_FakePj, process_events=None,
+             register_thread=None):
     eng = _Engine(participants)
     svc = DtmfService(
         eng.events,
@@ -189,6 +194,8 @@ def _service(participants, pj_module=_FakePj):
         get_participant=eng.get,
         list_participant_ids=eng.ids,
         find_by_call=eng.find,
+        process_events=process_events,
+        register_thread=register_thread,
     )
     return eng, svc
 
@@ -197,11 +204,99 @@ def test_send_dtmf_to_one_participant_uses_rfc2833():
     call = _Call()
     _, svc = _service([_Participant(1, call), _Participant(2, _Call())])
     assert svc.send_dtmf(1, "#12 34") is True
+    rfc = _FakePj.PJSUA_DTMF_METHOD_RFC2833
     # метод RFC 2833 берётся из константы фейка, а не из числа в коде
-    assert call.sent == [("#1234", _FakePj.PJSUA_DTMF_METHOD_RFC2833)]
+    # «#12 34» нормализуется в «#1234» — это пять тонов, каждый уходит отдельно.
+    assert call.sent == [(d, rfc) for d in "#1234"]
     # второй участник не должен получить чужие тоны
     ev = svc.history[-1]
     assert ev.participant_id == 1 and ev.direction == "out" and ev.method == "rfc2833"
+
+
+def test_rfc2833_sends_tone_by_tone_with_pjsip_pump():
+    """Строку pjsip при threadCnt=0 не разыгрывает: нужен тон за тоном.
+
+    Это не «стиль»: sendDtmf("1984#") и dialDtmf("1984#") доносят до
+    адресата ровно ОДИН тон (замерено run_two_instance_dtmf_test.sh).
+    Между тонами обязан крутиться libHandleEvents, иначе тона склеиваются
+    и символы теряются — IVR не принимает PIN, терминал не набирает зал.
+    """
+    call = _Call()
+    pumps = []
+    _, svc = _service([_Participant(1, call)], process_events=pumps.append)
+    assert svc.send_dtmf(1, "1984#") is True
+    rfc = _FakePj.PJSUA_DTMF_METHOD_RFC2833
+    assert call.sent == [(d, rfc) for d in "1984#"]
+    # Между тонами — накачка (после последнего тоже допустима: закрыть тон).
+    assert len(pumps) >= len("1984#")
+    assert all(t > 0 for t in pumps)
+    # Темп выверен зондом: тон обязан УСПЕТЬ закончиться до старта
+    # следующего, иначе адресат склеивает два тона и теряет символ.
+    assert all(d == dtmf_service.DTMF_TONE_DURATION_MS for d in call.durations)
+    gap = dtmf_service.DTMF_TONE_GAP_SEC
+    assert dtmf_service.DTMF_TONE_DURATION_MS / 1000.0 <= gap
+    # process_events(t) НЕ спит t секунд (libHandleEvents возвращается на
+    # первом пакете), поэтому пауза держится по часам маленькими шагами.
+    # Суммарное время накачки на тон >= пауза: иначе тона уходят «вразносыпь».
+    assert sum(pumps) >= gap * (len("1984#") - 1)
+    assert max(pumps) <= gap  # шаги маленькие, чтобы события не «засыпали»
+
+
+def test_rfc2833_without_pump_still_sends_every_tone():
+    """Без накачки (юнит-тест, stub) отправка не падает и не «сжимается»."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    assert svc.send_dtmf(1, "12#") is True
+    assert [d for d, _ in call.sent] == ["1", "2", "#"]
+
+
+def test_tone_send_registers_thread_before_pumping():
+    """До накачки pjsua2 поток обязан зарегистрироваться в pjlib.
+
+    libHandleEvents из незарегистрированного потока = нативный abort процесса
+    без трейсбэка, поэтому регистрация идёт до первой накачки и не повторяется
+    для того же потока.
+    """
+    calls = []
+    order = []
+
+    def register(name):
+        calls.append(name)
+        order.append("register")
+
+    call = _Call()
+    _, svc = _service([_Participant(1, call)],
+                      process_events=lambda t: order.append("pump"),
+                      register_thread=register)
+    assert svc.send_dtmf(1, "12") is True
+    assert calls == ["dtmf"]          # ровно одна регистрация на поток
+    assert order[0] == "register"     # до первой накачки
+    assert "pump" in order
+
+    # Тот же поток повторно не регистрируем.
+    assert svc.send_dtmf(1, "3") is True
+    assert calls == ["dtmf"]
+
+
+def test_register_thread_failure_does_not_break_send():
+    """Уже зарегистрированный поток (веб-диспетчер) не роняет отправку."""
+    def register(name):
+        raise RuntimeError("already registered")
+
+    call = _Call()
+    _, svc = _service([_Participant(1, call)], process_events=lambda t: None,
+                      register_thread=register)
+    assert svc.send_dtmf(1, "12#") is True
+
+
+def test_sip_info_sends_whole_string_at_once():
+    """SIP INFO — сообщения, а не тоновая очередь: строка уходит целиком."""
+    call = _Call(fail_methods=[_FakePj.PJSUA_DTMF_METHOD_RFC2833])
+    pumps = []
+    _, svc = _service([_Participant(1, call)], process_events=pumps.append)
+    assert svc.send_dtmf(1, "1984#", method="sip-info") is True
+    assert call.sent == [("1984#", _FakePj.PJSUA_DTMF_METHOD_SIP_INFO)]
+    assert pumps == []          # паузы не нужны: это не тоновая очередь
 
 
 def test_send_dtmf_falls_back_to_sip_info():
@@ -255,6 +350,64 @@ def test_incoming_digit_recorded_with_participant():
     ev = svc.history[-1]
     assert (ev.digits, ev.direction, ev.participant_id) == ("5", "in", 3)
     assert ev.peer == "sip:3@host"
+
+
+class _EvPrm:
+    """OnDtmfEventParam: flags = bit0 «тон продолжается», bit1 «конец»."""
+
+    def __init__(self, digit, flags=0, duration=20):
+        self.digit = digit
+        self.flags = flags
+        self.duration = duration
+        self.method = _FakePj.PJSUA_DTMF_METHOD_RFC2833
+
+
+class _DigPrm:
+    """OnDtmfDigitParam: duration у реального pjsua2 = 4294967295."""
+
+    def __init__(self, digit):
+        self.digit = digit
+        self.duration = 4294967295
+        self.method = _FakePj.PJSUA_DTMF_METHOD_RFC2833
+
+
+def test_rfc4733_repeats_collapse_into_one_digit():
+    """begin + повторы + end = ОДИН тон в истории."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    for flags in (0, 1, 1, 1, 3):
+        svc.on_dtmf_event(call, _EvPrm("7", flags=flags))
+    assert [e.digits for e in svc.history] == ["7"]
+
+
+def test_full_stream_matches_real_pjsua2_sequence():
+    """Повторяем поток зонда для «1984#» и ждём ровно 5 тонов."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    for tone in "1984#":
+        svc.on_dtmf_event(call, _EvPrm(tone, flags=0, duration=20))
+        svc.on_dtmf_digit(call, _DigPrm(tone))       # сборки шлют и digit
+        for dur in (40, 60, 80, 100, 120, 140):
+            svc.on_dtmf_event(call, _EvPrm(tone, flags=1, duration=dur))
+        svc.on_dtmf_event(call, _EvPrm(tone, flags=3, duration=160))
+    assert [e.digits for e in svc.history] == ["1", "9", "8", "4", "#"]
+
+
+def test_digit_callback_used_when_no_events():
+    """Сборки без onDtmfEvent: запасной путь по onDtmfDigit работает."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    svc.on_dtmf_digit(call, _DigPrm("5"))
+    svc.on_dtmf_digit(call, _DigPrm("3"))
+    assert [e.digits for e in svc.history] == ["5", "3"]
+
+
+def test_event_flags_constants_match_observed_stream():
+    """Флаги взяты не из воздуха: их показал зонд на реальном вызове."""
+    from mcuclient.dtmf_service import DTMF_EVENT_FLAG_END, DTMF_EVENT_FLAG_MORE
+
+    assert DTMF_EVENT_FLAG_MORE == 0x01
+    assert DTMF_EVENT_FLAG_END == 0x02
 
 
 def test_incoming_empty_digit_ignored():

@@ -11,6 +11,7 @@
 | **1. Контейнеры** (`scripts/dev/*.sh`) | Нужны два изолированных клиента, реальный pjsua2, GUI | SIP-звонок, видео, устройства |
 | **2. Процессы** (`scripts/dev/smoke_local.sh`) | Контейнеры недоступны / быстрый smoke | Сигналинг, CONFIRMED, teardown |
 | **2a. Видео** (`scripts/testbed/run_two_instance_video_test.sh`) | Нужно проверить видеопоток без камеры | `call.video active=True` на обоих концах |
+| **2b. DTMF** (`scripts/testbed/run_two_instance_dtmf_test.sh`) | Нужно проверить тоны (набор номера зала, IVR/PIN) | `[+] DTMF MCU<->MCU OK`, вся строка тонов у адресата |
 | **3. Браузер** (`--web`, `aiortc`) | Нужно проверить web-конференцию (BBB-подобно) | вход по имени, публикация своей камеры/микрофона, раздача видео и аудио другим браузерам |
 
 Оба пути используют **один и тот же код** из рабочего дерева.
@@ -172,6 +173,32 @@ scripts/dev/smoke_local.sh
 > `AccountVideoConfig.defaultCaptureDevice`; для активных вызовов —
 > `Call.vidSetStream(CHANGE_CAP_DEV)`. `switchDev` для камер/Colorbar не работает
 > (нет capability `PJMEDIA_VID_DEV_CAP_SWITCH`) — это была причина «пустых тайлов».
+
+---
+
+## 2b. DTMF-стенд (2 процесса, тоны по SIP/RTP)
+
+```bash
+scripts/testbed/run_two_instance_dtmf_test.sh
+```
+
+Звонок MCU ↔ MCU, затем исходящий конец отправляет `1984#`. Успех:
+`[+] DTMF MCU<->MCU OK` и `DTMF приняты: 1984#` на принимающей стороне.
+
+Переменные: `LISTEN_PORT` (по умолч. 15084), `CALL_PORT` (15083).
+
+> **Почему этот стенд обязателен.** Unit-тесты проверяют только то, что мы
+> дёрнули `Call.sendDtmf`. Реальность другая: при `threadCnt = 0` pjsip **не
+> разыгрывает очередь тонов** — `sendDtmf("1984#")` и `dialDtmf("1984#")`
+> доносят до адресата ровно один тон «1». Отправка тон-за-тоном без накачки
+> `libHandleEvents` между тонами тоже ломается (адресат обрезает тон и теряет
+> символ). Ловится это только живым звонком:
+> `scripts/testbed/run_two_instance_dtmf_test.sh`.
+>
+> Второе следствие: `engine.process_events(0.16)` — это **не** «спать 160 мс».
+> `libHandleEvents()` возвращается на первом же обработанном пакете, поэтому
+> пауза между тонами держится по `time.monotonic()` маленькими шагами накачки
+> (`DTMF_PUMP_STEP_SEC` в `mcuclient/dtmf_service.py`).
 
 ---
 

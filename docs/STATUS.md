@@ -29,6 +29,7 @@
 | Видео в звонке | 🟡 | работает: подтверждено тестом MCU<->MCU (`call.video active=True` на обоих концах, `scripts/testbed/run_two_instance_video_test.sh`). На Wayland встраивание в тайл может не работать — открывается отдельным окном |
 | Демонстрация экрана | 🚧 | Linux: нужен `v4l2loopback`; на Wayland `mss` не захватывает экран (нужна X11/XWayland-сессия) |
 | Запись конференции (FFmpeg) | 🟡 | требуется `ffmpeg` в PATH; записывает экран, не медиапоток |
+| DTMF (RFC 2833 + откат на SIP INFO) | ✅ | Подтверждено MCU<->MCU: вся строка тонов `1984#` доходит (`scripts/testbed/run_two_instance_dtmf_test.sh`). Тоны уходят по одному с накачкой pjsua2 между ними — строкой при `threadCnt=0` pjsip доносит только первый тон |
 | Регулировка качества/битрейта | 🟡 | меняет настройки, влияние на поток ограничено |
 | Одна автосоздаваемая комната | ✅ | |
 | Web-панель управления (`--web`) | ✅ | REST + SSE, участники, вызовы, муты, раскладка, запись, чат, устройства |
@@ -109,7 +110,9 @@ INVITE лежал в буфере сокета, а обе стороны «сп�
 Проверено живьём: `scripts/testbed/run_two_instance_test.sh` —
 `[+] MCU<->MCU OK` (CONFIRMED на обеих сторонах);
 `scripts/testbed/run_two_instance_video_test.sh` — `[+] MCU<->MCU VIDEO OK`
-(`call.video active=True` на обоих концах). Итог: **816 passed, 0 failed** —
+(`call.video active=True` на обоих концах);
+`scripts/testbed/run_two_instance_dtmf_test.sh` — `[+] DTMF MCU<->MCU OK`
+(вся строка тонов `1984#` доходит до адресата). Итог: **816 passed, 0 failed** —
 и под pytest, и под обязательным `tests/_runner.py`.
 
 ### 2026-10-06 — аудио-мост SIP <-> веб наконец поднимается сам

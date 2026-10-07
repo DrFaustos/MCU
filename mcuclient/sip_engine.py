@@ -412,6 +412,11 @@ class SipEngine:
             get_participant=self._get_participant,
             list_participant_ids=self._registry.all_ids,
             find_by_call=self._registry.find_by_call,
+            # Тоны разыгрываются, только пока крутится libHandleEvents():
+            # просим движок прокачать pjsua2 между тонами и регистрируем
+            # вызывающий поток (из чужого потока libHandleEvents abort'ит).
+            process_events=self.process_events,
+            register_thread=self._register_pjsip_thread,
         )
         self._mediacontrol = MediaControlService(
             self.events,

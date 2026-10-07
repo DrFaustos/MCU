@@ -119,3 +119,6 @@ node_modules/
 mediasoup-sidecar/node_modules/
 # Пустой корневой lock (создан случайно в корне, не нужен)
 /package-lock.json
+
+# scratch для агентов (одноразовые скрипты/логи)
+.agent/
