@@ -45,11 +45,39 @@ from .layout_service import LayoutService
 
 log = get_logger("sip")
 
-# Держим ссылки на _Call-объекты pjsua2 до конца жизни процесса.
-# Их деструкторы вызывают pjsua_call_set_user_data на уже разрушенном
-# Endpoint (после libDestroy) -> assertion abort. Если позволить GC
-# собрать их (clear/pop), процесс падает на teardown. Паркуем навсегда.
+# Держим ссылки на _Call-объекты pjsua2 до конца жизни процесса: их
+# деструкторы вызывают pjsua_call_set_user_data на уже разрушенном
+# Endpoint (после libDestroy) -> assertion abort. Складывают их сюда через
+# _park_call(), которая заодно снимает владение — см. её docstring.
 _CALL_KEEPALIVE: list = []
+
+
+def _park_call(call) -> None:  # pragma: no cover - проверяется на заглушке
+    """Отдать C++-объект Call обратно C++ и спарковать python-ссылку.
+
+    Деструктор pjsua2.Call (SWIG) вызывает
+    ``pjsua_call_set_user_data(call_id, NULL)``, а та проверяет
+    ``call_id < pjsua_var.ua_cfg.max_calls``. После ``libDestroy()``
+    ``ua_cfg.max_calls == 0``, поэтому assertion срабатывает для ЛЮБОГО
+    вызова и процесс получает SIGABRT уже после того, как всё корректно
+    завершилось (в стенде — rc=134, в бою — «упало при выходе»).
+
+    Просто держать ссылку в ``_CALL_KEEPALIVE`` недостаточно: на
+    завершении интерпретатора глобальные переменные очищаются, список
+    освобождается и деструкторы всё равно срабатывают. ``__disown__()``
+    (SWIG) запрещает Python удалять C++-объект: остаётся утечка одной
+    обёртки вызова, что безопаснее abort'а.
+    """
+    if call is None:
+        return
+    disown = getattr(call, "__disown__", None)
+    if callable(disown):
+        try:
+            disown()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("__disown__ для Call не сработал: %s", exc)
+    _CALL_KEEPALIVE.append(call)
+
 
 # --- Именованные константы вместо «магических» чисел -------------------------
 # Базовый приоритет лучшего кодека и шаг понижения для следующих в списке.
@@ -558,8 +586,9 @@ class SipEngine:
                 self._endpoint.libDestroy()
                 # НЕ освобождаем Call-объекты: их деструкторы на разрушенном
                 # Endpoint вызывают pjsua_call_set_user_data -> assertion abort.
-                # Паркуем ссылки в модульный keepalive до конца процесса.
-                _CALL_KEEPALIVE.extend(self._live_calls.values())
+                # Снимаем владение и паркуем до конца процесса.
+                for _call in list(self._live_calls.values()):
+                    _park_call(_call)
                 self._live_calls.clear()
         finally:
             self._unbind_capture()
@@ -2083,10 +2112,9 @@ class SipEngine:
     def _drop_participant(self, participant_id: int) -> None:
         """Удаляет участника и связанные с ним видео-окна (без утечек)."""
         self._registry.drop(participant_id)
-        _call = self._live_calls.pop(participant_id, None)
-        if _call is not None:
-            # Паркуем, чтобы GC не вызвал деструктор на разрушенном Endpoint.
-            _CALL_KEEPALIVE.append(_call)
+        # Паркуем и снимаем владение: иначе деструктор выстрелит после
+        # libDestroy (или на очистке модулей) -> assertion abort.
+        _park_call(self._live_calls.pop(participant_id, None))
         self.events.emit("call.closed", id=participant_id)
 
     @staticmethod
