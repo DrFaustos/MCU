@@ -77,6 +77,27 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — сверка проверок боевым интерпретатором; тест перенесён на `asyncio.run`
+
+Прогон `python3 tests/_runner.py` из окружения ИИ-агента показал **«10 failed»**
+на полностью зелёном коде. Причина — не код, а интерпретатор: первым в `PATH`
+стоял `python3` 3.14 без `pytest`. Отсюда `ERROR import` у `test_sip_interop.py`
+и `test_sip_registration.py` (файлы есть и проходят), 5 падений
+`test_test_runner.py` (его probe-скрипты запускают раннер через
+`sys.executable`, то есть тем же битым интерпретатором) и `RuntimeError` в
+`test_mixed_audio_track.py`. Правило зафиксировано в `docs/AI_CONTEXT.md` §4:
+проверять и сверять только **боевым** `/usr/bin/python3` (3.12: `pytest` 9.1.1 +
+`pjsua2`); при «падениях» сначала `which -a python3`.
+
+Частная причина, которая была реальной: `tests/test_mixed_audio_track.py` звал
+`asyncio.get_event_loop().run_until_complete()` — в 3.12 это уже
+DeprecationWarning, в 3.14 — RuntimeError (луп не создаётся). Заменено на
+`asyncio.run()`, как в остальных async-тестах репозитория.
+
+Проверки: `/usr/bin/python3 tests/_runner.py` → **1001 passed, 0 failed,
+RC=0**; `/usr/bin/python3 -m pytest tests/` → RC=0; `--collect-only` с обеих
+сторон — **98 файлов / 1001 кейс**, расхождений пофайлово нет.
+
 ### 2026-10-08 — обязательная точка проверки врала: `tests/_runner.py` доведён до паритета с pytest
 
 `docs/AI_CONTEXT.md` §4 требует перед коммитом гонять `python3 tests/_runner.py`,

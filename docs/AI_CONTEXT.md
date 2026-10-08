@@ -317,7 +317,18 @@ chdir с полным откатом), `parametrize` (одно- и многоа�
 
 ## 4. Как проверять (обязательный минимум)
 
-**Перед коммитом:** `python3 tests/_runner.py` → `N passed, 0 failed`;
+**Боевой интерпретатор — `/usr/bin/python3`** (3.12: в нём есть и `pytest`, и
+`pjsua2`-`.egg`). В `PATH` разработчика или ИИ-агента первым может стоять другой
+`python3` — например 3.14 из окружения агента, где `pytest` отсутствует. Прогон
+`python3 tests/_runner.py` таким интерпретатором даёт **ложные** падения, не
+связанные с кодом: `ERROR import … ModuleNotFoundError: No module named 'pytest'`
+(файлы, которые реально есть и проходят) и `RuntimeError: There is no current
+event loop` в `test_mixed_audio_track.py` (в 3.14 `asyncio.get_event_loop()`
+луп не создаёт). На 2026-10-08 такой прогон показал «10 failed» при зелёном
+боевом наборе. Сверяйте результат только с боевым интерпретатором.
+
+**Перед коммитом:** `/usr/bin/python3 tests/_runner.py` → `N passed, 0 failed`
+(он же и `python3 -m pytest tests/` — тем же интерпретатором);
 `git status -sb` — чисто; не оставлять одноразовые `scripts/_*.py`.
 
 ---

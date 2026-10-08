@@ -178,4 +178,25 @@ parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
 
 Регрессия: `tests/test_test_runner.py` (13) — семантика раннера на пробах в
 tmp_path, гоняется и pytest'ом, и самим раннером.
+
+## Боевой интерпретатор — /usr/bin/python3, а НЕ python3 из PATH
+
+В PATH сессии ИИ-агента первым стоит `python3` 3.14 из окружения Hermes
+(`.../.ai-free/hermes/chats/<id>/tools/python-3.14.7.../bin`), в нём **нет**
+`pytest` (и нет `pjsua2`). Прогон `python3 tests/_runner.py` им даёт **ложные**
+падения, к коду отношения не имеющие:
+* `ERROR import tests/test_sip_interop.py` / `test_sip_registration.py` →
+ `ModuleNotFoundError: No module named 'pytest'` (файлы есть и проходят);
+* 5 падений `test_test_runner.py` — его probe-скрипты запускают раннер через
+ `sys.executable`, то есть тем же битым интерпретатором;
+* `test_mixed_audio_track.py` → `RuntimeError: There is no current event loop`
+ (в 3.14 `asyncio.get_event_loop()` луп не создаёт);
+* `test_sip_engine_nat_srtp.py::...stun...` — на 3.14 `StringVector`-проверка
+ уходит в ветку «не применён».
+
+Итог такого прогона 2026-10-08: «925 passed, 10 failed» при **зелёном** боевом
+наборе. Боевая среда: `/usr/bin/python3` 3.12.3 (pytest 9.1.1 + pjsua2 .egg) →
+`/usr/bin/python3 tests/_runner.py` = **1001 passed, 0 failed, RC=0**;
+`/usr/bin/python3 -m pytest tests/` = RC=0. Правило: проверять и сверять только
+боевым интерпретатором; при «падениях» в чужом python — сначала `which -a python3`.
 <!-- source: agent -->
