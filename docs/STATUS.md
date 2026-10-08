@@ -37,7 +37,7 @@
 | Аудио-мост SIP <-> браузеры | 🟡 | поднимается сам при включённой web-панели: терминал слышит веб-микс, браузеры — терминал. Проверено тестами, на реальном терминале ещё не прогонялось |
 | TLS (HTTPS) для web-панели | 🟡 | опционально, по умолчанию выключено |
 | ICE (STUN/TURN) для WebRTC | 🟡 | настраивается, по умолчанию только LAN |
-| Текстовый чат (SIP MESSAGE, RFC 3428) | ✅ | Подтверждено MCU<->MCU: текст доезжает посимвольно равным, статус `delivered` (`scripts/testbed/run_two_instance_chat_test.sh`). В web-панели: история и отправка (`GET/POST /api/chat`) |
+| Текстовый чат (SIP MESSAGE, RFC 3428) | ✅ | Подтверждено MCU<->MCU: текст доезжает посимвольно равным, статус `delivered` (`scripts/testbed/run_two_instance_chat_test.sh`). UI: web-панель (история + отправка, `GET/POST /api/chat`); в нативном Qt-окне панели чата нет |
 | Тонкая настройка SIP-interop (`sip.interop`) | ✅ | 100rel/PRACK, Session Timers, hold-метод и rtcp-mux доезжают до `AccountConfig`; значения по умолчанию = поведение стека. Проверено `tests/test_sip_interop.py` + `scripts/testbed/run_two_instance_interop_test.sh`. См. `docs/SIP_INTEROP.md` |
 
 ## Что НЕ реализовано / ограничено
