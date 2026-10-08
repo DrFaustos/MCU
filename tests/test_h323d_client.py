@@ -11,6 +11,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог tests/ — импорт локального помощника _ipc_path (tests/_runner.py
+# его сам не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _ipc_path import ipc_socket_path  # noqa: E402
 
 from mcuclient.h323d_client import (  # noqa: E402
     H323dClient,
@@ -18,7 +23,6 @@ from mcuclient.h323d_client import (  # noqa: E402
     encode_command,
     parse_event,
 )
-
 
 # --- encode_command ---
 
@@ -122,7 +126,7 @@ def _fake_host(path, ready=True):
 
 
 def test_client_connects_and_gets_ready(tmp_path):
-    path = str(tmp_path / "mcu_test.sock")
+    path = ipc_socket_path(tmp_path, "mcu_test.sock")
     srv, t, _ = _fake_host(path)
     events = []
     client = H323dClient(path, on_event=lambda ev: events.append(ev.event))
@@ -140,7 +144,7 @@ def test_client_connects_and_gets_ready(tmp_path):
 
 
 def test_client_sends_command(tmp_path):
-    path = str(tmp_path / "mcu_test2.sock")
+    path = ipc_socket_path(tmp_path, "mcu_test2.sock")
     srv, t, received = _fake_host(path, ready=False)
     client = H323dClient(path)
     try:

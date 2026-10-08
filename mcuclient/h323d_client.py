@@ -18,6 +18,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+from .ipc_path import socket_path_error
 from .log import get_logger
 
 log = get_logger("h323d")
@@ -90,6 +91,12 @@ class H323dClient:
 
     def connect(self, timeout: float = 5.0) -> bool:
         """Подключиться к хосту. False — хост не запущен/недоступен."""
+        # Длиннее sockaddr_un.sun_path путь не работает физически: connect()
+        # тут и не случится, а врать про «хост не запущен» нельзя.
+        reason = socket_path_error(self._path)
+        if reason:
+            log.warning("H.323-хост: %s", reason)
+            return False
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(timeout)

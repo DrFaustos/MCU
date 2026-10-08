@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
+from .ipc_path import socket_path_error
 from .log import get_logger
 
 log = get_logger("h323host")
@@ -212,6 +213,13 @@ class H323HostClient:
         if not hasattr(socket, "AF_UNIX"):
             self._last_error = "AF_UNIX недоступен на этой платформе"
             log.warning("H.323-хост: %s", self._last_error)
+            return False
+        too_long = socket_path_error(self._socket_path)
+        if too_long:
+            # os.path.exists() на таком пути честно ответит «нет файла», и
+            # лог соврёт про «хост не запущен». Причина — длина пути.
+            self._last_error = too_long
+            log.warning("H.323-хост: %s", too_long)
             return False
         if not os.path.exists(self._socket_path):
             self._last_error = f"сокет {self._socket_path} не найден"

@@ -9,9 +9,16 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
+
+# Каталог tests/ — чтобы работал импорт локального помощника _ipc_path
+# (pytest добавляет его сам, tests/_runner.py — нет).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _ipc_path import ipc_socket_path  # noqa: E402
 
 from mcuclient.h323_host import (
     EVENT_MAP,
@@ -141,7 +148,10 @@ def test_full_ipc_roundtrip():
     """Клиент подключается, получает события, шлёт команды — на реальном сокете."""
     received: list = []
     with tempfile.TemporaryDirectory() as d:
-        sock_path = os.path.join(d, "mcu.sock")
+        # Путь unix-сокета ограничен sun_path (108 байт): при длинном TMPDIR
+        # bind() падает ДО всякой проверки логики, поэтому путь берём у
+        # помощника (он же коротит его, если каталог теста длинный).
+        sock_path = ipc_socket_path(d, "mcu.sock")
         t = threading.Thread(target=_fake_host, args=(sock_path, received), daemon=True)
         t.start()
         # ждём появления сокета

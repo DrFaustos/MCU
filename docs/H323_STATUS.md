@@ -75,15 +75,28 @@ SIP и H.323 — два разных порта и два разных стек�
   запущен — пишет подсказку и продолжает SIP-only.
 * `scripts/build_h323d.sh` — сборка хоста (требует PTLib + H323Plus).
 * `scripts/h323d_smoke.py` — дымовой тест IPC без H.323-терминала.
-* `tests/test_h323_host.py`, `tests/test_h323d_client.py` — 37 тестов IPC
-  (разбор событий, команды, статус, деградация без сокета).
+* `tests/test_h323_host.py` (13) + `tests/test_h323d_client.py` (15) — IPC:
+  разбор событий, команды, статус, деградация без сокета;
+* `tests/test_ipc_path.py` (14) — лимит пути unix-сокета (см. ниже).
+
+**Грабля: путь сокета ограничен `sockaddr_un.sun_path` (108 байт, полезными —
+107).** `bind()`/`connect()` с более длинным путём падают `OSError: AF_UNIX path
+too long` до всякого разговора с хостом, а `os.path.exists()` на таком пути
+отвечает «нет файла» — то есть лог соврал бы «хост не запущен, соберите
+`tools/h323d`». Поэтому длина проверяется явно (`mcuclient/ipc_path.py`), а
+тесты берут путь у `tests/_ipc_path.py::ipc_socket_path()` и не падают там, где
+не успели ничего проверить.
 
 ## Тесты
 
-* `tests/test_h323_endpoint.py` — 22 теста (URI, состояния, регистрация,
+* `tests/test_h323_endpoint.py` — 31 тест (URI, состояния, регистрация,
   авто-ответ, отключение, деградация).
-* `tests/test_h323_host.py` + `tests/test_h323d_client.py` — 37 тестов IPC.
+* `tests/test_h323_host.py` (13) + `tests/test_h323d_client.py` (15) — IPC.
+* `tests/test_ipc_path.py` (14) — лимит пути unix-сокета (`sockaddr_un`).
 * Все проходят без нативной библиотеки и без запущенного хоста.
+
+Числа сняты `pytest --collect-only` (боевой `/usr/bin/python3`) и сверены с
+`tests/_runner.py --collect-only`: расхождений нет.
 
 ## Безопасность: закрытый контур, без сертификатов
 
