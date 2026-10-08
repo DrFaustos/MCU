@@ -408,8 +408,12 @@ class SipEngine:
         self.media_state: MediaState = build_state()
         self.room: Optional[Room] = None
         self.peer_filter = config.peer_filter
-        self._endpoint = None
-        self._account = None
+        # Any, а не тип, выведенный из `= None`: mypy связывал тип поля с
+        # NoneType и запрещал все обращения после start() — libCreate,
+        # libDestroy, libRegisterThread, libHandleEvents, account.modify().
+        # Живые объекты (pjsua2.Endpoint/Account либо заглушка) там и появляются.
+        self._endpoint: Any = None
+        self._account: Any = None
         self._registry = CallRegistry(None)
         self._calls = CallManager(self._registry, self.events, _pj)
         self._running = False
@@ -433,10 +437,10 @@ class SipEngine:
         # Аннотация обычная, а не `# type:`-комментарием: линтер не читает
         # комментарии и помечал импорт Callable неиспользуемым.
         self._answer_dispatch: Optional[Callable[[int], None]] = None
-        self._CallClass = None  # подкласс pj.Call
+        self._CallClass: Any = None  # подкласс pj.Call, появляется in _start_account()
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
         # libDestroy(), и pjsua2 упадёт с assertion (pjsua_call_set_user_data).
-        self._live_calls: Dict[int, object] = {}
+        self._live_calls: Dict[int, Any] = {}
         # Реестр ТОЛЬКО собственных media-портов движка (см. docs/STOP_CONTRACT.md).
         # stop() отключает лишь их и не трогает чужие (внешние player/recorder).
         self._media_ports: list = []

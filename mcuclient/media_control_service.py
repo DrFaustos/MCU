@@ -28,7 +28,9 @@ class MediaControlService:
         media_state,
         get_participant: Optional[Callable[[int], Any]] = None,
         apply_media_state: Optional[Callable[[], None]] = None,
-        disable_screen_share: Optional[Callable[[], None]] = None,
+        # Any в позиции результата: движок передаёт лямбду, возвращающую bool
+        # (set_screen_share_enabled), а результат здесь не читается.
+        disable_screen_share: Optional[Callable[[], Any]] = None,
         get_room=None,
         pj_module=None,
         is_available: Optional[Callable[[], bool]] = None,

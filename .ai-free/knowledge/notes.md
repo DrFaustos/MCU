@@ -328,3 +328,28 @@ RED-проверка guard'ов: отключать через `if False`, а н
 смотреть отдельно от пайпа.
 <!-- source: agent -->
 
+## Тип, выведенный из `= None`: 24 «мнимых» ошибки mypy на одном корневом `pj = None`
+
+`mypy` берёт тип атрибута из ПЕРВОГО присваивания. `self._endpoint = None` ->
+тип `NoneType`, и каждый `self._endpoint.libCreate()` после `start()` читался как
+«"None" has no attribute». В `mcuclient/pjsip_adapter.py` `pj = None` давал ~20
+таких предупреждений на весь пакет. Лечится `x: Any = None` (контракт тот же:
+нативный модуль/объект либо None); `Dict[int, object]` -> `Dict[int, Any]`
+(`object` запрещает `call.getInfo()` у внедрённого pjsua2.Call).
+
+Правила:
+* поле, которое start() наполняет нативным объектом, анонсировать ЯВНО:
+  `self._endpoint: Any = None`, а не `= None`; то же для `pj`, `_account`,
+  `_CallClass`, `_live_calls`;
+* порядок разбора: сначала ложные (узнаются по «"None" has no attribute» и
+  «"object" has no»), потом странные — иначе настоящие не видны. `sip_engine.py`
+  был «лидером» (24 предупреждений) и не имел ни одного дефекта;
+* НЕ всякое предупреждение шум: `disable_screen_share: Callable[[], None]` против
+  `lambda: self.set_screen_share_enabled(False) -> bool` — настоящая нестыковка.
+  Результат не читается -> правится аннотация; читается -> вызывающая сторона.
+
+mypy mcuclient: 88 -> 63 -> 39; `sip_engine.py` — 0 впервые. Блокирующий mypy-шаг
+CI (6 строгих модулей, включая pjsip_adapter) обязан оставаться RC=0.
+<!-- source: agent -->
+
+

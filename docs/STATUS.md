@@ -77,6 +77,38 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — 24 предупреждения mypy в `sip_engine.py` имели один корень: `= None` без аннотации
+
+Файл выглядел самым «битым» в пакете (24 предупреждения), но причиной был не
+код, а способ объявления полей. `mypy` выводит тип атрибута из **первого**
+присваивания: `self._endpoint = None` закрепляло тип `NoneType`, и каждое
+обращение после `start()` читалось как «"None" has no attribute "libCreate"».
+
+* `mcuclient/pjsip_adapter.py`: `pj = None` → `pj: Any = None`. Одна строка
+  сняла бо́льшую часть предупреждений во всём пакете: `_pj.libCreate()`,
+  `_pj.Endpoint()`, `_pj.AccountConfig()` — это опциональный нативный модуль,
+  контракт и так зафиксирован в docstring («модуль pjsua2 или None»);
+* `mcuclient/sip_engine.py`: `self._endpoint`, `self._account`, `self._CallClass`
+  → `Any`; `self._live_calls: Dict[int, object]` → `Dict[int, Any]` — у значений
+  спрашивают `.getEncodingVideoMedia()` / `.vidGetStreamIdx()`, а `object` это
+  запрещал;
+* `mcuclient/media_control_service.py`: **реальная нестыковка, а не шум** —
+  `disable_screen_share` аннотировался `Callable[[], None]`, а движок передаёт
+  `lambda: self.set_screen_share_enabled(False)`, возвращающую `bool`.
+  Результат внутри сервиса не читается, значит править нужно аннотацию, а не
+  вызывающую сторону.
+
+Итог по `mypy mcuclient`: **63 → 39** предупреждений, `sip_engine.py` — **ноль**
+впервые. Эти три файла больше не маскируют настоящие дефекты за ложными:
+следующие предупреждения в `web_server` и `ui` разбираются уже по существу.
+
+Проверки боевым `/usr/bin/python3`: `/usr/bin/python3 tests/_runner.py` →
+**1030 passed, 0 failed, 0 skipped, RC=0**; `pytest tests/` (junitxml) →
+**tests=1030 failures=0 errors=0 skipped=0**; блокирующий mypy-шаг CI
+(6 строгих модулей, включая `pjsip_adapter`) → **RC=0**; `ruff check . --select
+F821,F811,F841,E9` → RC=0.
+
+
 ### 2026-10-08 — вызовы `None(...)`: движок звонил до готовности, а причина тонула в `except`
 
 Продолжение разбора `mypy mcuclient`. В `CallService.call()` два обязательных

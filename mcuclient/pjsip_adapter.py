@@ -19,7 +19,11 @@ from .log import get_logger
 
 log = get_logger("pjsip")
 
-pj = None
+# Any, а не вывод из `= None`: mypy связывал тип модуля с NoneType и
+# помечал каждый вызов `_pj.libCreate()` / `_pj.Endpoint()` как
+# «"None" has no attribute» — 20+ предупреждений, описывающих
+# рабочий код как сломанный. Контракт тот же: модуль pjsua2 или None.
+pj: Any = None
 try:  # pragma: no cover
     import pjsua2 as pj  # type: ignore  # noqa: F401
     PJSIP_AVAILABLE = True
