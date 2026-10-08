@@ -31,7 +31,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
+                    Optional, Tuple, Union)
 from urllib.parse import parse_qs, urlparse
 
 from .log import get_logger
@@ -45,6 +46,11 @@ from .webrtc_ingest import (
 from .webrtc_sfu import AudioMixSession, Conference
 from .web_recorder import WebRecorder
 from .sip_web_bridge import SipWebAudioBridge
+
+if TYPE_CHECKING:  # только аннотации: эти модули подключаются лениво
+    from .mediasoup_rtp_bridge import MediasoupRtpBridge
+    from .mediasoup_signaling import MediasoupSignaling
+    from .sip_bridge_service import SipBridgeService
 
 log = get_logger("web")
 
@@ -293,7 +299,10 @@ class WebSession:
         self._dispatcher = EngineDispatcher(engine)
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
-        self._frame_listener = None
+        # Колбэк коммутатора кадров (FrameHub.on_frame). Без аннотации
+        # mypy закреплял тип поля за NoneType и запрещал присваивание
+        # метода в attach_frame_listener().
+        self._frame_listener: Optional[Callable[[Any], None]] = None
         # Конференция веб-участников (вход по имени, как в BBB): создаём ДО
         # WebRTCManager, чтобы передать менеджеру шину медиа для fan-out.
         self.conference = Conference(on_change=self._conference_changed)
@@ -319,11 +328,13 @@ class WebSession:
         self._rec_thread: Optional[threading.Thread] = None
         self._rec_stop = threading.Event()
         # Сигналинг mediasoup (опционально): браузеры как SFU-участники.
-        self._ms_signaling = None
+        # False — «пробовали поднять, недоступно»: ленивый кэш отличается
+        # от None («ещё не пробовали»), и это часть контракта.
+        self._ms_signaling: Optional[Union[Literal[False], "MediasoupSignaling"]] = None
         # RTP-мост SIP/H.323 <-> mediasoup (опционально).
-        self._ms_rtp = None
+        self._ms_rtp: Optional[Union[Literal[False], "MediasoupRtpBridge"]] = None
         # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
-        self._sip_bridge_service = None
+        self._sip_bridge_service: Optional["SipBridgeService"] = None
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -456,22 +467,26 @@ class WebSession:
         pid = self._call(lambda: self._engine.call(uri))
         return {"ok": pid is not None, "participant_id": pid}
 
-    def hangup(self, pid: int) -> Dict[str, Any]:
+    # pid: Any, а не int: id приходит из JSON (число или строка), а
+    # нормализует и проверяет его сам метод через _require_pid (ApiError на
+    # мусор — 400 в HTTP-слое). Аннотация int отрицала этот контракт.
+    def hangup(self, pid: Any) -> Dict[str, Any]:
         pid = self._require_pid(pid)
         self._call(lambda: self._engine.hangup(pid))
         return {"ok": True}
 
-    def accept(self, pid: int) -> Dict[str, Any]:
+    def accept(self, pid: Any) -> Dict[str, Any]:
         pid = self._require_pid(pid)
         self._call(lambda: self._engine.accept(pid))
         return {"ok": True}
 
-    def reject(self, pid: int) -> Dict[str, Any]:
+    def reject(self, pid: Any) -> Dict[str, Any]:
         pid = self._require_pid(pid)
         self._call(lambda: self._engine.reject(pid))
         return {"ok": True}
 
-    def mute(self, pid: int, *, audio: Optional[bool] = None, video: Optional[bool] = None) -> Dict[str, Any]:
+    def mute(self, pid: Any, *, audio: Optional[bool] = None,
+             video: Optional[bool] = None) -> Dict[str, Any]:
         pid = self._require_pid(pid)
         if audio is None and video is None:
             raise ApiError("Укажите audio и/или video")
@@ -482,16 +497,24 @@ class WebSession:
         return {"ok": True}
 
     def mute_all(self, *, audio: bool = True, video: bool = False) -> Dict[str, Any]:
+        # id фиксируется локальной копией. Лямбда с дефолтным параметром
+        # (lambda pid=p.id:) нарушала контракт _call(fn: Callable[[], Any]):
+        # у вызываемого появлялся аргумент. Замена на замыкание по переменной
+        # цикла безопасна только потому, что EngineDispatcher.call БЛОКИРУЕТ
+        # до выполнения fn (done.wait) — следующий виток не наступит раньше.
+        # Если _call станет асинхронным, значение придётся передавать явно.
         if audio and video:
             # Единого метода нет — глушим оба типа по каждому участнику.
             for p in self._call(lambda: _participants(getattr(self._engine, "room", None))):
-                self._call(lambda pid=p.id: self._engine.mute_participant(pid, True))
-                self._call(lambda pid=p.id: self._engine.mute_participant_video(pid, True))
+                pid = p.id
+                self._call(lambda: self._engine.mute_participant(pid, True))
+                self._call(lambda: self._engine.mute_participant_video(pid, True))
         elif audio:
             self._call(lambda: self._engine.mute_all_participants(True))
         elif video:
             for p in self._call(lambda: _participants(getattr(self._engine, "room", None))):
-                self._call(lambda pid=p.id: self._engine.mute_participant_video(pid, True))
+                pid = p.id
+                self._call(lambda: self._engine.mute_participant_video(pid, True))
         return {"ok": True}
 
     # --- адрес МСУ, шифрование, кодеки ------------------------------------
@@ -696,7 +719,9 @@ class WebSession:
             if not targets:
                 raise ApiError("Нет активных участников для отправки", status=409)
             for target in targets:
-                self._call(lambda tid=target: self._engine.send_message(tid, text))
+                # Локальная копия, а не `lambda tid=target:` — см. mute_all.
+                tid = target
+                self._call(lambda: self._engine.send_message(tid, text))
         else:
             pid = self._require_pid(pid)
             self._call(lambda: self._engine.send_message(pid, text))
@@ -1316,14 +1341,23 @@ class _Handler(BaseHTTPRequestHandler):
         s = self.session
         if path == "/api/call":
             return s.call(str(data.get("uri", "")))
+        # id из JSON — Any (допускаются "1", null, []). Проверяем и приводим
+        # ЗДЕСЬ, в HTTP-слое: в методы WebSession обязан приходить int, а не
+        # «разберись сам». Приведение внутри hangup/accept/reject/mute тоже
+        # есть (_require_pid), поэтому ПОВЕДЕНИЕ тут не меняется — обе версии
+        # отвечают 400 на битый id (проверено RED-прогоном: тест зелёный и без
+        # этой правки). Смысл правки — валидация на границе слоёв, а не гадание
+        # в глубине: слой HTTP знает про форму JSON, слой движка — про pid.
         if path == "/api/hangup":
-            return s.hangup(data.get("id"))
+            return s.hangup(_require_int(data.get("id"), "id"))
         if path == "/api/accept":
-            return s.accept(data.get("id"))
+            return s.accept(_require_int(data.get("id"), "id"))
         if path == "/api/reject":
-            return s.reject(data.get("id"))
+            return s.reject(_require_int(data.get("id"), "id"))
         if path == "/api/mute":
-            return s.mute(data.get("id"), audio=_opt_bool(data.get("audio")), video=_opt_bool(data.get("video")))
+            return s.mute(_require_int(data.get("id"), "id"),
+                          audio=_opt_bool(data.get("audio")),
+                          video=_opt_bool(data.get("video")))
         if path == "/api/mute_all":
             return s.mute_all(audio=bool(data.get("audio", True)), video=bool(data.get("video", False)))
         if path == "/api/layout":
@@ -1523,7 +1557,7 @@ class WebServer:
         self._h323 = h323
         # Нативный аудио-мост SIP<->веб: живёт ровно столько, сколько
         # панель (без браузеров мост в вакууме не нужен).
-        self._sip_bridge = None
+        self._sip_bridge: Optional["SipBridgeService"] = None
         # Держим ICE-серверы: restart() пересоздаёт сессию и обязан их
         # сохранить, иначе после включения HTTPS браузер остаётся без TURN.
         self._ice_servers = list(ice_servers or [])
@@ -1598,7 +1632,7 @@ class WebServer:
         # Пробрасываем зависимости в хендлер через атрибуты сервера.
         httpd.session = self.session          # type: ignore[attr-defined]
         # Сессии нужен сервер, чтобы перезапускать себя при смене TLS/порта.
-        self.session._server = self           # type: ignore[attr-defined]
+        self.session._server = self          # _server объявлен в WebSession
         httpd.events = self.events            # type: ignore[attr-defined]
         httpd.auth_token = self.auth_token    # type: ignore[attr-defined]
         self._httpd = httpd

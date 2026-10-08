@@ -34,7 +34,7 @@ try:  # pragma: no cover — opencv нужен только для MJPEG
 
     _HAVE_CV2 = True
 except ImportError:  # pragma: no cover
-    cv2 = None  # type: ignore
+    cv2 = None
     _HAVE_CV2 = False
 
 

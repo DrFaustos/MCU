@@ -360,6 +360,59 @@ def test_participant_id_reaches_engine_as_int():
         srv.stop()
 
 
+def test_api_id_endpoints_reject_bad_id_without_touching_engine():
+    """Контракт id-эндпоинтов: 400 на битый id, движок не дёргается вовсе.
+
+    Это НЕ регрессия на живой баг, а замок на контракт. Проверял честно:
+    с откаченной валидацией в HTTP-слое тест всё равно зелёный, потому что
+    `WebSession.hangup/accept/reject/mute` сами зовут `_require_pid` и тоже
+    отвечают 400. То есть защита сейчас в двух слоях, и ослабление одного из
+    них не должно открывать проход — тест фиксирует именно это.
+
+    Что он ловит на самом деле:
+    * удаление/ослабление валидации в ОБОИХ слоях — тогда `int(None)` уйдёт
+      внутрь лямбды, всплывёт TypeError из потока pjsua2 и клиент получит 500
+      с текстом внутренней ошибки (тот же класс дефекта, что уже чинили на
+      /api/video_device);
+    * потерю приведения типа — `{"id": "1"}` дошёл бы до движка строкой,
+      `Room.participants.get("1")` ничего бы не нашёл, а панель ответила бы
+      `{"ok": true}`, ничего не сделав.
+    """
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        seen: list = []
+        eng = srv.session._engine  # noqa: SLF001 — наблюдаем, что ушло в движок
+        eng.hangup = lambda pid: seen.append(("hangup", pid))
+        eng.accept = lambda pid: seen.append(("accept", pid))
+        eng.reject = lambda pid: seen.append(("reject", pid))
+        eng.mute_participant = lambda pid, muted: seen.append(("mute", pid)) or True
+
+        bad = ({}, {"id": None}, {"id": "abc"}, {"id": []})
+        for path in ("/api/hangup", "/api/accept", "/api/reject", "/api/mute"):
+            for payload in bad:
+                try:
+                    _post(base + path, payload)
+                except urllib.error.HTTPError as exc:
+                    body = json.loads(exc.read().decode())
+                    assert exc.code == 400, f"{path} {payload}: {exc.code} {body}"
+                    assert "Внутренняя ошибка" not in body["error"], (
+                        f"{path} {payload}: 500-текст протёк в 400: {body}")
+                else:
+                    raise AssertionError(f"ожидали 400 на {path} {payload}")
+            assert seen == [], f"{path}: движок дёрнут на битом id: {seen}"
+
+        # Валидный id работает как раньше — числом и строкой, и в движок
+        # уходит именно int (словарь участников ключуется целыми).
+        status, _ = _post(base + "/api/hangup", {"id": 7})
+        assert status == 200
+        status, _ = _post(base + "/api/hangup", {"id": "8"})
+        assert status == 200
+        assert [pid for _, pid in seen] == [7, 8], seen
+    finally:
+        srv.stop()
+
+
 def test_http_auth_required():
     srv = _server(token="secret")
     try:

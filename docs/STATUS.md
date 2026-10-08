@@ -77,6 +77,61 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — `mypy mcuclient` вычищен до нуля: под предупреждениями сидели три живых дефекта
+
+Продолжение разбора типов. `mypy mcuclient --ignore-missing-imports`: **39 → 0**
+(62 файла). Строгий CI-набор (6 модулей) и блокирующий ruff
+(`F821,F811,F841,E9`) — RC=0. Шаг `mypy` по всему пакету в CI переведён из
+`|| true` в **блокирующий** (версия mypy зафиксирована): ноль без замка — это
+ноль до первого коммита, а `|| true` на линтере означает «проверки нет».
+
+Что под предупреждениями оказалось настоящими багами:
+
+* `media_devices.read_mic_level()`: `cap.getRxLevel()` вызывался без проверки
+  `cap` на `None` (в сборке pjsua2 может не быть ни `captureDevMedia`, ни
+  `getCaptureDevMedia`). `AttributeError` глушил широкий `except`, и индикатор
+  уровня микрофона молча врал `0.0` — «эквалайзер не шевелится» без единой записи
+  в логе;
+* `mcuclient/ui.py`, ветка `call.video` («видео пропало»):
+  `engine.detach_embedded_video(pid)` вызывался и при `pid=None` — в движок
+  уходил `None` (`KeyError` в `detach_call_window`) вместо штатного отцепления
+  тайла, то есть «замороженный последний кадр» как раз и оставался;
+* `mcuclient/web_server.py`: `self._call(lambda pid=p.id: ...)` нарушало
+  контракт `_call(fn: Callable[[], Any])` — у «лямбды без аргументов» появлялся
+  аргумент. mypy вместо этого выдавал бесполезное `Cannot infer type of lambda`,
+  и дефект был невидим. Значение фиксируют локальной копией ДО создания лямбды
+  (`mute_all`, `send_chat`).
+
+Косметика, которая косметикой не является:
+
+* 9 полей, объявленных просто `= None` (`WebSession._frame_listener`,
+  `_ms_signaling`, `_ms_rtp`, `_sip_bridge_service`, `WebServer._sip_bridge`,
+  в `ui` — `_engine`, `_web_server`, `on_child_resize`, `_grid_signature`):
+  mypy берёт тип из **первого** присваивания и называл ошибкой каждое
+  последующее. Для ленивого кэша «не пробовали / пробовали и недоступно» взят
+  явный `Optional[Union[Literal[False], "MediasoupSignaling"]]` — `False` там
+  часть контракта, а не мусор;
+* 8 `unused-ignore` в `try/except ImportError` (cv2, aiortc, sounddevice,
+  PySide6): при глобальном `ignore_missing_imports = True` заглушки не нужны, а
+  `warn_unused_ignores = True` их запрещает. Побочный эффект — Pyright в IDE
+  теперь ругается `reportMissingImports`; это шум IDE, не mypy;
+* `h323_endpoint.on_event`: локальная `p` получала тип `Participant` из ветки
+  `call.incoming`, а в трёх следующих ветках в неё попадал `dict.get()`
+  (`Participant | None`). Переименование во `known` честнее, чем `Any`: проверка
+  `None` остаётся на месте.
+
+Чего багом **не** оказалось — проверено откачкой правок (RED-прогон), чтобы не
+врать в комментариях: `/api/hangup|accept|reject|mute` с сырым `data.get("id")`.
+Приведение уже было внутри `WebSession` (`pid = self._require_pid(pid)` —
+присваивание на месте), и старый, и новый код отвечают 400. Правка в HTTP-слое
+оставлена как валидация на границе слоёв, а новый
+`tests/test_web_http.py::test_api_id_endpoints_reject_bad_id_without_touching_engine`
+описан как «замок на контракт», а не как «регрессия».
+
+Проверки боевым `/usr/bin/python3`: `tests/_runner.py` → **1031 passed, 0 failed,
+0 skipped, RC=0**; `pytest tests/` → **RC=0**; `mypy mcuclient` → **0 ошибок**;
+строгий mypy-набор CI → RC=0; `ruff check . --select F821,F811,F841,E9` → RC=0.
+
 ### 2026-10-08 — 24 предупреждения mypy в `sip_engine.py` имели один корень: `= None` без аннотации
 
 Файл выглядел самым «битым» в пакете (24 предупреждения), но причиной был не

@@ -23,6 +23,7 @@ import threading
 import signal
 import sys
 import traceback
+from typing import Any
 
 # === ВАЖНО ===
 # Выбор QT_QPA_PLATFORM (Wayland -> XWayland/xcb) делает run.py ДО создания
@@ -51,7 +52,7 @@ try:  # pragma: no cover
     QT_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001
     QT_AVAILABLE = False
-    QtCore = QtGui = QtWidgets = None  # type: ignore
+    QtCore = QtGui = QtWidgets = None
     log.warning("PySide6 недоступен (%s); GUI отключён", _exc)
 
 
@@ -70,8 +71,10 @@ if QT_AVAILABLE:
             self._aspect = aspect if aspect > 0 else 16.0 / 9.0
             self._child = None
             # Колбэк (w, h) при изменении размера ребёнка — чтобы движок
-            # подгонял нативное окно PJSIP под тайл.
-            self.on_child_resize = None
+            # подгонял нативное окно PJSIP под тайл. Анонсирован явно: без
+            # аннотации mypy закреплял за полем тип NoneType и отклонял
+            # присваивание метода в _build_ui.
+            self.on_child_resize: Any = None
 
         def set_child(self, child) -> None:
             self._child = child
@@ -120,7 +123,8 @@ if QT_AVAILABLE:
             super().__init__(parent)
             self.participant_id: int | None = None
             self._native_attached = False
-            self._engine = None
+            # Движок подставляется уже при встраивании видео (attach_video_window).
+            self._engine: Any = None
             self._is_local = False
             self._build_ui()
 
@@ -442,7 +446,7 @@ if QT_AVAILABLE:
                 painter.fillRect(x, h - 4 - bh, bw, bh, color)
             painter.end()
 
-    class MainWindow(QtWidgets.QMainWindow):  # type: ignore[misc]
+    class MainWindow(QtWidgets.QMainWindow):
         QUALITY_PRESETS = {
             "360p": (640, 360, 30),
             "720p": (1280, 720, 30),
@@ -458,7 +462,10 @@ if QT_AVAILABLE:
             self.h323_native = h323_native
             self._initial_protocol = call_proto.normalize_protocol(initial_protocol)
             # Встроенная web-панель: создаём лениво, запускаем по галочке.
-            self._web_server = None
+            # Тип — Any: WebServer поднимается ленивым импортом внутри
+            # _start_web_server, и без аннотации mypy считал поле NoneType
+            # («None has no attribute start/url/tls»).
+            self._web_server: Any = None
             self._tiles: dict[int, ParticipantTile] = {}
             # Пул тайлов: переиспользуем виджеты вместо удаления (deleteLater во
             # время обработки событий вызова приводил к access violation на Windows).
@@ -467,7 +474,7 @@ if QT_AVAILABLE:
             # Нужна, чтобы не перестраивать раскладку (takeAt/addWidget), когда
             # состав не изменился: на Windows повторный addWidget уже вставленного
             # виджета вызывает access violation.
-            self._grid_signature = None
+            self._grid_signature: Any = None
             # Флаг: перестройка грида уже запланирована (дебаунс). Не даём
             # событиям вызова запланировать её многократно за одну итерацию —
             # повторные takeAt/addWidget на Windows роняют Qt.
@@ -1103,7 +1110,9 @@ if QT_AVAILABLE:
                 self._tiles.clear()
 
                 # Первым — локальный тайл «Вы» (всегда), затем участники.
-                cells = [self._LOCAL_SENTINEL]
+                # Any: ячейка — это либо локальный страж (_LOCAL_SENTINEL,
+                # object()), либо участник, либо None для пустой клетки.
+                cells: list[Any] = [self._LOCAL_SENTINEL]
                 for p in visible:
                     cells.append(p)
                 while len(cells) > rows * cols:
@@ -1663,13 +1672,17 @@ if QT_AVAILABLE:
                     else:
                         # Видео пропало (камера выключена/мут) — отцепляем тайл,
                         # иначе остаётся «замороженный» последний кадр.
-                        tile = self._tiles.get(pid) if pid is not None else None
-                        if tile is not None:
-                            tile.detach_native_video()
-                        try:
-                            self.engine.detach_embedded_video(pid)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        # pid обязателен: detach_embedded_video(None) ушёл бы в
+                        # _vpreview.detach_call_window(None) — KeyError вместо
+                        # штатного отцепления тайла.
+                        if pid is not None:
+                            tile = self._tiles.get(pid)
+                            if tile is not None:
+                                tile.detach_native_video()
+                            try:
+                                self.engine.detach_embedded_video(pid)
+                            except Exception:  # noqa: BLE001
+                                pass
                         self._refresh_participants_list()
                 elif event == "call.rejected":
                     self.statusBar().showMessage(f"Отклонён: {payload.get('reason')}", 5000)
@@ -1878,7 +1891,7 @@ if QT_AVAILABLE:
         def _refresh_address_label(self) -> None:
             """Показать, как нас реально набирают (IP это или домен)."""
             getter = getattr(self.engine, "current_address", None)
-            data = {}
+            data: dict = {}
             if callable(getter):
                 try:
                     data = getter() or {}

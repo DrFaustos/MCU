@@ -241,29 +241,34 @@ class H323Endpoint:
                 return  # дубликат
             info = call_info_from_event(data)
             self.register_outgoing(info)
+        # Здесь переменная называется known, а не p: выше, в ветке
+        # call.incoming, p уже получает Participant из register_incoming(), и
+        # mypy фиксирует тип локальной переменной по ПЕРВОМУ присваиванию.
+        # Присваивание self._calls.get(token) (Participant | None) читалось как
+        # ошибка типа в трёх ветках сразу, хотя каждая проверяет None на месте.
         elif name == "call.connected":
             token = str(data.get("token", "") or "")
-            p = self._calls.get(token)
-            if p is not None:
-                p.state = CallState.CONFIRMED
+            known = self._calls.get(token)
+            if known is not None:
+                known.state = CallState.CONFIRMED
                 self._events.emit(
-                    "call.state", id=p.id, state="Connected", proto="h323"
+                    "call.state", id=known.id, state="Connected", proto="h323"
                 )
         elif name == "call.disconnected":
             token = str(data.get("token", "") or "")
-            p = self._calls.get(token)
-            if p is not None:
-                self.disconnect(p)
+            known = self._calls.get(token)
+            if known is not None:
+                self.disconnect(known)
         elif name == "call.media":
             token = str(data.get("token", "") or "")
-            p = self._calls.get(token)
-            if p is not None:
+            known = self._calls.get(token)
+            if known is not None:
                 kind = str(data.get("kind", "") or "").lower()
                 codec = str(data.get("codec", "") or "")
                 if kind == "audio":
-                    p.audio_codec = codec
+                    known.audio_codec = codec
                 elif kind == "video":
-                    p.video_codec = codec
+                    known.video_codec = codec
         elif name == "ready":
             try:
                 self._port = int(data.get("port", self._port))

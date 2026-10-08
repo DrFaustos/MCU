@@ -15,7 +15,7 @@ try:  # pragma: no cover
     QT_AVAILABLE = True
 except Exception:  # noqa: BLE001
     QT_AVAILABLE = False
-    QtCore = QtGui = QtSvg = QtWidgets = None  # type: ignore
+    QtCore = QtGui = QtSvg = QtWidgets = None
 
 
 # --- SVG-примитивы (viewBox 0 0 24 24, stroke-based) -------------------------

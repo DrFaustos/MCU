@@ -36,11 +36,11 @@ from .log import get_logger
 log = get_logger("webrtc")
 
 try:  # pragma: no cover — зависит от окружения
-    import aiortc  # type: ignore
+    import aiortc
 
     WEBRTC_AVAILABLE = True
 except Exception:  # noqa: BLE001 — aiortc опционален
-    aiortc = None  # type: ignore
+    aiortc = None
     WEBRTC_AVAILABLE = False
 
 

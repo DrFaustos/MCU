@@ -263,8 +263,8 @@ except обязаны подтверждать ФАКТ — подписыват
 `# type:`-комментарий линтер не видит → импорт «неиспользуемый» (F401) и
 name-defined у mypy; аннотации писать обычным синтаксисом.
 
-mypy по mcuclient: 39 ошибок (было 92) — там реальные дефекты, а не только
-шум; в CI шаг не блокирует, запускать руками при правках sip_engine/web_server/ui.
+mypy по mcuclient: 92 -> 39 -> 0 (см. «Пакет mcuclient вычищен до нуля» ниже) —
+там были реальные дефекты, а не только шум; в CI шаг до сих пор не блокирует.
 <!-- source: agent -->
 
 ## Валидатор ВОЗВРАЩАЕТ значение, а вызывающий его выбрасывал (исправлено)
@@ -350,6 +350,51 @@ RED-проверка guard'ов: отключать через `if False`, а н
 
 mypy mcuclient: 88 -> 63 -> 39; `sip_engine.py` — 0 впервые. Блокирующий mypy-шаг
 CI (6 строгих модулей, включая pjsip_adapter) обязан оставаться RC=0.
+<!-- source: agent -->
+
+## Пакет mcuclient вычищен до нуля mypy-ошибок (2026-10-08)
+
+`mypy mcuclient --ignore-missing-imports`: 39 -> 0, RC=0 (62 файла). Строгий
+блокирующий набор CI (models, call_registry, call_manager, pjsip_adapter, config,
+qt_platform) — RC=0; блокирующий ruff (F821,F811,F841,E9) — RC=0. За нулём — не
+косметика:
+
+* 8 `unused-ignore` в `try/except ImportError` (cv2, aiortc, sounddevice, PySide6):
+  `warn_unused_ignores = True` в mypy.ini требует убрать `# type: ignore`, когда
+  глушить уже нечего (глобальный `ignore_missing_imports = True` делает импорт
+  «известным»). Побочный эффект: Pyright в IDE теперь ругается `reportMissingImports` —
+  это шум IDE, а не mypy, править не надо.
+* `media_devices.read_mic_level()`: `cap.getRxLevel()` вызывался не проверяя, что
+  `cap` не None (нет ни `captureDevMedia`, ни `getCaptureDevMedia`) —
+  AttributeError глушил широкий except, индикатор уровня микрофона молча врал 0.0.
+* `ui.py`, ветка `call.video` (видео пропало): `engine.detach_embedded_video(pid)`
+  вызывался и при `pid=None` — в движок уходил None вместо штатного отцепления тайла.
+* `web_server`: `self._call(lambda pid=p.id: ...)` нарушало контракт
+  `_call(fn: Callable[[], Any])` — у «лямбды без аргументов» появлялся аргумент.
+  Значение фиксируют локальной копией ДО создания лямбды, не параметром по умолчанию.
+* 9 полей, объявленных `= None` (`WebSession._frame_listener/_ms_signaling/_ms_rtp/
+  _sip_bridge_service`, `WebServer._sip_bridge`, в ui — `_engine`, `_web_server`,
+  `on_child_resize`, `_grid_signature`): mypy закреплял тип по первому присваиванию.
+  Для ленивого кэша «не пробовали / пробовали и недоступно» взят явный
+  `Optional[Union[Literal[False], "MediasoupSignaling"]]` — `False` там часть
+  контракта, а не мусорный тип.
+* `h323_endpoint.on_event`: локальная `p` получала тип `Participant` из ветки
+  `call.incoming`, а в трёх следующих ветках в неё попадал `dict.get()`
+  (`Participant | None`). Переименование во `known` честнее, чем `Any`: проверка
+  None остаётся на месте.
+
+Чего НЕ оказалось багом — проверено откачкой правок (RED-прогон), чтобы не врать
+в комментариях и документах: `/api/hangup|accept|reject|mute` с `data.get("id")`
+как есть. Валидация уже была ВНУТРИ WebSession (`pid = self._require_pid(pid)` —
+присваивание на месте), поэтому и старый, и новый код отвечают 400. Правка в
+HTTP-слое оставлена как валидация на границе слоёв, а
+`tests/test_web_http.py::test_api_id_endpoints_reject_bad_id_without_touching_engine`
+описан как «замок на контракт», а не «регрессия»: ловит только одновременное
+ослабление обоих слоёв.
+
+Правило: прежде чем написать в комменте или доке «раньше было 500 вместо 400» —
+откачивай правку и гони тест. Зелёный без правки значит, что дефекта не было, и
+такой коммент станет следующей ложью, которую кто-то примет за факт.
 <!-- source: agent -->
 
 

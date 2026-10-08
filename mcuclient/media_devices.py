@@ -278,7 +278,7 @@ def _list_windows_devices() -> Tuple[List[DeviceInfo], List[DeviceInfo]]:
     cameras: List[DeviceInfo] = []
     mics: List[DeviceInfo] = []
     try:
-        import sounddevice as sd  # type: ignore
+        import sounddevice as sd
 
         for i, dev in enumerate(sd.query_devices()):
             if int(dev.get("max_input_channels", 0)) > 0:
@@ -548,6 +548,11 @@ class MediaManager:
             if media is None:
                 media = getattr(mgr, "getCaptureDevMedia", None)
             cap = media() if callable(media) else media
+            # Ни captureDevMedia, ни getCaptureDevMedia может не быть (другая
+            # сборка pjsua2): cap остаётся None, и .getRxLevel() падал бы
+            # AttributeError'ом, который глушил широкий except ниже.
+            if cap is None:
+                return 0.0
             return max(0.0, float(cap.getRxLevel()))
         except Exception:  # noqa: BLE001
             return 0.0

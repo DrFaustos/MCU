@@ -380,9 +380,10 @@ Qt-ветка не определяется — pytest до кода не дох
   (`test_codec_audit_reaches_mismatch_report`).
 
 Где искать молча мёртвый код: `mypy mcuclient` выдаёт по нему конкретные коды —
-`"list[str]" not callable`, `"None" not callable`, `name-defined`. В CI `mypy` по
-всему пакету не блокирует, поэтому запускать его стоит руками при правках
-`sip_engine`/`web_server`/`ui`.
+`"list[str]" not callable`, `"None" not callable`, `name-defined`. С 2026-10-08
+`mypy mcuclient` в CI **блокирует** (в пакете 0 ошибок), так что такой дефект
+больше не доезжает до main; локально всё равно запускать руками при правках
+`sip_engine`/`web_server`/`ui` — это секунды, а CI — минуты.
 
 Проверка `# type:`-комментариев: линтер их не читает, поэтому импорт, нужный
 только комментарию, помечается F401, а mypy — `name-defined`. Аннотации пишем

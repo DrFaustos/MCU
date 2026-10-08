@@ -57,17 +57,25 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install mypy
+        # Версия зафиксирована: шаг ниже стал блокирующим, а вывод mypy
+        # меняется от релиза к релизу (новые проверки — новые ошибки в коде,
+        # который мы не трогали). Обновлять осознанно, вместе с правками.
         run: |
           python -m pip install --upgrade pip
-          pip install mypy
+          pip install "mypy==2.4.*"
       - name: Mypy — строгие модули (блокирует)
         # Эти модули уже полностью типизированы; регресс недопустим.
         run: |
           mypy mcuclient/models.py mcuclient/call_registry.py \
                mcuclient/call_manager.py mcuclient/pjsip_adapter.py \
                mcuclient/config.py mcuclient/qt_platform.py
-      - name: Mypy — остальной пакет (не блокирует, пока идёт типизация)
-        run: mypy mcuclient --ignore-missing-imports || true
+      - name: Mypy — весь пакет (БЛОКИРУЕТ)
+        # Типизация пакета закончена 2026-10-08: mypy mcuclient даёт 0 ошибок
+        # (было 92). Шаг с `|| true` проверку не делал — именно так в своё время
+        # пережили и потерянный заголовок closeEvent, и config.audio_codecs(),
+        # вызванный как метод у property: линтер видел дефект, `|| true` его глотал.
+        # Регресс теперь недопустим: новая ошибка типов не должна попадать в main.
+        run: mypy mcuclient --ignore-missing-imports
 
   # Быстрая проверка, что dev-скрипты синтаксически валидны и контейнерные
   # определения на месте — без реальной сборки образов (она долгая и локальная).
