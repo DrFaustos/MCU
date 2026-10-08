@@ -189,7 +189,7 @@ class WebRTCManager:
 
     def __init__(self, sink: Any = None,
                  aiortc_module: Optional[Any] = None,
-                 ice_servers: Optional[List[str]] = None,
+                 ice_servers: Optional[List[Any]] = None,
                  offer_timeout: float = 15.0,
                  bus: Any = None,
                  audio_mix: Any = None) -> None:

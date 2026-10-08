@@ -73,6 +73,17 @@ class _FakeConfig:
     available_layouts = ["speaker"]
     features = {}
 
+    def set_web_port(self, port: int) -> int:
+        """Как настоящий Config: зажать в диапазон, вернуть применённый порт.
+
+        Без метода /api/web_port ловил AttributeError и отдавал 500 — тест врал
+        про продукт, которого нет: в Config.set_web_port валидация есть
+        (mcuclient/config.py:1188). Фейк обязан повторять ФОРМУ и СЕМАНТИКУ API,
+        иначе «зелёные» тесты не видят реальных проблем, а красные — выдумывают.
+        """
+        self.web_port = max(1, min(65535, int(port)))
+        return self.web_port
+
 
 def _server(token=None):
     srv = WebServer(_FakeEngine(), _FakeConfig(), host="127.0.0.1", port=0, auth_token=token)
@@ -180,6 +191,171 @@ def test_api_dtmf_requires_digits():
             assert exc.code == 400
         else:
             raise AssertionError("ожидали 400 на пустые тоны")
+    finally:
+        srv.stop()
+
+
+def test_api_device_endpoints_reject_bad_id():
+    """Регрессия: /api/video_device и /api/audio_device отдавали 500.
+
+    `device` приходил из JSON как Any и попадал в `int(device)` ВНУТРИ лямбды,
+    которая уходит в EngineDispatcher (поток pjsua2). При отсутствии или мусоре
+    наружу летел TypeError, веб-слой превращал его в
+    «500 Внутренняя ошибка: int() argument must be ... not 'NoneType'» — то есть
+    панель показывала клиенту текст внутренней ошибки вместо внятного 400.
+    Соседние эндпоинты (/api/hangup) отвечали 400 корректно: там стоит
+    _require_pid. Правка — _require_int до обращения к движку.
+    """
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        cases = (
+            ("/api/video_device", {}),
+            ("/api/video_device", {"device": None}),
+            ("/api/video_device", {"device": "abc"}),
+            ("/api/audio_device", {}),
+            ("/api/audio_device", {"device": None}),
+            ("/api/audio_device", {"device": []}),
+        )
+        for path, payload in cases:
+            try:
+                _post(base + path, payload)
+            except urllib.error.HTTPError as exc:
+                body = json.loads(exc.read().decode())
+                assert exc.code == 400, f"{path} {payload}: {exc.code} {body}"
+                assert "Внутренняя ошибка" not in body["error"], (
+                    f"{path} {payload}: 500-текст протёк в 400: {body}")
+            else:
+                raise AssertionError(f"ожидали 400 на {path} {payload}")
+        # Валидный номер обязан работать как раньше.
+        status, body = _post(base + "/api/video_device", {"device": 2})
+        assert status == 200 and body["device"] == 2, body
+        status, body = _post(base + "/api/audio_device", {"device": "3"})
+        assert status == 200 and body["device"] == 3, body
+    finally:
+        srv.stop()
+
+
+def test_api_post_never_leaks_internal_error_text():
+    """Страж класса ошибки: ни один POST не отвечает 500 на пустое тело.
+
+    Найдено массовым прогоном по всем POST-эндпоинтам панели: 500 давали
+    /api/video_device и /api/audio_device (int(None) внутри потока pjsua2).
+
+    Граница проверки сознательная: 501/503 («движок не поддерживает смену
+    адреса», «mediasoup не включён», «aiortc не установлен») — ЧЕСТНЫЙ отказ
+    недоступной функции, он обязан оставаться. Запрещён именно 500 и любой
+    5xx, в тексте которого мелькнул «Внутренняя ошибка»: это значит, что
+    неподготовленный JSON уронил код приложения, а не было валидировано.
+    """
+    import re as _re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "mcuclient" / "web_server.py"
+    routes = []
+    for route in _re.findall(r'path == "(/api/[^"]+)"', src.read_text(encoding="utf-8")):
+        if route not in routes:
+            routes.append(route)
+    assert len(routes) >= 30, f"маршрутов найдено меньше, чем в панели: {len(routes)}"
+
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        broken: list = []
+        for route in routes:
+            try:
+                _post(base + route, {})
+            except urllib.error.HTTPError as exc:
+                raw = exc.read().decode()
+                # 501/503 — честный отказ недоступной функции (нет aiortc,
+                # mediasoup выключен, движок не меняет адрес на лету): он
+                # обязан оставаться. Запрещён 500 и любой 5xx, где мелькнул
+                # текст внутренней ошибки — значит неподготовленный JSON
+                # уронил код приложения, а не была проверена валидация.
+                if exc.code == 500 or "Внутренняя ошибка" in raw:
+                    broken.append(f"{route}: {exc.code} {raw[:120]}")
+            except Exception as exc:  # соединение оборвалось — тоже сигнал
+                broken.append(f"{route}: EXC {exc!r}")
+        assert not broken, "POST с пустым телом даёт 500:\n" + "\n".join(broken)
+    finally:
+        srv.stop()
+
+
+def test_api_web_port_requires_port():
+    """Регрессия: POST /api/web_port без `port` переезжал на порт 1.
+
+    Было `s.set_web_port(_opt_int(data.get("port")) or 0)`: отсутствие
+    параметра превращалось в 0, `Config.set_web_port` зажимает его до
+    PORT_MIN=1 (`mcuclient/config.py:1189`), и панель реально перевешивалась
+    на привилегированный порт: «Не удалось занять 127.0.0.1:1: [Errno 13]
+    Permission denied». То есть один запрос без тела ронял панель управления.
+    Теперь отсутствие параметра — 400, сервер остаётся на своём порту.
+    """
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        original = srv.port
+        try:
+            _post(base + "/api/web_port", {})
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400, exc.code
+        else:
+            raise AssertionError("ожидали 400 на /api/web_port без port")
+        # Панель обязана остаться живой на прежнем порту.
+        status, data = _get(base + "/api/status")
+        assert status == 200 and srv.port == original, (status, srv.port)
+        # Мусор в port — тоже 400, а не попытка перевесить сервер.
+        try:
+            _post(base + "/api/web_port", {"port": "abc"})
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400, exc.code
+        else:
+            raise AssertionError("ожидали 400 на нечисловой port")
+    finally:
+        srv.stop()
+
+
+def test_participant_id_reaches_engine_as_int():
+    """Регрессия: валидация id была, а её результат выбрасывался.
+
+    `_require_pid()` возвращает приведённое целое, но ни в одном из шести мест
+    (`hangup`/`accept`/`reject`/`mute`/`send_chat`/`send_dtmf`) результат не
+    присваивался — в движок уходило исходное значение из JSON. Для числа это
+    незаметно, а для `{"id": "1"}` (JSON допускает, внешний клиент шлёт именно
+    так) `Room.participants.get("1")` ничего не находит: `hangup` молча не
+    сбрасывает вызов и панель отвечает `{"ok": true}`. Ложный успех хуже падения.
+    """
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        seen: list = []
+        eng = srv.session._engine  # noqa: SLF001 — наблюдаем, что реально ушло
+        eng.accept = lambda pid: seen.append(("accept", pid))
+        eng.reject = lambda pid: seen.append(("reject", pid))
+        eng.hangup = lambda pid: seen.append(("hangup", pid))
+        eng.mute_participant = lambda pid, muted: seen.append(("mute", pid)) or True
+        eng.send_message = lambda pid, text: seen.append(("chat", pid)) or True
+        eng.send_dtmf = lambda digits, pid=None, method="auto": (
+            seen.append(("dtmf", pid)) or True)
+
+        status, _ = _post(base + "/api/accept", {"id": "1"})
+        assert status == 200
+        status, _ = _post(base + "/api/reject", {"id": "2"})
+        assert status == 200
+        status, _ = _post(base + "/api/mute", {"id": "3", "audio": True})
+        assert status == 200
+        status, _ = _post(base + "/api/chat", {"id": "4", "text": "привет"})
+        assert status == 200
+        status, _ = _post(base + "/api/dtmf", {"id": "5", "digits": "1"})
+        assert status == 200
+
+        assert [kind for kind, _ in seen] == ["accept", "reject", "mute",
+                                              "chat", "dtmf"], seen
+        for kind, pid in seen:
+            assert isinstance(pid, int) and not isinstance(pid, bool), (
+                f"{kind}: в движок ушло {pid!r} ({type(pid).__name__}), "
+                "ожидался int — словарь участников ключуется целыми")
+        assert [pid for _, pid in seen] == [1, 2, 3, 4, 5], seen
     finally:
         srv.stop()
 

@@ -457,22 +457,22 @@ class WebSession:
         return {"ok": pid is not None, "participant_id": pid}
 
     def hangup(self, pid: int) -> Dict[str, Any]:
-        self._require_pid(pid)
+        pid = self._require_pid(pid)
         self._call(lambda: self._engine.hangup(pid))
         return {"ok": True}
 
     def accept(self, pid: int) -> Dict[str, Any]:
-        self._require_pid(pid)
+        pid = self._require_pid(pid)
         self._call(lambda: self._engine.accept(pid))
         return {"ok": True}
 
     def reject(self, pid: int) -> Dict[str, Any]:
-        self._require_pid(pid)
+        pid = self._require_pid(pid)
         self._call(lambda: self._engine.reject(pid))
         return {"ok": True}
 
     def mute(self, pid: int, *, audio: Optional[bool] = None, video: Optional[bool] = None) -> Dict[str, Any]:
-        self._require_pid(pid)
+        pid = self._require_pid(pid)
         if audio is None and video is None:
             raise ApiError("Укажите audio и/или video")
         if audio is not None:
@@ -698,7 +698,7 @@ class WebSession:
             for target in targets:
                 self._call(lambda tid=target: self._engine.send_message(tid, text))
         else:
-            self._require_pid(pid)
+            pid = self._require_pid(pid)
             self._call(lambda: self._engine.send_message(pid, text))
         return {"ok": True}
 
@@ -712,7 +712,7 @@ class WebSession:
         if not digits or not str(digits).strip():
             raise ApiError("Нет DTMF-тонов")
         if pid is not None:
-            self._require_pid(pid)
+            pid = self._require_pid(pid)
         ok = self._call(lambda: bool(self._engine.send_dtmf(str(digits), pid, method)))
         if not ok:
             raise ApiError("Не удалось отправить тоны: нет активного вызова", status=409)
@@ -736,13 +736,18 @@ class WebSession:
         self._call(lambda: self._engine.set_video_source(kind, device))
         return {"ok": True, "video_source": kind}
 
-    def set_video_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_video_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+    def set_video_device(self, device: Any) -> Dict[str, Any]:
+        # device приходит из JSON (Any). Проверка ОБЯЗАТЕЛЬНА до dispatch:
+        # int(None) внутри лямбды давал 500 вместо 400 (регрессия —
+        # tests/test_web_http.py::test_api_device_endpoints_reject_bad_id).
+        dev = _require_int(device, "device")
+        ok = self._call(lambda: bool(self._engine.set_video_device(dev)))
+        return {"ok": ok, "device": dev}
 
-    def set_audio_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_audio_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+    def set_audio_device(self, device: Any) -> Dict[str, Any]:
+        dev = _require_int(device, "device")
+        ok = self._call(lambda: bool(self._engine.set_audio_device(dev)))
+        return {"ok": ok, "device": dev}
 
     # -- Конференция веб-участников ---------------------------------------
     def conference_join(self, name: str, role: str = "participant") -> Dict[str, Any]:
@@ -1336,7 +1341,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/web_tls":
             return s.set_web_tls(data.get("mode", "off"))
         if path == "/api/web_port":
-            return s.set_web_port(_opt_int(data.get("port")) or 0)
+            # Было `_opt_int(data.get("port")) or 0`: при отсутствии параметра
+            # получался 0, Config.set_web_port зажимал его до PORT_MIN=1, и
+            # панель ДЕИСТВИТЕЛЬНО перевешивалась на привилегированный порт 1
+            # («Не удалось занять 127.0.0.1:1: Permission denied»). Отсутствие
+            # параметра — ошибка клиента (400), а не команда на перезапуск.
+            return s.set_web_port(_require_int(data.get("port"), "port"))
         if path == "/api/recording":
             return s.toggle_recording(_opt_bool(data.get("enabled")))
         if path == "/api/chat":
@@ -1480,6 +1490,23 @@ def _opt_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ApiError(f"Ожидалось целое число, получено {value!r}") from exc
+
+
+def _require_int(value: Any, name: str) -> int:
+    """Обязательное целое из JSON: 400 на отсутствие или мусор.
+
+    Нужно именно здесь, а не в теле команды: `int(None)`/`int("abc")` внутри
+    лямбды, ушедшей в `EngineDispatcher`, превращается в `TypeError` из потока
+    pjsua2 и наружу уходит 500 с текстом внутренней ошибки («int() argument
+    must be ... not 'NoneType'»). Клиент же видит 400 с внятным текстом, если
+    число проверено ДО обращения к движку.
+    """
+    if value is None or value == "":
+        raise ApiError(f"Не задан параметр {name}")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(f"Ожидалось целое число в {name}, получено {value!r}") from exc
 
 
 class WebServer:
