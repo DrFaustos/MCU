@@ -431,6 +431,12 @@ class SipEngine:
             get_video_xid=self._registry.get_video_xid,
         )
         self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
+        # Нативный H.323-эндпоинт (mcuclient/h323_endpoint.py), если поднят.
+        # Нужен, потому что H.323-участники сидят в ТОЙ ЖЕ комнате, что и SIP,
+        # но pjsua2-объекта у них нет: без маршрутизации accept/reject/hangup
+        # у H.323-участника просто исчезала бы строка в списке, а вызов на
+        # терминале продолжал бы идти. Ставится из run.py (set_h323_native).
+        self._h323_native = None
         self._CallClass = None  # подкласс pj.Call
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
         # libDestroy(), и pjsua2 упадёт с assertion (pjsua_call_set_user_data).
@@ -1576,16 +1582,44 @@ class SipEngine:
         except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
             log.exception("Ошибка обработки входящего вызова")
 
+    def set_h323_native(self, endpoint) -> None:
+        """Подключить нативный H.323-эндпоинт для маршрутизации операций.
+
+        Вызывается из run.py после создания ``H323Endpoint``. Разрешает
+        UI/web-командам accept/reject/hangup доезжать до хоста mcu_h323d.
+        """
+        self._h323_native = endpoint
+
+    def _route_call_op(self, op: str, participant_id: int) -> bool:
+        """Отдаёт операцию нативному H.323-эндпоинту, если участник его.
+
+        True — операция выполнена на H.323-стороне, SIP-путь звать не надо.
+        """
+        native = self._h323_native
+        if native is None:
+            return False
+        try:
+            return bool(native.handle_call_op(op, participant_id))
+        except Exception:  # noqa: BLE001 — ошибка H.323 не роняет SIP-путь
+            log.exception("H.323: %s для участника %s не выполнен", op, participant_id)
+            return False
+
     def accept(self, participant_id: int) -> None:
+        if self._route_call_op("accept", participant_id):
+            return
         self._callsvc.accept(participant_id)
 
     def reject(self, participant_id: int) -> None:
+        if self._route_call_op("reject", participant_id):
+            return
         self._callsvc.reject(participant_id)
 
     def call(self, uri: str) -> Optional[int]:
         return self._callsvc.call(uri)
 
     def hangup(self, participant_id: int) -> None:
+        if self._route_call_op("hangup", participant_id):
+            return
         self._callsvc.hangup(participant_id)
 
     def register_media_port(self, port: object) -> None:
@@ -2100,6 +2134,16 @@ class SipEngine:
     def _on_instant_message_status(self, call, prm) -> None:  # pragma: no cover
         """Статус доставки исходящего сообщения."""
         self._chat.on_instant_message_status(call, prm)
+
+    @property
+    def registry(self) -> CallRegistry:
+        """Реестр участников комнаты.
+
+        Отдан наружу специально: нативный H.323-эндпоинт обязан заводить
+        участников в ТОТ ЖЕ реестр, иначе у него начинается собственный
+        счётчик id и он затирает SIP-участников с теми же номерами.
+        """
+        return self._registry
 
     def _register_participant(
         self, call, remote_uri: str, state: CallState

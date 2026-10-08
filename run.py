@@ -291,10 +291,18 @@ def main(argv: list[str] | None = None) -> int:
         # Работает, только если собран H323Plus; иначе start() вернёт False
         # и приём H.323 останется выключенным (SIP продолжает работать).
         h323_socket = getattr(args, "h323_socket", None) or DEFAULT_SOCKET
+        # ВАЖНО: передаём РЕЕСТР движка, а не engine.room. Комната у движка
+        # появляется только в engine.start() (_create_room), а этот код
+        # выполняется раньше — room тут ещё None, и приём H.323 падал бы на
+        # первом входящем вызове. Реестр живёт с момента __init__ и отдаёт
+        # актуальную комнату, плюс в нём единый счётчик id на обе линии.
         h323_native = H323Endpoint(
-            engine.room, engine.events, config, port=config.h323_port,
-            socket_path=h323_socket,
+            None, engine.events, config, port=config.h323_port,
+            socket_path=h323_socket, registry=engine.registry,
         )
+        # Чтобы accept/reject/hangup из UI/web доезжали до H.323-хоста
+        # (у этих участников нет pjsua2-объекта, CallService их не видит).
+        engine.set_h323_native(h323_native)
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         report_fatal("Ошибка инициализации движка (SIP/медиа).")

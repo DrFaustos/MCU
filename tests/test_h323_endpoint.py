@@ -16,6 +16,7 @@ from mcuclient.h323_endpoint import (  # noqa: E402
     H323Endpoint,
     alias_to_uri,
     call_info_from_event,
+    parse_auto_answer_flag,
     state_from_h323,
 )
 from mcuclient.h323d_client import H323dEvent  # noqa: E402
@@ -231,3 +232,72 @@ def test_on_event_unknown_is_ignored():
     _, ep, _ = _make_endpoint()
     ep.on_event(H323dEvent("pong", {}))  # не должно падать
     ep.on_event(H323dEvent("shutdown", {"reason": "signal"}))
+
+
+# --- режим ответа: источник правды — хост, а не Python-флаг ------------------
+
+
+def test_parse_auto_answer_flag_values():
+    assert parse_auto_answer_flag("0") is False
+    assert parse_auto_answer_flag("1") is True
+    assert parse_auto_answer_flag(False) is False
+    assert parse_auto_answer_flag(True) is True
+    assert parse_auto_answer_flag(0) is False
+    assert parse_auto_answer_flag(1) is True
+    assert parse_auto_answer_flag("no") is False
+    assert parse_auto_answer_flag("TRUE") is True
+
+
+def test_parse_auto_answer_flag_unknown_keeps_mode():
+    """Нет поля / мусор -> None: режим не меняем (старые сборки хоста)."""
+    assert parse_auto_answer_flag(None) is None
+    assert parse_auto_answer_flag("") is None
+    assert parse_auto_answer_flag("maybe") is None
+
+
+def test_ready_from_host_switches_to_manual_answer():
+    """Хост с --no-auto-answer сообщает auto_answer=0 — эндпоинт обязан подчиниться.
+
+    Иначе входящий вызов помечался CONFIRMED локально, хотя H323Plus держал
+    его на паузе Alerting: UI показывал «соединение», а accept из UI приезжал
+    уже после того, как терминал сбросил вызов.
+    """
+    _, ep, seen = _make_endpoint(auto_answer=True)  # у эндпоинта «авто»
+
+    ep.on_event(H323dEvent("ready", {"port": 1720, "auto_answer": "0"}))
+
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.INCOMING, "хост просил ручной ответ — не отвечаем сами"
+    assert not any(n == "call.state" for n, _ in seen)
+
+
+def test_ready_with_auto_answer_confirms_incoming():
+    _, ep, seen = _make_endpoint(auto_answer=False)
+
+    ep.on_event(H323dEvent("ready", {"port": 1720, "auto_answer": "1"}))
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.CONFIRMED
+    assert any(n == "call.state" for n, _ in seen)
+
+
+def test_ready_without_flag_keeps_endpoint_mode():
+    """Старый хост без поля auto_answer: поведение не меняется."""
+    _, ep, _ = _make_endpoint(auto_answer=True)
+
+    ep.on_event(H323dEvent("ready", {"port": 1720}))
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.CONFIRMED
+
+
+def test_ready_updates_port():
+    _, ep, _ = _make_endpoint()
+    ep.on_event(H323dEvent("ready", {"port": 1721, "auto_answer": "0"}))
+    assert ep.port == 1721
