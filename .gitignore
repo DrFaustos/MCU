@@ -122,3 +122,7 @@ mediasoup-sidecar/node_modules/
 
 # scratch для агентов (одноразовые скрипты/логи)
 .agent/
+
+# Артефакты записи: приложение пишет в ./recordings по умолчанию
+# (recorder.py, audio_recorder.py, recorder_service.py, web_recorder.py)
+recordings/
