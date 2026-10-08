@@ -77,6 +77,59 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 (h323) — нативный H.323-хост реально звонит; участники — в общей комнате
+
+Две линии правок.
+
+**Сигнализация проверена живьём.** `tools/h323d/main.cpp` научился исходящим
+вызовам (`call.make` → `MakeCall`, событие `call.outgoing`) и **отложенному
+ответу**: при `--no-auto-answer` входящий вызов больше не сбрасывается —
+`OnIncomingCall` возвращает TRUE, пауза держится в `OnAnswerCall`
+(`AnswerCallPending`, отправлен Alerting). Раньше при `--no-auto-answer`
+возвращался FALSE, и ответить afterwards было уже нельзя — H323Plus сбрасывал
+вызов с `EndedByNoAccept` (`h323.cxx:1537`). Добавлены `call.reject` и `error`
+на неизвестный токен. Стенд `scripts/testbed/h323_native_two_hosts.py` поднимает
+ДВА процесса `mcu_h323d` и гоняет между ними настоящий Q.931: вызов → приём →
+отложенный ответ → `call.connected` с обеих сторон → сброс → `call.disconnected`
+в обе стороны: `[+] H.323 нативный (2 хоста) OK`, RC=0.
+
+**Три бага на стыке SIP- и H.323-линий** (закреплены
+`tests/test_h323_room_routing.py`, 12 тестов, проверены боевыми классами):
+
+1. **Коллизия `Participant.id`.** `H323Endpoint` вёл собственный счётчик
+   `_next_id` от 1 и писал в ту же `Room.participants`, что и `CallRegistry`, —
+   первый входящий H.323 перезатирал SIP-участника с id=1. Теперь H.323 заводит
+   участников через **общий реестр** (`H323Endpoint(..., registry=engine.registry)`),
+   `SipEngine.registry` отдан наружу.
+2. **Комната появляется позже эндпоинта.** `run.py` создавал
+   `H323Endpoint(engine.room, ...)` ДО `engine.start()`, а комната у движка
+   создаётся только в `start() -> _create_room()`. В бою туда приходил `None` и
+   первый входящий падал с `AttributeError: 'NoneType' object has no attribute
+   'add'`. Теперь хранится реестр, комната берётся из него (`ep.room`).
+3. **accept/reject/hangup не доезжали до хоста.** `SipEngine` звал только
+   `CallService` (pjsua2); у H.323-участника `_call` нет — из UI/web у него
+   просто исчезала строка в списке, а вызов на терминале продолжал идти.
+   Добавлены `SipEngine.set_h323_native()` + `_route_call_op()` и
+   `H323Endpoint.handle_call_op()`. SIP-путь не перехватывается и не ломается,
+   даже если H.323-эндпоинт брошен (тесты на оба случая).
+
+Ещё: **режим ответа берётся у хоста** из `ready.auto_answer`, а не из
+Python-флага (`--no-auto-answer` задаётся аргументами `mcu_h323d`, `run.py` его
+вовсе не передавал) — иначе входящий помечался `CONFIRMED`, хотя H323Plus держал
+его на паузе Alerting. Из `on_event("call.incoming")` убрано мёртвое
+присваивание состояния: авто-ответ делает `register_incoming`, он же шлёт хосту
+`call.answer` и публикует `call.state`.
+
+**Чего по-прежнему нет — честно:** медиа. В `tools/h323d/main.cpp` нет ни
+`OnStartMediaSession`, ни `OnOpenMediaStream`, ни `SoundChannel` — хост только
+сигнальный, со звонком «соединение есть, молчим». Это Этап 1м в
+`docs/H323_STATUS.md`; без него аудиомикшер (Этап 3) подключать не к чему.
+
+Проверки: `/usr/bin/python3 tests/_runner.py` → **1022 passed, 0 failed, RC=0**;
+`/usr/bin/python3 -m pytest tests/` → RC=0; `./scripts/build_h323d.sh` — собрано
+без ошибок; `scripts/testbed/h323_native_two_hosts.py` → RC=0;
+`scripts/check_annotations.py` → OK.
+
 ### 2026-10-08 — сверка проверок боевым интерпретатором; тест перенесён на `asyncio.run`
 
 Прогон `python3 tests/_runner.py` из окружения ИИ-агента показал **«10 failed»**
