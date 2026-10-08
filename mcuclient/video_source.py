@@ -46,7 +46,7 @@ try:  # pragma: no cover
     _HAVE_CAM = True
 except ImportError as exc:  # pragma: no cover
     _HAVE_CAM = False
-    np = None  # type: ignore
+    np = None
     log.warning("Коммутатор видео недоступен: %s", exc)
 
 try:  # pragma: no cover
@@ -54,7 +54,7 @@ try:  # pragma: no cover
 
     _HAVE_CV2 = True
 except ImportError:  # pragma: no cover
-    cv2 = None  # type: ignore
+    cv2 = None
     _HAVE_CV2 = False
 
 
@@ -120,7 +120,10 @@ class VideoSourceSwitcher:
         self._cap = None  # cv2.VideoCapture текущей камеры
         self._cap_dev: int | None = None
         # mss держим один на поток — создание на каждый кадр дорого и течёт.
-        self._sct = None
+        # Any: mss-сессия создаётся лениво в _grab_screen(), а
+        # `= None` без аннотации связывало тип с NoneType и запрещало
+        # self._sct.monitors / .grab после присваивания.
+        self._sct: Any = None
         self._sct_monitor: int = 1
 
     # --- свойства ---

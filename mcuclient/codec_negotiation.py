@@ -171,7 +171,9 @@ def negotiate(remote, supported, want='audio'):
     # Returns the chosen codec plus a reason for each rejected one, so the log
     # explains a mismatch instead of staying silent.
     supported_set = {_normalize_supported(c): c for c in supported}
-    rejected = []
+    # Аннотация обязательна: без неё mypy не выводит элемент из
+    # первого append и требует List[<type>].
+    rejected: List[Tuple[str, str]] = []
 
     for ci in remote:
         if want == 'video' and not _is_video(ci.name):

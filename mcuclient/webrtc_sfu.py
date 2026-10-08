@@ -26,7 +26,7 @@ from .log import get_logger
 try:  # numpy есть в зависимостях; при отсутствии — деградация.
     import numpy as _np
 except Exception:  # noqa: BLE001
-    _np = None  # type: ignore
+    _np = None
 
 log = get_logger("sfu")
 
@@ -319,10 +319,12 @@ class AudioMixSession:
             pcm, rate, channels = item
             mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
             self._mixer.set_buffer(pid, mono)
-        # Убрать из микшера тех, кто больше не публикует.
-        for pid in list(self._mixer.participant_ids):
-            if pid not in publishers:
-                self._mixer.remove(pid)
+        # Убрать из микшера тех, кто больше не публикует. Имя переменной
+        # отдельное: ключи микшера — уже не обязательно те же str, что
+        # вернули publishers() (микшер принимает и целые id).
+        for stale in list(self._mixer.participant_ids):
+            if stale not in publishers:
+                self._mixer.remove(stale)
 
         recipients = self._recipients
         if callable(recipients):
@@ -373,7 +375,9 @@ class AudioMixSession:
         with self._lock:
             return self._mixed.get(recipient)
 
-    def active_publishers(self) -> List[str]:
+    def active_publishers(self) -> List[Any]:
+        """Ключи микшера, у кого есть буфер: у веба это `web-N`/`sip`,
+        у SIP/H.323-пути (mcu_core) — целые id участников."""
         return list(self._mixer.participant_ids)
 
 

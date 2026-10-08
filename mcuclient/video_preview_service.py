@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from . import video_embed
 from .log import get_logger
@@ -49,7 +49,9 @@ class VideoPreviewService:
         self._list_video_devices = list_video_devices
         self._set_video_device = set_video_device
         self._get_video_xid = get_video_xid
-        self._preview = None
+        # Any: объект pjsua2.VideoPreview, создаётся в _make_preview();
+        # `= None` без аннотации лишало тип обращений .start()/.stop().
+        self._preview: Any = None
         self._preview_xid: Optional[int] = None
         self._preview_dev: int = -1
         self._embedded_xids: dict = {}

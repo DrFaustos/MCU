@@ -12,9 +12,12 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .log import get_logger
+
+if TYPE_CHECKING:  # только для аннотаций, рантайм не тянет
+    from .models import Participant
 
 log = get_logger("call")
 
@@ -26,13 +29,13 @@ class CallService:
         self,
         events,
         *,
-        pj_module=None,
+        pj_module: Any = None,
         is_available: Optional[Callable[[], bool]] = None,
-        get_participant: Optional[Callable[[int], object]] = None,
-        register_participant: Optional[Callable[..., object]] = None,
+        get_participant: Optional[Callable[[int], Optional[Participant]]] = None,
+        register_participant: Optional[Callable[..., Participant]] = None,
         drop_participant: Optional[Callable[[int], None]] = None,
-        get_call_class: Optional[Callable[[], object]] = None,
-        get_account: Optional[Callable[[], object]] = None,
+        get_call_class: Optional[Callable[[], Any]] = None,
+        get_account: Optional[Callable[[], Any]] = None,
         video_supported: Optional[Callable[[], bool]] = None,
         video_call_enabled: Optional[Callable[[], bool]] = None,
         media=None,
@@ -102,6 +105,29 @@ class CallService:
         if not self._is_available():
             self._events.emit("call.error", reason="pjsua2 недоступен")
             return None
+        # Локальные копии, а не повторные обращения к self: guard'ы обязаны
+        # действовать и внутри _try_make_call (сужение типа в замыкание mypy не
+        # переносит), и — главное — давать честную причину вместо проглоченного
+        # TypeError из-под широкого except.
+        registrar = self._register_participant
+        if registrar is None:
+            # Проверка ДО makeCall. Без регистратора вызов всё равно ушёл бы
+            # наружу (INVITE отправлен), а упал бы сразу после: TypeError
+            # «'NoneType' object is not callable» проглатывался except ниже и
+            # превращался в «call.error» с мусорным reason, а pjsua2-вызов
+            # оставался висеть без участника в комнате.
+            self._events.emit(
+                "call.error", reason="не задан регистратор участников")
+            return None
+        call_cls = self._get_call_class()
+        if call_cls is None:
+            # Подкласс pj.Call появляется только в _start_account(), а
+            # is_available() отвечает за наличие модуля pjsua2, НЕ за запуск
+            # движка: «позвонить» до старта аккаунта было можно. None(...)
+            # давало TypeError, он проглатывался except, и наружу шёл текст
+            # про NoneType вместо внятной причины.
+            self._events.emit("call.error", reason="движок ещё не готов")
+            return None
 
         def _try_make_call(use_null_audio: bool = False) -> Optional[int]:
             if use_null_audio and self._media is not None and getattr(self._media, "available", False):
@@ -116,7 +142,7 @@ class CallService:
             try:  # pragma: no cover
                 from .models import CallState
 
-                call = self._get_call_class()(self._get_account())
+                call = call_cls(self._get_account())
                 prm = self._pj.CallOpParam(True)
                 prm.opt.audioCount = 1
                 prm.opt.videoCount = self._video_count()
@@ -124,7 +150,7 @@ class CallService:
                 # Состояние передаём сразу: реальный регистратор движка
                 # требует state обязательным аргументом (участник рождается
                 # уже CONNECTING, а не IDLE с последующей дозаписью).
-                participant = self._register_participant(
+                participant = registrar(
                     call, uri, state=CallState.CONNECTING
                 )
                 participant.state = CallState.CONNECTING

@@ -135,6 +135,74 @@ def test_call_success_registers_and_emits():
     assert any(n == "call.outgoing" for n, _ in ev.emitted)
 
 
+def test_call_without_registrar_does_not_dial():
+    """Без регистратора участников INVITE уходит наружу и вызов «повисает».
+
+    `register_participant` в DI-сигнатуре опционален (по умолчанию None), а
+    вызывался без проверки сразу после `makeCall()`. То есть `Call.makeCall()`
+    уже отправил INVITE, следующая строка падала с TypeError
+    («'NoneType' object is not callable»), его проглатывал `except Exception`,
+    наружу уходил `call.error` с текстом про NoneType, а pjsua2-вызов оставался
+    жив без участника в комнате — его нельзя ни принять, ни сбросить из UI.
+    Теперь проверка стоит ДО makeCall.
+    """
+    made: list = []
+
+    class _SpyCall(_Call):
+        def __init__(self, account=None) -> None:
+            super().__init__(account)
+            made.append(self)
+
+    ev = _Events()
+    svc = CallService(
+        ev,
+        pj_module=_Pj(),
+        is_available=lambda: True,
+        register_participant=None,          # ровно та конфигурация, что ломалась
+        get_call_class=lambda: _SpyCall,
+        get_account=lambda: None,
+        normalize_uri=lambda u: u,
+        error_reason=lambda exc: str(exc),
+    )
+    assert svc.call("sip:100@host") is None
+    assert made == [], "INVITE отправлен до проверки: висит вызов без участника"
+    assert ("call.error", {"reason": "не задан регистратор участников"}) in ev.emitted, (
+        f"ждём честную причину, а не текст TypeError: {ev.emitted}")
+
+
+def test_call_before_engine_ready_does_not_dial():
+    """`get_call_class()` возвращает None до `_start_account()` — звонить нельзя.
+
+    Ди-дефолт был `lambda: None`, а вызывалось это как `self._get_call_class()(...)`:
+    TypeError проглатывался широким `except`, наружу уходил `call.error` с текстом
+    «NoneType object is not callable», а не честная причина. Отдельно важно, что
+    `is_available()` отвечает за НАЛИЧИЕ модуля pjsua2, а не за ЗАПУСК аккаунта:
+    при установленном pjsua2 и незапущенном движке вызов был «разрешён».
+    """
+    made: list = []
+
+    class _SpyCall(_Call):
+        def __init__(self, account=None) -> None:
+            super().__init__(account)
+            made.append(self)
+
+    ev = _Events()
+    svc = CallService(
+        ev,
+        pj_module=_Pj(),
+        is_available=lambda: True,          # модуль есть, движок не запущен
+        register_participant=_registrar,
+        get_call_class=lambda: None,        # ровно состояние до _start_account()
+        get_account=lambda: None,
+        normalize_uri=lambda u: u,
+        error_reason=lambda exc: str(exc),
+    )
+    assert svc.call("sip:100@host") is None
+    assert made == [], "INVITE отправлен до проверки готовности движка"
+    assert ("call.error", {"reason": "движок ещё не готов"}) in ev.emitted, (
+        f"ждём честную причину, а не текст TypeError: {ev.emitted}")
+
+
 def test_call_audio_error_falls_back_to_null():
     svc = _service(audio_err=True)
     pid = svc.call("sip:100@host")

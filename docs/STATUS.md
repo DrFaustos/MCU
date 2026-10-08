@@ -77,6 +77,58 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — вызовы `None(...)`: движок звонил до готовности, а причина тонула в `except`
+
+Продолжение разбора `mypy mcuclient`. В `CallService.call()` два обязательных
+DI-компонента объявлены опциональными (`Optional[...] = None`) и дефолтятся
+`lambda: None`, но вызывались **без проверки**:
+
+* `self._get_call_class()(...)` — подкласс `pj.Call` появляется только в
+  `_start_account()`, а `is_available()` отвечает за **наличие модуля** pjsua2,
+  НЕ за запуск аккаунта. При установленном pjsua2 и незапущенном движке
+  «позвонить» было можно: `None(...)` → `TypeError`, он проглатывался широким
+  `except Exception`, и наружу шёл `call.error` с текстом «'NoneType' object is
+  not callable» вместо внятной причины;
+* `self._register_participant(...)` — падал **после** `call.makeCall()`, то есть
+  INVITE уже ушёл наружу, а участника в комнате нет: вызов нельзя ни принять,
+  ни сбросить из UI. Проверка поставлена ДО `makeCall()`.
+
+Попутно приведены к реальности аннотации, которые описывали не контракт, а
+незнание (каждая ломала разбирательство mypy и мешала читать код):
+
+* `Participant._call`: было `object` — `object` запрещает `p._call.answer(prm)`
+  даже когда объект живой; теперь `Any` с пояснением, что это `pjsua2.Call`;
+* `AudioMixer` ключевал буферы как `Dict[int, bytes]`, хотя веб-слой заведомо
+  кладёт строки (`web-N`, `sip` — `webrtc_sfu`, `sip_web_bridge`), а `mcu_core`
+  — целые id. Тип ключа — `Hashable`, иначе 7 предупреждений mypy описывали
+  рабочий код как сломанный;
+* `self._sct` (`mss`) и `self._preview` (`VideoPreview`) объявлены `= None` без
+  аннотации → mypy связывал тип с `NoneType` и запрещал `.monitors`, `.grab`,
+  `.start()` после присваивания;
+* `rejected` в `codec_negotiation.negotiate()` и `List[str]` у
+  `AudioMixSession.active_publishers()` — аннотации, противоречащие факту.
+
+Убраны 4 лишние `# type: ignore` (`warn_unused_ignores = true` в `mypy.ini`
+помечает их как «комментарий, который ничего не глушит»).
+
+Тесты: `test_call_before_engine_ready_does_not_dial` и
+`test_call_without_registrar_does_not_dial` — оба наблюдают, **ушёл ли INVITE**
+(`_SpyCall` пишет себя в список) и требуют честную причину в `call.error`.
+Красно-зелёный: с отключённым guard'ом (`if False`) падают с
+`«NoneType' object is not callable»` и «INVITE отправлен до проверки».
+
+Важно про саму проверку: первая попытка RED вырезала из файла `if`, оставляя
+тело блока — pytest падал с RC=4 («found no collectors»), а `$?` в пайпе
+показывал 0, и проверка выглядела состоявшейся. RED теперь отключает guard
+через `if False` (синтаксис цел) и отдельно проверяется RC прогона.
+
+Проверки боевым `/usr/bin/python3`: `/usr/bin/python3 tests/_runner.py` →
+**1030 passed, 0 failed, 0 skipped, RC=0**; `pytest tests/` (junitxml) →
+**tests=1030 failures=0 errors=0 skipped=0**; `ruff check . --select
+F821,F811,F841,E9` → RC=0; `mypy mcuclient` → **88 → 63** ошибки, в файлах
+этого слайса — 0.
+
+
 ### 2026-10-08 — web-панель: `{"ok": true}` вместо действия, переезд на порт 1, 500 вместо 400
 
 Разбор mypy-предупреждений в `mcuclient/web_server.py` вскрыл не аннотационный

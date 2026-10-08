@@ -45,7 +45,10 @@ class Participant:
     is_video_muted: bool = False
     is_speaking: bool = False
     volume_level: int = 0
-    _call: object = None
+    # Объект вызова pjsua2 (`pjsua2.Call`). Тип недоступен без
+    # нативного модуля, поэтому Any, а не object: `object` запрещал
+    # обращению вида `p._call.answer(prm)` даже когда объект живой.
+    _call: Any = None
 
     @property
     def label(self) -> str:
