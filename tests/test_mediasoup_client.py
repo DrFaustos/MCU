@@ -14,7 +14,6 @@ class _Recorder:
 
     def __call__(self, method, url, body, headers):
         self.calls.append((method, url, body, dict(headers)))
-        path = url.split("127.0.0.1:4443", 1)[-1] if "4443" in url else url
         for key, resp in self.responses.items():
             if key in url:
                 return resp

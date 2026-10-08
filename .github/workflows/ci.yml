@@ -31,8 +31,19 @@ jobs:
           # для модульных тестов config/sip_engine.
           pip install pytest pytest-cov ruff
 
-      - name: Ruff (lint) — блокирует только явные ошибки
+      - name: Ruff (стиль) — не блокирует
+        # E702/E402/W293/F401 — накопленный шум; чинятся отдельными заходами.
         run: ruff check . --select E,F,W --ignore E501 || true
+
+      - name: Ruff (ошибки кода) — БЛОКИРУЕТ
+        # F821 (неопределённое имя) когда-то молча жил в mcuclient/ui.py: в
+        # closeEvent потерялся заголовок метода, и его тело уехало в
+        # _update_web_label — GUI гасил движок при обновлении подписи панели и
+        # падал на NameError. PySide6 в CI не стоит, pytest это не проверяет,
+        # а предыдущий шаг с `|| true` такой ошибки не видел вовсе.
+        # F811 — перезаопределение, F841 — присвоено и не использовано,
+        # E9 — синтаксические ошибки.
+        run: ruff check . --select F821,F811,F841,E9
 
       - name: Pytest
         run: python -m pytest tests/ -v --cov=mcuclient --cov-report=term-missing

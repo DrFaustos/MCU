@@ -1750,6 +1750,16 @@ if QT_AVAILABLE:
             self._update_buttons()
 
         def closeEvent(self, event) -> None:  # noqa: N802
+            """Окно закрывается: гасим опросы, панель, H.323 и движок.
+
+            Порядок важен. Web-панель уходит ПЕРВОЙ: `SipBridgeService`
+            подключает к вызовам внешние pjsua2-порты (`SipAudioPort`), а
+            docs/STOP_CONTRACT.md требует снять чужие media-порты ДО
+            `engine.stop()` — иначе teardown `libDestroy()` ловит гонку в
+            `pjmedia_conf_remove_port`. Каждый шаг обёрнут отдельно: падение
+            одного не должно оставлять движок запущенным (он держит 5060) и не
+            должно мешать закрыть окно.
+            """
             try:
                 self._video_poll.stop()
             except Exception:  # noqa: BLE001
@@ -1758,6 +1768,26 @@ if QT_AVAILABLE:
                 self._event_poll.stop()
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                if self._web_server is not None:
+                    self._web_server.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки web-панели при закрытии")
+            try:
+                if self.h323_native is not None:
+                    self.h323_native.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки H.323-хоста при закрытии")
+            try:
+                self.engine.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки SIP-движка при закрытии")
+            try:
+                self.h323.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки H.323-шлюза при закрытии")
+            super().closeEvent(event)
+
         # --- встроенная web-панель -------------------------------------
         def _on_web_toggle(self, checked: bool) -> None:
             """Галочка «Включить web-панель»: лениво поднять/остановить сервер."""
@@ -1918,15 +1948,6 @@ if QT_AVAILABLE:
                 self.web_url_label.setText(text)
             else:
                 self.web_url_label.setText("выключена")
-
-            try:
-                if self._web_server is not None:
-                    self._web_server.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self.engine.stop()
-            self.h323.stop()
-            super().closeEvent(event)
 
 
 else:  # pragma: no cover
