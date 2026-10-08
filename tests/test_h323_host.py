@@ -44,6 +44,39 @@ def test_parse_call_incoming():
     assert ev.uri == "h323:Sony"
 
 
+def test_parse_call_outgoing_address_from_alias():
+    """call.outgoing: хост кладёт набранный адрес в alias (ip пуст).
+
+    Без ``address`` Python-слой не узнал бы, КУДА именно пошёл исходящий
+    вызов: у HostEvent alias/ip заполняются по-разному на разных сторонах.
+    """
+    ev = parse_host_event(
+        '{"event":"call.outgoing","token":"call-1","alias":"127.0.0.1:1720"}'
+    )
+    assert ev is not None
+    assert ev.kind == "call.outgoing"
+    assert ev.address == "127.0.0.1:1720"
+
+
+def test_parse_call_outgoing_explicit_address_wins():
+    ev = parse_host_event(
+        '{"event":"call.outgoing","token":"c","address":"gate.example",'
+        '"alias":"MCU-A","ip":"MCU-A@ip$10.0.0.1:52000"}'
+    )
+    assert ev is not None
+    assert ev.address == "gate.example"
+
+
+def test_parse_incoming_has_no_address():
+    """У входящего вызова address пустой: там есть alias+ip пира."""
+    ev = parse_host_event(
+        '{"event":"call.incoming","token":"c","alias":"MCU-A",'
+        '"ip":"MCU-A@ip$127.0.0.1:43404"}'
+    )
+    assert ev is not None
+    assert ev.address == ""
+
+
 def test_parse_disconnected_reason():
     ev = parse_host_event('{"event":"call.disconnected","token":"t","reason":3}')
     assert ev is not None

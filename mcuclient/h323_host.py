@@ -31,8 +31,14 @@ DEFAULT_SOCKET = "/tmp/mcu_h323d.sock"
 HOST_BINARY = "mcu_h323d"
 
 # Соответствие событий хоста и событий шины (EventBus).
+# Перечислены ТОЛЬКО события, которые mcu_h323d реально отправляет (см.
+# emit_call_event/emit_error в tools/h323d/main.cpp). call.outgoing появился
+# вместе с командой call.make: хост шлёт его для исходящего соединения.
+# call.media (согласованный кодек) — намеренно НЕТ: проброс логических
+# каналов в IPC ещё не сделан, событие хост не генерирует.
 EVENT_MAP: dict[str, str] = {
     "call.incoming": "call.incoming",
+    "call.outgoing": "call.outgoing",
     "call.connected": "call.state",
     "call.disconnected": "call.state",
 }
@@ -50,6 +56,8 @@ class HostEvent:
     port: int = 0
     reason: Any = ""
     message: str = ""
+    #: адрес вызова для исходящих (поле ``alias``/``ip`` события call.outgoing)
+    address: str = ""
 
 
 @dataclass
@@ -85,15 +93,19 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         port = int(port or 0)
     except (TypeError, ValueError):
         port = 0
+    alias = str(obj.get("alias", "") or "")
+    ip = str(obj.get("ip", "") or "")
     return HostEvent(
         kind=kind,
         token=str(obj.get("token", "") or ""),
-        alias=str(obj.get("alias", "") or ""),
-        ip=str(obj.get("ip", "") or ""),
+        alias=alias,
+        ip=ip,
         uri=str(obj.get("uri", "") or ""),
         port=port,
         reason=obj.get("reason", ""),
         message=str(obj.get("message", "") or ""),
+        # Для call.outgoing хост кладёт набранный адрес в alias/ip.
+        address=str(obj.get("address", "") or "") or (alias if not ip else ""),
     )
 
 
