@@ -210,6 +210,21 @@ def test_runner_collect_only_does_not_execute(tmp_path):
     assert "1 cases collected" in out, out
 
 
+def test_runner_collect_only_counts_skipped_cases(tmp_path):
+    """--collect-only обязан показывать и skipif-кейсы: pytest их собирает.
+
+    На этом расхождении CI краснел весь набор: pytest считал 1031 кейс,
+    раннер — 1029, потому что два `@pytest.mark.skipif(...)`-теста (нет pjsua2)
+    печатали SKIP вместо COLLECT и выпадали из сверки. Отказ по skipif
+    происходит на execution, а не на коллекции, поэтому «сколько кейсов»
+    обязано совпадать с pytest и для пропускаемых тестов.
+    """
+    rc, out = _run(tmp_path, SKIPIF_CASE, "--collect-only")
+    assert rc == 0, out
+    assert "COLLECT test_probe.py::test_never_runs" in out, out
+    assert "1 cases collected" in out, out
+
+
 def test_runner_covers_every_case_pytest_collects(tmp_path):
     """Покрытие раннера обязано совпадать с pytest по числу кейсов.
 

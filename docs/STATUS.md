@@ -77,6 +77,40 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — шаг `Pytest` в CI снова зелёный: два теста зависели от нативного pjsua2
+
+CI падал на `Pytest` во всех трёх Python — и падал так на **всех 15 прогонах
+подряд**, включая коммиты до типизации. Падение воспроизвели локально, подняв
+окружение «как в CI» (venv с pytest, но без `pjsua2`/`mss`/`cv2`/`aiortc`/PySide6 —
+в CI их намеренно не ставят). Валялись ровно 3 теста:
+
+* `tests/test_sip_engine_nat_srtp.py::test_configure_nat_sets_max_calls_and_stun_and_nat_type`
+  и `::test_configure_nat_normalizes_stun_scheme_from_config`:
+  `_configure_nat` берёт `StringVector` из **глобального** `_pj` модуля
+  `sip_engine`, а эти два теста его не подменяли. Проходили они только там, где
+  собран нативный pjsua2, а в CI давали «STUN-сервер не применён: нет типа
+  StringVector в сборке» и пустой `stunServer`. То есть проверяли наличие
+  бинарника, а не прошивку конфига — ровно то, ради чего были написаны. Добавлен
+  явный `monkeypatch.setattr(se, "_pj", _FakePj)` (как в соседнем тесте про
+  сборку без `StringVector`, который подменял);
+* `tests/test_test_runner.py::test_runner_covers_every_case_pytest_collects`:
+  pytest собирал 1031 кейс, `tests/_runner.py` — 1029; расхождение — ровно два
+  `@pytest.mark.skipif`-теста `test_sip_interop` (нет pjsua2). Отказ по `skipif`
+  происходит на **execution**, а не на коллекции, поэтому при `--collect-only`
+  раннер обязан печатать такой кейс. Раннер печатал `SKIP` и выпадал из сверки —
+  то есть падал тот самый страж, который написан против «раннер потерял часть
+  набора молча».
+
+Правлен раннер (`COLLECT` вместо `SKIP` в режиме `--collect-only`), добавлен
+страж `test_runner_collect_only_counts_skipped_cases`. RED-проверка: страж
+падает без правки раннера (`assert 'COLLECT test_probe.py::test_never_runs' in
+'SKIP ... 0 cases collected'`) и зелёный с правкой — проверено откачкой через
+`git checkout` / `git apply`.
+
+Проверки: `pytest` в CI-окружении (без pjsua2) → **RC=0**; сверка коллектов там
+же → pytest 1032 == раннер 1032; боевой `/usr/bin/python3 tests/_runner.py` →
+**1032 passed, 0 failed, RC=0**; боевой `pytest tests/` → RC=0.
+
 ### 2026-10-08 — ruff-«стиль» в CI перестал быть декоративным: 27 нарушений разобрано
 
 Второй шаг-заглушка (`ruff check . --select E,F,W --ignore E501 || true`) держал

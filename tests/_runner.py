@@ -257,6 +257,15 @@ def main(argv: list[str]) -> int:
                 continue
             reason = skip_reason(fn)
             if reason:
+                # pytest собирает skipif/skip-тесты: отказ происходит на этапе
+                # execution, а не коллекции. Значит при --collect-only такой
+                # кейс обязан попасть в счётчик — иначе сверка покрытия
+                # (test_runner_covers_every_case_pytest_collects) кричит
+                # «раннер потерял N кейсов», хотя раннер их просто не печатал.
+                if collect_only:
+                    print(f"COLLECT {path.name}::{name}", flush=True)
+                    collected += 1
+                    continue
                 skipped += 1
                 print(f"SKIP {path.name}::{name} ({reason})", flush=True)
                 continue

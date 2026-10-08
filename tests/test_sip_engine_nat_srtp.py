@@ -137,7 +137,15 @@ class _EpCfg:
         self.uaConfig = _Ua()
 
 
-def test_configure_nat_sets_max_calls_and_stun_and_nat_type():
+def test_configure_nat_sets_max_calls_and_stun_and_nat_type(monkeypatch):
+    # _pj подменяем ЯВНО: _configure_nat берёт StringVector из глобального _pj.
+    # Без подмены тест проходил только там, где собран нативный pjsua2, и падал
+    # в CI (там pjsua2 не ставится намеренно) с «нет типа StringVector в сборке»
+    # — то есть проверял наличие бинарника, а не прошивку конфига. Соседний
+    # test_configure_nat_survives_missing_string_vector подменяет — этот нет.
+    import mcuclient.sip_engine as se
+
+    monkeypatch.setattr(se, "_pj", _FakePj)
     eng = _engine(_cfg(
         sip_patch={
             "max_calls": 24,
@@ -256,8 +264,13 @@ def test_ua_config_ice_field_contract():
     assert not hasattr(ua, "enableIce"), "enableIce вернулся: NAT-настройки пересмотреть"
 
 
-def test_configure_nat_normalizes_stun_scheme_from_config():
+def test_configure_nat_normalizes_stun_scheme_from_config(monkeypatch):
     """Конфиг `stun:host:port` не должен уходить в натив со схемой."""
+    import mcuclient.sip_engine as se
+
+    # _pj подменён: проверяем нормализацию схемы, а не то, что в сборке есть
+    # StringVector (в CI pjsua2 нет, и без подмены тест падал не по делу).
+    monkeypatch.setattr(se, "_pj", _FakePj)
     eng = _engine(_cfg(sip_patch={"stun": {"server": "stun:stun.example.org:3478"}}))
     ep_cfg = _EpCfg()
     eng._configure_nat(ep_cfg)
