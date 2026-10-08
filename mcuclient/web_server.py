@@ -1137,13 +1137,32 @@ def _participant_to_dict(p: Any) -> Dict[str, Any]:
 
 
 def _chat_to_dict(m: Any) -> Dict[str, Any]:
+    """Сообщение чата — к виду, который ждёт веб-панель.
+
+    Доменный объект (`ChatMessage.as_dict()`) живёт своими именами:
+    ``sender`` / ``content`` / ``outgoing`` / ``ts`` / ``status``. Браузер
+    исторически читает ``direction`` ('in'/'out'), ``text`` и ``timestamp``.
+    Раньше здесь просто перебирались «похожие» имена через getattr — и на
+    реальном ChatMessage все они давали пустоту: GET /api/chat отдавал список
+    из `{"timestamp": null, "direction": "", "text": ""}`, поэтому панель
+    показывала пустой чат даже при наполненной истории. Маппинг имён сделан
+    явным, а доменный слой от UI не зависит.
+    """
     if isinstance(m, dict):
+        data: Dict[str, Any] = m
+    elif hasattr(m, "as_dict"):
+        data = dict(m.as_dict())
+    else:
         return _jsonable(m)
+    direction = data.get("direction")
+    if not direction:
+        direction = "out" if data.get("outgoing") else "in"
     return {
-        "timestamp": getattr(m, "timestamp", None),
-        "participant_id": getattr(m, "participant_id", None),
-        "direction": getattr(m, "direction", ""),
-        "text": getattr(m, "text", ""),
+        "timestamp": data.get("ts") or data.get("timestamp"),
+        "sender": data.get("sender", ""),
+        "direction": direction,
+        "text": data.get("content") or data.get("text") or "",
+        "status": data.get("status", ""),
     }
 
 

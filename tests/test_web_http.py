@@ -6,6 +6,7 @@ import json
 import urllib.error
 import urllib.request
 
+from mcuclient.chat import ChatMessage
 from mcuclient.models import CallState, EventBus, Participant, Room
 from mcuclient.web_server import WebServer
 
@@ -26,6 +27,7 @@ class _FakeEngine:
         self._screen = False
         self._video_send = True
         self.calls = []
+        self.chat = []
 
     def call(self, uri):
         self.calls.append(uri)
@@ -50,7 +52,10 @@ class _FakeEngine:
     def recording_file(self): return None
     def send_message(self, pid, text): return True
     @property
-    def chat_history(self): return []
+    def chat_history(self):
+        # Реальные доменные объекты, а не «удобные» словари: ровно на них
+        # и разваливался баг, когда веб-слой читал несуществующие поля.
+        return list(self.chat)
 
     @property
     def dtmf_history(self): return [{"digits": "12#", "direction": "in"}]
@@ -171,6 +176,36 @@ def test_api_chat_history_is_list():
         status, body = _get(base + "/api/chat")
         assert status == 200
         assert body["messages"] == []
+    finally:
+        srv.stop()
+
+
+def test_api_chat_history_carries_real_text():
+    """Регрессия: GET /api/chat отдавал пустые сообщения при полной истории.
+
+    `_chat_to_dict` читал `text`/`direction`/`timestamp`, а у доменного
+    `ChatMessage` поля называются `content`/`outgoing`/`ts`: getattr молча
+    давал ''/None, и панель показывала пустой чат. Прежний фейк отдавал []
+    и тест ничего не проверял — поэтому здесь история наполняется НАСТОЯЩИМИ
+    ChatMessage, а не удобными словарями.
+    """
+    srv = _server()
+    try:
+        srv._engine.chat = [
+            ChatMessage(sender="sip:600@pbx", content="привет из терминала"),
+            ChatMessage(sender="me", content="привет в ответ",
+                        outgoing=True, status="delivered"),
+        ]
+        base = f"http://127.0.0.1:{srv.port}"
+        status, body = _get(base + "/api/chat")
+        assert status == 200
+        msgs = body["messages"]
+        assert [m["text"] for m in msgs] == ["привет из терминала",
+                                             "привет в ответ"]
+        assert [m["direction"] for m in msgs] == ["in", "out"]
+        assert all(m["timestamp"] for m in msgs), msgs
+        assert msgs[0]["sender"] == "sip:600@pbx"
+        assert msgs[1]["status"] == "delivered"
     finally:
         srv.stop()
 

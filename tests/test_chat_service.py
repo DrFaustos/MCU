@@ -73,17 +73,84 @@ def test_send_message_success_adds_history_and_event():
     assert any(name == "chat.message" for name, _ in ev.emitted)
 
 
+#: Как выглядит реальный OnInstantMessageParam в pjsua2 2.16: текст лежит в
+#: msgBody, а rdata.wholeMsg — ВЕСЬ SIP-пакет (стартовая строка, заголовки,
+#: тело). Фейк обязан повторять эту форму, иначе тест «зелёный поверх бага»:
+#: ровно так и жил баг, когда читали wholeMsg целиком.
+_PKG = (
+    "MESSAGE sip:mcu@host SIP/2.0\r\n"
+    "Via: SIP/2.0/UDP 10.0.0.5\r\n"
+    "From: <sip:600@pbx>\r\n"
+    "Content-Type: text/plain\r\n"
+    "\r\n"
+    "привет из терминала"
+)
+
+
+class _Rdata:
+    wholeMsg = _PKG
+
+
 def test_on_instant_message_adds_incoming():
     svc, ev = _service()
 
     class _Prm:
-        class rdata:  # noqa: N801
-            wholeMsg = "входящее"
+        msgBody = "привет из терминала"
         fromUri = "sip:peer@host"
+        rdata = _Rdata
 
     svc.on_instant_message(None, _Prm)
     assert len(svc.history) == 1
+    assert svc.history[0].content == "привет из терминала"
+    assert svc.history[0].sender == "sip:peer@host"
     assert any(name == "chat.message" for name, _ in ev.emitted)
+
+
+def test_on_instant_message_never_stores_sip_headers():
+    """Регресс: читают wholeMsg -> в истории оказываются заголовки SIP."""
+    svc, _ = _service()
+
+    class _Prm:
+        msgBody = ""  # сборки без msgBody: откат на wholeMsg
+        fromUri = "sip:600@pbx"
+        rdata = _Rdata
+
+    svc.on_instant_message(None, _Prm)
+    assert len(svc.history) == 1
+    text = svc.history[0].content
+    assert text == "привет из терминала"
+    for junk in ("MESSAGE sip:", "Via:", "Content-Type:", "\r\n"):
+        assert junk not in text
+
+
+def test_on_instant_message_without_body_is_ignored():
+    """Пустое MESSAGE (keep-alive по RFC 3428) не идёт в историю."""
+    svc, ev = _service()
+
+    class _Prm:
+        msgBody = "   "
+        fromUri = "sip:600@pbx"
+        rdata = None
+
+    svc.on_instant_message(None, _Prm)
+    assert svc.history == []
+    assert not any(name == "chat.message" for name, _ in ev.emitted)
+
+
+def test_on_instant_message_body_without_headers_fallback_is_empty():
+    """wholeMsg без пустой строки — не угадываем, а игнорируем."""
+    svc, _ = _service()
+
+    class _Prm:
+        msgBody = ""
+        fromUri = "sip:600@pbx"
+        rdata = _Rdata
+
+    class _Bare(_Prm):
+        rdata = type("R", (), {"wholeMsg": "MESSAGE sip:mcu@host SIP/2.0"})
+
+    svc.on_instant_message(None, _Bare)
+    assert svc.history == []
 
 
 def test_on_instant_message_status_delivered():

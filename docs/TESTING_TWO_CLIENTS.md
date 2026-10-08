@@ -13,6 +13,7 @@
 | **2a. Видео** (`scripts/testbed/run_two_instance_video_test.sh`) | Нужно проверить видеопоток без камеры | `call.video active=True` на обоих концах |
 | **2b. DTMF** (`scripts/testbed/run_two_instance_dtmf_test.sh`) | Нужно проверить тоны (набор номера зала, IVR/PIN) | `[+] DTMF MCU<->MCU OK`, вся строка тонов у адресата |
 | **2c. Interop** (`scripts/testbed/run_two_instance_interop_test.sh`) | Меняли `sip.interop` / настройки аккаунта | CONFIRMED при `prack: mandatory` + `session_timer: required` + `rtcp_mux: on` |
+| **2d. Чат** (`scripts/testbed/run_two_instance_chat_test.sh`) | Меняли приём/отправку SIP MESSAGE | `[+] CHAT MCU<->MCU OK`, текст у адресата посимвольно равный отправленному |
 | **3. Браузер** (`--web`, `aiortc`) | Нужно проверить web-конференцию (BBB-подобно) | вход по имени, публикация своей камеры/микрофона, раздача видео и аудио другим браузерам |
 
 Оба пути используют **один и тот же код** из рабочего дерева.
