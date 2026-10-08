@@ -51,8 +51,10 @@ def main() -> int:
     started = rec.start_recording("verify.mp4")
     report["started"] = started
     if not started:
-        report["result"] = "FAIL"; report["reason"] = "запись не стартовала"
-        print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
+        report["result"] = "FAIL"
+        report["reason"] = "запись не стартовала"
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1
 
     time.sleep(REC_SECONDS)
     stopped = rec.stop_recording()
@@ -60,8 +62,10 @@ def main() -> int:
     path = rec.current_file
     report["file"] = str(path) if path else None
     if not path or not path.exists():
-        report["result"] = "FAIL"; report["reason"] = "файл не создан"
-        print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
+        report["result"] = "FAIL"
+        report["reason"] = "файл не создан"
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 1
 
     info = _probe(path)
     report["probe"] = info

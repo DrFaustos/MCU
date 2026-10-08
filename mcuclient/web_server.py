@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +37,6 @@ from urllib.parse import parse_qs, urlparse
 from .log import get_logger
 from .video_stream import FrameHub
 from .webrtc_ingest import (
-    WEBRTC_AVAILABLE,
     WebRTCError,
     WebRTCManager,
     make_frame_hub_sink,
@@ -46,6 +44,9 @@ from .webrtc_ingest import (
 from .webrtc_sfu import AudioMixSession, Conference
 from .web_recorder import WebRecorder
 from .sip_web_bridge import SipWebAudioBridge
+# TLS-хелперы — в отдельном модуле (единый источник, тестируется без сокетов).
+from .tls_utils import ensure_self_signed as _ensure_self_signed
+from .tls_utils import make_ssl_context as _make_ssl_ctx
 
 if TYPE_CHECKING:  # только аннотации: эти модули подключаются лениво
     from .mediasoup_rtp_bridge import MediasoupRtpBridge
@@ -1786,10 +1787,6 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
         ice_servers=getattr(config, "web_ice_servers", None),
     )
 
-
-
-# TLS-хелперы — в отдельном модуле (единый источник, тестируется без сокетов).
-from .tls_utils import ensure_self_signed as _ensure_self_signed, make_ssl_context as _make_ssl_ctx
 
 
 def ensure_self_signed_cert(certfile=None, keyfile=None, host="localhost"):

@@ -17,7 +17,7 @@ from typing import Callable, List, Optional
 
 from .log import get_logger
 from .screen_share import ScreenSharer
-from .video_source import SourceInfo, VideoSourceSwitcher, available as vs_available
+from .video_source import SourceInfo, VideoSourceSwitcher
 
 log = get_logger("vsource")
 

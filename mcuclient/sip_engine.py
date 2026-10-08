@@ -14,7 +14,6 @@ from .media_devices import (
     MediaManager,
     MediaState,
     build_state,
-    enumerate_devices,
 )
 from .adaptive_bitrate import AbrConfig
 from .abr_service import AbrService
@@ -29,7 +28,6 @@ from .sip_address import (
     AddressReport,
     local_host_ip,
     resolve_identity,
-    sanitize_sip_user,
 )
 from .sip_registration import (
     RegistrationManager,
@@ -42,6 +40,28 @@ from .call_service import CallService
 from .video_source_service import VideoSourceService
 from .video_preview_service import VideoPreviewService
 from .layout_service import LayoutService
+
+# Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
+# _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости:
+# стенды и run.py делают `from mcuclient.sip_engine import PJSIP_AVAILABLE`.
+from .pjsip_adapter import (  # noqa: F401
+    PJSIP_AVAILABLE,
+    StubEndpoint as _StubEndpoint,
+    account_ready,
+    endpoint_ready,
+    is_available,
+    pj as _pj,
+)
+
+# Доменные модели вынесены в mcuclient/models.py; реэкспорт сохраняет
+# обратную совместимость: from .sip_engine import Participant, CallState.
+from .models import (  # noqa: F401
+    CallState,
+    EventBus,
+    EventCallback,
+    Participant,
+    Room,
+)
 
 log = get_logger("sip")
 
@@ -142,28 +162,6 @@ HOLD_TYPE_CONST_BY_NAME = {
     "rfc2543": "PJSUA_CALL_HOLD_TYPE_RFC2543",
 }
 HOLD_TYPE_DEFAULT_BY_NAME = {"rfc3264": 0, "rfc2543": 1}
-
-# Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
-# _pj и PJSIP_AVAILABLE реэкспортируются для обратной совместимости.
-from .pjsip_adapter import (  # noqa: F401
-    PJSIP_AVAILABLE,
-    StubEndpoint as _StubEndpoint,
-    account_ready,
-    endpoint_ready,
-    is_available,
-    pj as _pj,
-)
-
-# Доменные модели вынесены в mcuclient/models.py; реэкспорт сохраняет
-# обратную совместимость: from .sip_engine import Participant, CallState.
-from .models import (  # noqa: F401
-    CallState,
-    EventBus,
-    EventCallback,
-    Participant,
-    Room,
-)
-
 
 def _iter_error_ints(exc: BaseException):
     """Перебрать целочисленные коды, которые несёт исключение.

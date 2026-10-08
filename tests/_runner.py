@@ -36,7 +36,7 @@ _SENTINEL = object()
 
 def skip_signal(exc) -> str:
     """Причина пропуска, если exc — pytest-сигнал Skipped; иначе пусто.
-    
+
     pytest.skip() и pytest.importorskip() бросают Skipped, а он — наследник
     BaseException, а не Exception, поэтому `except Exception` его не видит и
     честный пропуск вешает весь прогон: на машине без pjsua2 зелёный набор

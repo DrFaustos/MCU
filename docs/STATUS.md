@@ -77,6 +77,38 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — ruff-«стиль» в CI перестал быть декоративным: 27 нарушений разобрано
+
+Второй шаг-заглушка (`ruff check . --select E,F,W --ignore E501 || true`) держал
+27 нарушений, все разобраны по существу, а не заглушены `# noqa`:
+
+* 14 F401 — неиспользуемые импорты (штатный фиксер `ruff --fix`, правки
+  проверены построчно). Два из них выглядели как «реэкспорт для совместимости»,
+  но таковыми не были: `sip_engine.enumerate_devices` / `sip_engine.sanitize_sip_user`
+  не перечислены в `__all__` и никем из `sip_engine` не импортировались
+  (реальные точки — `device_service`, `doctor`, `config`), поэтому удалены.
+  Настоящие реэкспорты (`PJSIP_AVAILABLE`, `_pj`, `Participant`, `CallState`)
+  помечены `# noqa: F401` и сохранены: их читают `run.py` и восемь стендов;
+* 8 E702 — `;`-инструкции (`self._x = v; return v`) развёрнуты в обычные строки
+  в `tests/test_web_http.py` и `scripts/testbed/verify_video_recording.py`;
+* 3 E402 — импорты, опущенные в конец файла, перенесены в шапку:
+  в `sip_engine.py` (`pjsip_adapter`, `models`) и в `web_server.py`
+  (`tls_utils`). Циклов не возникло: `models.py` и `pjsip_adapter.py` тянут
+  только `log`, `tls_utils.py` про `web_server` не знает — импорт пакета
+  проверен боевым интерпретатором (`PJSIP_AVAILABLE` по-прежнему доезжает);
+* 2 W293 — пробелы в «пустых» строках внутри docstring. `ruff --fix` отказался
+  чинить их безопасным фиксом (фикс помечен unsafe), убраны точечно.
+
+Шаг `ruff` (стиль) переведён из `|| true` в **блокирующий**, версия ruff в CI
+зафиксирована (`ruff==0.16.*`): новый релиз линтера приносит новые правила и
+покраснил бы блокировку в коде, которого не касались.
+
+Проверки боевым `/usr/bin/python3`: `tests/_runner.py` → **1031 passed, 0 failed,
+0 skipped, RC=0**; `pytest` по затронутым файлам (sip_engine, web, runner, tls,
+dtmf, video) → RC=0; `ruff check . --select E,F,W --ignore E501` → **0 ошибок**;
+`ruff check . --select F821,F811,F841,E9` → RC=0; `mypy mcuclient` → 0 ошибок;
+`import mcuclient.sip_engine, mcuclient.web_server` → OK.
+
 ### 2026-10-08 — `mypy mcuclient` вычищен до нуля: под предупреждениями сидели три живых дефекта
 
 Продолжение разбора типов. `mypy mcuclient --ignore-missing-imports`: **39 → 0**

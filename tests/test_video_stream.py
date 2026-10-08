@@ -7,7 +7,7 @@ import zlib
 
 from mcuclient.models import EventBus, Room
 from mcuclient.video_source import VideoSourceSwitcher
-from mcuclient.video_stream import FrameHub, encode_jpeg, encode_png
+from mcuclient.video_stream import FrameHub, encode_png
 from mcuclient.web_server import WebSession
 
 

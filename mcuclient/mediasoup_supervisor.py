@@ -22,7 +22,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Optional
 
 from .log import get_logger
 

@@ -7,9 +7,7 @@ TLS **выключен по умолчанию**: обычный HTTP, без п
 
 from __future__ import annotations
 
-import shutil
 import ssl
-import subprocess
 
 from mcuclient.config import DEFAULT_CONFIG, _deep_merge, load_config
 from mcuclient.tls_utils import (

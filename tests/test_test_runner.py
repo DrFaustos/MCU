@@ -212,7 +212,7 @@ def test_runner_collect_only_does_not_execute(tmp_path):
 
 def test_runner_covers_every_case_pytest_collects(tmp_path):
     """Покрытие раннера обязано совпадать с pytest по числу кейсов.
-    
+
     Второй сбой раннера был именно в потере файлов молча. Без pytest
     тест пропускается: на CI раннер гоняют как раз без pytest, и требовать
     его здесь означало бы красный прогон по причине, к коду не относящейся.

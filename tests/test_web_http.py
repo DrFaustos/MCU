@@ -40,9 +40,13 @@ class _FakeEngine:
     def mute_participant_video(self, pid, muted): return True
     def mute_all_participants(self, muted): pass
     def layout(self): return self._layout
-    def set_layout(self, layout): self._layout = layout; return layout
+    def set_layout(self, layout):
+        self._layout = layout
+        return layout
     def is_recording(self): return self._recording
-    def toggle_recording(self): self._recording = not self._recording; return self._recording
+    def toggle_recording(self):
+        self._recording = not self._recording
+        return self._recording
     def recording_file(self): return None
     def send_message(self, pid, text): return True
     @property
@@ -61,9 +65,13 @@ class _FakeEngine:
     def set_camera_enabled(self, enabled): return True
     def set_microphone_enabled(self, enabled): return True
     def video_send_enabled(self): return self._video_send
-    def set_video_send_enabled(self, enabled): self._video_send = bool(enabled); return self._video_send
+    def set_video_send_enabled(self, enabled):
+        self._video_send = bool(enabled)
+        return self._video_send
     def screen_share_enabled(self): return self._screen
-    def set_screen_share_enabled(self, enabled): self._screen = bool(enabled); return self._screen
+    def set_screen_share_enabled(self, enabled):
+        self._screen = bool(enabled)
+        return self._screen
     def set_video_source(self, kind, device=None): pass
     def current_video_source(self): return "camera"
     def _register_pjsip_thread(self, name): pass

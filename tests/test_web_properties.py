@@ -8,7 +8,7 @@ SipEngine: часть API — свойства, часть — методы.
 
 from __future__ import annotations
 
-from mcuclient.models import CallState, EventBus, Participant, Room
+from mcuclient.models import EventBus, Room
 from mcuclient.web_server import WebSession
 
 
