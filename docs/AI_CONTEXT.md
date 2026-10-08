@@ -437,6 +437,47 @@ RED-проверка отдельного вида: отключать guard н�
 иначе настоящие тонут в ложных. После слайса `mypy mcuclient`: 63 → 39,
 `sip_engine.py` — 0.
 
+### 3.19. Фейк обязан повторять форму реального объекта, а не предположение кода (исправлено)
+
+Чат (SIP MESSAGE) жил в движке с коммита `7f29c62`, а в `docs/STATUS.md`
+числился `❌`. Причина — два дефекта, которые кормились **собственными
+фейками**: тест повторял то же неверное предположение, что и код, и оставался
+зелёным поверх падающего рантайма.
+
+1. `ChatService.on_instant_message` читал `prm.rdata.wholeMsg`. На боевом
+   pjsua2 2.16 у `OnInstantMessageParam` есть `msgBody` (это текст) и `rdata`
+   (`SipRxData.wholeMsg` = ВЕСЬ пакет: стартовая строка, заголовки, тело). В
+   историю уходило 125 символов с `MESSAGE sip:…`, `Via:`, `Content-Type:`
+   вместо «привет из терминала». Фейк в тесте объявлял ровно эту неверную
+   форму: `class rdata: wholeMsg = "входящее"`.
+2. `_chat_to_dict` в `web_server.py` читал `text`/`direction`/`timestamp`
+   через `getattr(obj, name, "")`, а у доменного `ChatMessage` поля —
+   `content`/`outgoing`/`ts`/`sender`. `getattr` с default **молча** даёт
+   пустоту: `GET /api/chat` отдавал список пустых сообщений при наполненной
+   истории. HTTP-фейк возвращал `chat_history == []`, то есть ничего не
+   проверял.
+
+Правила:
+
+* форму фейка сверять с реальностью, а не с кодом: `dir()`/`help()` на
+  нативном модуле (`pjsua2.OnInstantMessageParam`) и `as_dict()` доменного
+  объекта — до того, как писать заглушку;
+* `getattr(obj, "имя", default)` над доменной моделью — точка, где тихо
+  умирает фича. Если имена домена и UI расходятся, нужен **явный маппинг**
+  (`_chat_to_dict` теперь строит `{timestamp, sender, direction, text,
+  status}` из `as_dict()`), а не перебор «похожих» имён;
+* HTTP-тест обязан наполнять историю НАСТОЯЩИМИ доменными объектами
+  (`ChatMessage`), а не удобными словарями и не `[]`;
+* юнит-тесты не видят, **какое значение** доехало до второй стороны. Для чата
+  — как и для DTMF-очереди — нужен сквозной стенд:
+  `PYTHON=/usr/bin/python3 scripts/testbed/run_two_instance_chat_test.sh` →
+  `[+] CHAT MCU<->MCU OK`, `статус доставки: delivered`.
+
+Регрессии: `test_on_instant_message_never_stores_sip_headers`,
+`test_on_instant_message_without_body_is_ignored`,
+`test_on_instant_message_body_without_headers_fallback_is_empty`,
+`tests/test_web_http.py::test_api_chat_history_carries_real_text`.
+
 ### 3.7. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные
 расходы только при DEBUG.
