@@ -77,6 +77,32 @@
 
 ## Журнал исправлений
 
+### 2026-10-08 — аудит рассогласования кодеков не выполнялся ни разу
+
+`SipEngine._log_negotiated_codecs` обращался к конфигу как к методу:
+`supported_audio_from_config(self.config.audio_codecs())`, хотя `audio_codecs`
+и `video_codecs` — это `@property` (`mcuclient/config.py`). Скобки давали
+`TypeError: 'list' object is not callable`, его проглатывал `except Exception`
+с логом на DEBUG — и `log_codec_mismatch` **не вызывался ни разу**. То есть
+аудит «почему кодек не согласован», заведенный ровно под «терминал соединился,
+звука нет» (Sony/Polycom, см. запись от 2026-10-06), молчал всегда. Тот же
+класс ошибки, что и в web-слое (2026-09-26: `layout`/`is_recording` вызывали
+как методы) — свойство с скобками падает не там, где выглядит сломанным.
+
+* `mcuclient/sip_engine.py`: обращения исправлены на `self.config.audio_codecs`
+  / `self.config.video_codecs`, рядом — комментарий, что это свойства; место
+  проверяется тестом-стражем, а не надеждой на обзор.
+* Аннотация `self._answer_dispatch` переведена с `# type:`-комментария на
+  обычную: импорт `Callable` стал виден линтеру (раньше считался неиспользуемым).
+* Тесты: `test_codec_audit_reaches_mismatch_report` — на старом коде RED
+  («log_codec_mismatch не вызван», 0 == 1), на новом GREEN;
+  `test_config_codecs_are_properties_not_methods` — страж причины
+  (`type(cfg).__dict__[name]` обязан быть `property`).
+
+Проверки боевым `/usr/bin/python3`: `pytest tests/test_sip_engine_media_state.py`
+→ **11 passed**; `/usr/bin/python3 tests/_runner.py` → **1024 passed, 0 failed,
+0 skipped, RC=0**.
+
 ### 2026-10-08 — GUI: закрытие окна не останавливало движок, а движок гасил переключатель web-панели
 
 У `MainWindow` в `mcuclient/ui.py` потерялся заголовок `def closeEvent(self, event)`:

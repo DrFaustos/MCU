@@ -163,6 +163,51 @@ def test_handler_and_codec_helper_exist():
     assert callable(se.SipEngine._log_negotiated_codecs)
 
 
+def test_codec_audit_reaches_mismatch_report(monkeypatch):
+    """Разбор «почему кодек не согласован» обязан реально доходить до отчёта.
+
+    Был мёртвый код: `self.config.audio_codecs()` — а `audio_codecs` это
+    @property (mcuclient/config.py:938). Скобки давали
+    TypeError("'list' object is not callable"), его проглатывал
+    `except Exception` на уровне DEBUG, и `log_codec_mismatch` не вызывался
+    НИ РАЗУ. Для Sony/Polycom («терминал соединился, звука нет») это ровно та
+    диагностика, ради которой аудит и делали.
+    """
+    import mcuclient.codec_negotiation as cn
+
+    seen: list = []
+    monkeypatch.setattr(cn, "log_codec_mismatch",
+                        lambda ci, codecs, audio_supported, video_supported:
+                        seen.append((ci, codecs, audio_supported, video_supported)))
+
+    engine = se.SipEngine(load_config(None))
+    engine._log_negotiated_codecs(SimpleNamespace(id=1, media=[]))
+
+    assert len(seen) == 1, (
+        "log_codec_mismatch не вызван: аудит падает внутри себя и молча "
+        "глотается except (см. историю с audio_codecs())")
+    _ci, _codecs, audio_supported, video_supported = seen[0]
+    # Списки coming из конфига: пустой список означал бы, что до compare не дошли
+    assert isinstance(audio_supported, list) and isinstance(video_supported, list)
+    assert audio_supported or video_supported, (
+        f"списки кодеков пустые: audio={audio_supported}, video={video_supported}")
+
+
+def test_config_codecs_are_properties_not_methods():
+    """Страж причины: `audio_codecs`/`video_codecs` — свойства, не методы.
+
+    Единственный вызов с скобками (`config.audio_codecs()`) живёт ровно в одном
+    месте и уже ломал аудит. Если property когда-нибудь станет методом — тест
+    напомнит, что править надо всех потребителей, а не молча ловить TypeError.
+    """
+    cfg = load_config(None)
+    for name in ("audio_codecs", "video_codecs"):
+        attr = type(cfg).__dict__.get(name)
+        assert isinstance(attr, property), (
+            f"Config.{name} больше не property — проверьте все обращения")
+        assert isinstance(getattr(cfg, name), list)
+
+
 def test_real_codec_helper_runs_without_pjsip():
     """Настоящий `_log_negotiated_codecs` не падает без pjsua2 и с пустым SDP.
 

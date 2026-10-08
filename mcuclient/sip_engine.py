@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .config import Config
 from .log import get_logger
@@ -430,7 +430,9 @@ class SipEngine:
             set_video_device=self.set_video_device,
             get_video_xid=self._registry.get_video_xid,
         )
-        self._answer_dispatch = None  # type: Optional[Callable[[int], None]]
+        # Аннотация обычная, а не `# type:`-комментарием: линтер не читает
+        # комментарии и помечал импорт Callable неиспользуемым.
+        self._answer_dispatch: Optional[Callable[[int], None]] = None
         self._CallClass = None  # подкласс pj.Call
         # Держим ссылки на живые Call-объекты: иначе GC соберёт их до
         # libDestroy(), и pjsua2 упадёт с assertion (pjsua_call_set_user_data).
@@ -1286,11 +1288,16 @@ class SipEngine:
                 supported_audio_from_config,
                 supported_video_from_config,
             )
+            # ВНИМАНИЕ: audio_codecs/video_codecs — @property, а не метод.
+            # Скобки давали TypeError("'list' object is not callable"), его
+            # проглатывал except ниже, и разбор «почему кодек не согласован»
+            # не выполнялся НИ РАЗУ (регрессия —
+            # tests/test_sip_engine_media_state.py::test_codec_audit_reaches_report).
             log_codec_mismatch(
                 ci,
                 codecs,
-                supported_audio_from_config(self.config.audio_codecs()),
-                supported_video_from_config(self.config.video_codecs()),
+                supported_audio_from_config(self.config.audio_codecs),
+                supported_video_from_config(self.config.video_codecs),
             )
         except Exception:  # noqa: BLE001
             log.debug("active_codecs: ошибка", exc_info=True)

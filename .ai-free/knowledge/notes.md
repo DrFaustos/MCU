@@ -245,3 +245,24 @@ CI-шаг `ruff check . --select F821,F811,F841,E9` — блокирующий; 
 по имени); порядок остановок проверять по `lineno`, `ast.walk` порядок не даёт.
 `|| true` на линтере = проверки нет.
 <!-- source: agent -->
+
+## Мёртвый код под широким except: config.audio_codecs — property, не метод
+
+`SipEngine._log_negotiated_codecs` звал `self.config.audio_codecs()` → TypeError
+"'list' object is not callable" (audio_codecs/video_codecs — @property,
+mcuclient/config.py:938). Его глушил `except Exception: log.debug(...)` — и
+log_codec_mismatch не вызывался НИ РАЗУ: для Sony/Polycom («соединился, звука нет»)
+не было той диагностики, ради которой аудит писали. Нашлось только `mypy mcuclient`
+("list[str]" not callable), не тестами: прежний тест проверял лишь «не бросает», а
+глотатель исключений гарантировал зелёный.
+
+Правила: config.<attr>() в пакете быть не должно (проверка
+`grep -oE "config\.[a-z_]+\(\)" --include=*.py mcuclient`); тесты рядом с широким
+except обязаны подтверждать ФАКТ — подписывать collaborator и требовать непустых
+аргументов (tests/test_sip_engine_media_state.py::test_codec_audit_reaches_mismatch_report).
+`# type:`-комментарий линтер не видит → импорт «неиспользуемый» (F401) и
+name-defined у mypy; аннотации писать обычным синтаксисом.
+
+mypy по mcuclient: 92 ошибки (после правки 88) — там реальные дефекты, а не только
+шум; в CI шаг не блокирует, запускать руками при правках sip_engine/web_server/ui.
+<!-- source: agent -->
