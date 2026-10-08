@@ -6,13 +6,19 @@
 #   docker compose up -d --build
 #   docker compose logs -f mediasoup
 
+#
+# Две стойки на одной машине (worktree линий sip и h323): задайте в .env
+# MCU_STACK_NAME, MCU_MEDIASOUP_HTTP_PORT, TURN_LISTEN_PORT и свой диапазон
+# RTC-портов - иначе столкнутся compose-проект, имена контейнеров и хост-порты.
+name: ${MCU_STACK_NAME:-mcu}-sfu
+
 services:
   mediasoup:
     build:
       context: ../..
       dockerfile: docker/mediasoup-sidecar.Dockerfile
-    image: mcu-mediasoup:local
-    container_name: mcu-mediasoup
+    image: ${MCU_STACK_NAME:-mcu}-mediasoup:local
+    container_name: ${MCU_STACK_NAME:-mcu}-mediasoup
     restart: unless-stopped
     environment:
       MCU_MEDIASOUP_HOST: "0.0.0.0"
@@ -24,7 +30,7 @@ services:
       MCU_MEDIASOUP_LISTEN_IP: "0.0.0.0"
       MEDIASOUP_LOG_LEVEL: "${MEDIASOUP_LOG_LEVEL:-warn}"
     ports:
-      - "127.0.0.1:4443:4443"
+      - "127.0.0.1:${MCU_MEDIASOUP_HTTP_PORT:-4443}:4443"
       - "${MCU_MEDIASOUP_RTC_MIN:-40000}-${MCU_MEDIASOUP_RTC_MAX:-40100}:${MCU_MEDIASOUP_RTC_MIN:-40000}-${MCU_MEDIASOUP_RTC_MAX:-40100}/udp"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4443/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -35,7 +41,7 @@ services:
 
   coturn:
     image: coturn/coturn:4.6
-    container_name: mcu-coturn
+    container_name: ${MCU_STACK_NAME:-mcu}-coturn
     restart: unless-stopped
     network_mode: host
     environment:
@@ -49,3 +55,4 @@ services:
       - /etc/coturn/turnserver.conf
       - --external-ip=${ANNOUNCED_IP}
       - --user=${TURN_USER:-mcu}:${TURN_PASSWORD}
+      - --listening-port=${TURN_LISTEN_PORT:-3478}
