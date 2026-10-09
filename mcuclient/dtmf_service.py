@@ -110,6 +110,9 @@ class DtmfService:
         # (так ведёт себя pjsua2 2.16). События точнее (у них есть флаги),
         # поэтому digit-колбэк используем как запасной путь.
         self._event_cb_seen = False
+        #: Тон, чей end-пакет ещё не приходил (см. on_dtmf_event). None —
+        #: ни один тон не открыт, и следующий begin значит новый тон.
+        self._open_tone: Optional[str] = None
 
     @property
     def history(self):
@@ -117,6 +120,7 @@ class DtmfService:
 
     def clear_history(self) -> None:
         self._history.clear()
+        self._open_tone = None
 
     # ------------------------------------------------------------- отправка
 
@@ -272,16 +276,33 @@ class DtmfService:
         """Входящий DTMF (onDtmfEvent): каждый RTP-пакет telephone-event.
 
         pjsua2 зовёт этот колбэк на КАЖДЫЙ пакет RFC 4733, а один тон —
-        это begin + N повторов + end. Пишем в историю только begin, иначе
-        оператор увидит «111111111» вместо «1».
+        это begin + N повторов + end. Пишем начало тона и держим его
+        открытым до end-пакета. Фильтр «begin = новый тон» не годится:
+        pjsua2 пересылает ПЕРВЫЙ пакет тона дважды (поймано стендом
+        MCU<->MCU), второй пакет приходит с flags=0, и дубликат тона
+        ложился в историю: IVR получал «11984#» вместо «1984#».
         """
         self._event_cb_seen = True
         digit = str(getattr(prm, "digit", "") or "")
         if not digit:
             return
         flags = int(getattr(prm, "flags", 0) or 0)
+        ends = bool(flags & DTMF_EVENT_FLAG_END)
+        if self._open_tone is not None:
+            # Тон открыт: end ещё не приходил. Бит MORE здесь ни при чём —
+            # повторный пакет первого тона приходит именно с flags=0.
+            if ends:
+                self._open_tone = None
+            elif digit != self._open_tone:
+                # Тон сменился, не дождавшись end (шлюзы, теряющие end-пакет).
+                # Смолчать тут — потерять половину номера зала; набор «11» не
+                # страдает: у повтора того же тона digit совпадает.
+                self._open_tone = digit
+                self._record(digit, call, prm)
+            return
         if flags & DTMF_EVENT_FLAG_MORE:
-            return  # повтор длящегося тона
+            return  # повтор без start: записывать нечего
+        self._open_tone = digit
         self._record(digit, call, prm)
 
     def on_dtmf_digit(self, call, prm) -> None:  # pragma: no cover

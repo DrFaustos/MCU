@@ -84,7 +84,10 @@ def main(argv: list[str]) -> int:
         print("[+] CONFIRMED (входящий)", flush=True)
         # Тоны приходят RTP-пакетами: без pump их не обработает ни один
         # колбэк.
-        pump(engine, 15, lambda: len(_incoming_tones(events)) >= len(TONES))
+        # Ждём СОВПАДЕНИЯ, а не длины: при дубликате первого тона длина
+        # выбиралась раньше, чем приходил «#», и отчёт врал, будто потерян
+        # последний тон (на деле — лишний первый).
+        pump(engine, 15, lambda: _incoming_tones(events) == TONES)
         heard = _incoming_tones(events)
         if heard == TONES:
             print(f"[+] DTMF приняты: {heard}", flush=True)

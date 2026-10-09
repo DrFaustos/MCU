@@ -393,6 +393,47 @@ def test_full_stream_matches_real_pjsua2_sequence():
     assert [e.digits for e in svc.history] == ["1", "9", "8", "4", "#"]
 
 
+def test_duplicate_begin_is_not_a_new_tone():
+    """pjsua2 пересылает первый пакет тона дважды (поймано стендом).
+
+        Сырой лог реального вызова MCU<->MCU для тона «1»:
+        event(0) digit event(0) digit event(1) event(1) event(1) event(3).
+        Фильтр «begin = новый тон» считал второй begin новым тоном,
+        и в истории появлялся дубликат: IVR получал «11984#» вместо «1984#».
+    """
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    svc.on_dtmf_event(call, _EvPrm("1", flags=0))
+    svc.on_dtmf_digit(call, _DigPrm("1"))
+    svc.on_dtmf_event(call, _EvPrm("1", flags=0))     # дубликат begin
+    svc.on_dtmf_digit(call, _DigPrm("1"))
+    for flags in (1, 1, 1, 3):
+        svc.on_dtmf_event(call, _EvPrm("1", flags=flags))
+    assert [e.digits for e in svc.history] == ["1"]
+
+
+def test_same_digit_after_end_is_a_second_tone():
+    """Набор «11» законен: тон закрыт end — следующий begin новый."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    svc.on_dtmf_event(call, _EvPrm("1", flags=0))
+    svc.on_dtmf_event(call, _EvPrm("1", flags=3))
+    svc.on_dtmf_event(call, _EvPrm("1", flags=0))
+    svc.on_dtmf_event(call, _EvPrm("1", flags=3))
+    assert [e.digits for e in svc.history] == ["1", "1"]
+
+
+def test_tone_change_without_end_is_a_new_tone():
+    """Шлюз потерял end: следующий тон обязан записаться,
+    иначе половина набора номера зала молча пропадёт."""
+    call = _Call()
+    _, svc = _service([_Participant(1, call)])
+    svc.on_dtmf_event(call, _EvPrm("1", flags=0))
+    svc.on_dtmf_event(call, _EvPrm("1", flags=1))     # end потерян
+    svc.on_dtmf_event(call, _EvPrm("9", flags=0))
+    assert [e.digits for e in svc.history] == ["1", "9"]
+
+
 def test_digit_callback_used_when_no_events():
     """Сборки без onDtmfEvent: запасной путь по onDtmfDigit работает."""
     call = _Call()
