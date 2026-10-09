@@ -89,13 +89,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Shellcheck dev scripts (syntax)
+      - name: Shell syntax check (все .sh из репозитория)
+        # Покрытие берётся из git ls-files, а не из перечня: перечнем оно
+        # отстаёт молча — новому файлу неоткуда узнать, что его надо
+        # добавить. Страж: tests/test_ci_shell_coverage.py.
         run: |
-          for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/testbed/lib/*.sh \
-                   scripts/run_gui.sh \
-                   scripts/install_h323plus.sh scripts/build_h323d.sh; do
+          count=0
+          while IFS= read -r -d "" f; do
             bash -n "$f" && echo "OK  $f" || { echo "FAIL $f"; exit 1; }
-          done
+            count=$((count + 1))
+          done < <(git ls-files -z "*.sh")
+          if [ "$count" -eq 0 ]; then
+            echo "git ls-files не вернул ни одного .sh — покрытие не работает"
+            exit 1
+          fi
+          echo "проверено shell-скриптов: $count"
 
       - name: Testbed wrapper guards (stand.sh contract)
         # каждая обёртка two_instance обязана проверять pjsua2 ДО
