@@ -9,8 +9,9 @@ SmartScreen, которые часто ругаются на «безымянн�
     python build.py --onedir        # папка вместо одного файла
                                     # (меньше ложных срабатываний AV)
     python build.py --console       # + отладочная сборка с консолью
+    python build.py --debug         # + отдельный DEBUG-бинарник (MCU_DEBUG=1)
     python build.py --debug-only    # ТОЛЬКО debug-бинарник (расширенный лог)
-    python build.py --appimage      # + AppImage (только Linux)
+    python build.py --appimage      # + AppImage (только Linux; не с --onedir/--debug-only)
     python build.py --allow-no-pjsip
 """
 
@@ -233,6 +234,26 @@ def main(argv: list[str] | None = None) -> None:
     debug_only = "--debug-only" in args
     want_debug = "--debug" in args or debug_only
     onedir = "--onedir" in args
+
+    # Отказ — ДО долгих шагов (проверка pjsua2, установка PyInstaller, сам
+    # PyInstaller). Связка «--appimage + --onedir/--debug-only» раньше молча
+    # собирала один артефакт вместо двух: ветка `want_appimage and not onedir`
+    # при onedir не собирала AppImage вообще, а --debug-only делает return из
+    # main() раньше, чем доходит до AppImage. Разрешить комбо нельзя:
+    # build_appimage копирует в AppDir ОДИН файл, поэтому из onedir-папки
+    # вышел бы нерабочий артефакт. Молчание оператор читает как успех —
+    # поэтому теперь явный SystemExit с причиной и обходным прогоном.
+    if want_appimage and (onedir or debug_only):
+        clash = "--onedir" if onedir else "--debug-only"
+        raise SystemExit(
+            f"[x] --appimage нельзя совместить с {clash}.\n"
+            "      AppImage упаковывает onefile-бинарник: build_appimage\n"
+            "      копирует в AppDir один файл, и из --onedir-папки вышел бы\n"
+            "      нерабочий артефакт; --debug-only завершает main() раньше,\n"
+            "      чем доходит до AppImage. Собери двумя прогонами:\n"
+            "        python build.py --appimage\n"
+            "        python build.py --debug-only"
+        )
 
     log("[+] Начало сборки MCU Client...")
     ensure_pjsua2(allow_missing=allow_no_pjsip)

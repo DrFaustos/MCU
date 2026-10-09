@@ -453,7 +453,8 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 Локальная сборка:
 
     python build.py                 # нативный бинарник в dist/
-    python build.py --appimage      # + AppImage (только Linux)
+    python build.py --appimage      # + AppImage (только Linux;
+                                    #   не с --onedir/--debug-only)
     ./packaging/build_flatpak.sh    # + Flatpak (нужен flatpak-builder)
 
 CI (`.github/workflows/release.yml`) при пуше тега `v*` собирает **только
