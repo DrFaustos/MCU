@@ -453,7 +453,7 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 Локальная сборка:
 
     python build.py                 # нативный бинарник в dist/
-    python build.py --appimage      # + AppImage (только Linux;
+    python build.py --appimage      # + AppImage (только Linux x86_64;
                                     #   не с --onedir/--debug-only)
     ./packaging/build_flatpak.sh    # + Flatpak (нужен flatpak-builder)
 

@@ -11,7 +11,8 @@ SmartScreen, которые часто ругаются на «безымянн�
     python build.py --console       # + отладочная сборка с консолью
     python build.py --debug         # + отдельный DEBUG-бинарник (MCU_DEBUG=1)
     python build.py --debug-only    # ТОЛЬКО debug-бинарник (расширенный лог)
-    python build.py --appimage      # + AppImage (только Linux; не с --onedir/--debug-only)
+    python build.py --appimage      # + AppImage (только Linux x86_64;
+                                    #   не с --onedir/--debug-only)
     python build.py --allow-no-pjsip
 """
 
@@ -173,18 +174,49 @@ def _download_appimagetool(dest: Path) -> Path:
 
 def _ensure_appimage_tools() -> None:
     if shutil.which("file") is None:
-        raise RuntimeError(
+        raise SystemExit(
             "Не найдена утилита 'file', необходимая appimagetool.\n"
             "  Debian/Ubuntu: sudo apt-get install -y file"
         )
 
 
+#: Архитектуры, для которых существует appimagetool из APPIMAGETOOL_URL.
+#: platform.machine() пишет их по-разному (Windows пишет AMD64), поэтому
+#: сверяется строка в нижнем регистре.
+APPIMAGE_ARCHES = {"x86_64", "amd64"}
+
+
+def _ensure_appimage_host() -> None:
+    """AppImage доступен только на Linux x86_64 - сказать это нужно сразу.
+
+    Проверки жили внутри build_appimage, а main() зовёт его ПОСЛЕ
+    build_binary: на чужой ОС или архитектуре PyInstaller отрабатывал
+    минуты (и печатал «Сборка завершена!»), прежде чем оператор узнавал
+    о недоступности артефакта. Отказ - ДО ensure_pjsua2 и
+    ensure_pyinstaller, которые ещё и в сеть ходят.
+    """
+    system = platform.system()
+    if system != "Linux":
+        raise SystemExit(
+            f"[x] --appimage собирается только на Linux, сейчас: {system}.\n"
+            "      appimagetool - утилита Linux, AppDir пакует она.\n"
+            "      На этой ОС собери обычный бинарник:  python build.py"
+        )
+    machine = platform.machine().lower()
+    if machine not in APPIMAGE_ARCHES:
+        raise SystemExit(
+            f"[x] --appimage собирается только для x86_64, сейчас: {machine}.\n"
+            "      appimagetool берётся в сборке x86_64:\n"
+            f"      {APPIMAGETOOL_URL}\n"
+            "      Для этой архитектуры:  python build.py"
+        )
+    _ensure_appimage_tools()
+
+
 def build_appimage(binary: Path) -> Path:
-    if platform.system() != "Linux":
-        raise RuntimeError("AppImage можно собрать только на Linux")
+    _ensure_appimage_host()
     if not binary.exists():
         raise FileNotFoundError(f"Не найден бинарник: {binary}")
-    _ensure_appimage_tools()
 
     appdir = ROOT / "dist" / "AppDir"
     if appdir.exists():
@@ -254,6 +286,13 @@ def main(argv: list[str] | None = None) -> None:
             "        python build.py --appimage\n"
             "        python build.py --debug-only"
         )
+
+    # Платформа, архитектура и утилита file - тоже до долгих шагов:
+    # раньше все три проверки жили внутри build_appimage, который
+    # вызывается после build_binary, и на чужой машине оператор ждал
+    # минуты PyInstaller ради строки «эта платформа не подходит».
+    if want_appimage:
+        _ensure_appimage_host()
 
     log("[+] Начало сборки MCU Client...")
     ensure_pjsua2(allow_missing=allow_no_pjsip)

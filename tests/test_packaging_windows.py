@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import re
+import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
@@ -95,6 +96,21 @@ def _load_build():
     return module
 
 
+def _stub_host(monkeypatch, build, system="Linux",
+                  machine="x86_64", has_file=True):
+    """Платформа и утилиты фиктивные: тест не зависит от машины прогона.
+
+    Подменяются атрибуты самого модуля build, а не stdlib: иначе
+    monkeypatch чинил бы глобальный shutil и врал бы другим тестам. Без
+    подмены валидный путь --appimage падал бы ложно на машине, где нет
+    утилиты file.
+    """
+    monkeypatch.setattr(build, "platform", types.SimpleNamespace(
+        system=lambda: system, machine=lambda: machine))
+    which = (lambda name: "/usr/bin/" + name) if has_file else (lambda name: None)
+    monkeypatch.setattr(build, "shutil", types.SimpleNamespace(which=which))
+
+
 def _stub_build(monkeypatch):
     """Подмена долгих шагов: тест не ставит PyInstaller и ничего не собирает."""
     build = _load_build()
@@ -103,6 +119,7 @@ def _stub_build(monkeypatch):
     monkeypatch.setattr(build, "ensure_pyinstaller", lambda: calls.append("pyinstaller"))
     monkeypatch.setattr(build, "build_binary", lambda **kw: (calls.append("binary"), pathlib.Path("dist/none"))[1])
     monkeypatch.setattr(build, "build_appimage", lambda binary: (calls.append("appimage"), pathlib.Path("dist/none.AppImage"))[1])
+    _stub_host(monkeypatch, build)
     return build, calls
 
 
@@ -152,3 +169,38 @@ def test_documented_flags_are_implemented():
     body = text[text.index('"""', text.index('"""') + 3):]
     undocumented = sorted(flag for flag in documented if chr(34) + flag + chr(34) not in body)
     assert not undocumented, f"флаги обещаны, но нигде не читаются: {undocumented}"
+
+# --- build.py: платформенный отказ обязан случаться ДО сборки -----
+
+# Воспроизведено 2026-10-09 зондом с подменённой платформой: при
+# `build.py --appimage` на Windows порядок вызовов был
+# ensure_pjsua2 -> ensure_pyinstaller -> build_binary -> RuntimeError,
+# «сборка потрачена до отказа: True». Проверки ОС, архитектуры и file
+# жили внутри build_appimage, который main() зовёт после build_binary.
+
+
+def test_appimage_refuses_other_os_before_long_steps(monkeypatch):
+    build, calls = _stub_build(monkeypatch)
+    _stub_host(monkeypatch, build, system="Windows")
+    text = _system_exit_text(build, ["--appimage"])
+    assert "Windows" in text and "Linux" in text, text
+    assert "python build.py" in text, "нужен обход, а не только отказ: %s" % text
+    assert not calls, "отказ обязан быть до долгих шагов: %s" % (calls,)
+
+
+def test_appimage_refuses_other_arch_before_long_steps(monkeypatch):
+    """APPIMAGETOOL_URL жёстко x86_64: на aarch64 appimagetool не запустится."""
+    build, calls = _stub_build(monkeypatch)
+    _stub_host(monkeypatch, build, machine="aarch64")
+    text = _system_exit_text(build, ["--appimage"])
+    assert "aarch64" in text and "x86_64" in text, text
+    assert not calls, "отказ обязан быть до долгих шагов: %s" % (calls,)
+
+
+def test_appimage_refuses_without_file_tool_before_long_steps(monkeypatch):
+    """appimagetool требует утилиту file - сказать это надо до долгой сборки."""
+    build, calls = _stub_build(monkeypatch)
+    _stub_host(monkeypatch, build, has_file=False)
+    text = _system_exit_text(build, ["--appimage"])
+    assert "file" in text and "apt-get" in text, text
+    assert not calls, "отказ обязан быть до долгих шагов: %s" % (calls,)

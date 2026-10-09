@@ -76,6 +76,8 @@
 
 - `packaging/_debug_hook.py` — runtime-hook PyInstaller выставляет `MCU_DEBUG=1`.
 - `build.py --debug` → `MCU-Client-debug` (консольный, подробные логи).
+- --appimage требует Linux x86_64 и утилиту file (appimagetool выходит в
+  сборке x86_64); отказ наступает до шагов сборки, а не после PyInstaller.
 - --appimage нельзя совместить с --onedir или --debug-only: AppImage упаковывает
   onefile-бинарник, а --debug-only завершает main() раньше AppImage. Связка даёт
   явный отказ до шагов сборки; нужен и то, и другое — собирай двумя прогонами.
