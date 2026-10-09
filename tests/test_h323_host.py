@@ -9,10 +9,15 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _ipc_path import unix_socket_path  # noqa: E402
 from mcuclient.h323_host import (
     EVENT_MAP,
     H323HostClient,
@@ -173,8 +178,10 @@ def _fake_host(sock_path: str, received: list):
 def test_full_ipc_roundtrip():
     """Клиент подключается, получает события, шлёт команды — на реальном сокете."""
     received: list = []
-    with tempfile.TemporaryDirectory() as d:
-        sock_path = os.path.join(d, "mcu.sock")
+    # unix_socket_path, а не TemporaryDirectory: путь из TMPDIR агента/CI не
+    # влезает в sun_path (108 байт) и bind() падает до первой проверки.
+    with unix_socket_path(None, "mcu.sock") as sock_p:
+        sock_path = str(sock_p)
         t = threading.Thread(target=_fake_host, args=(sock_path, received), daemon=True)
         t.start()
         # ждём появления сокета

@@ -11,8 +11,14 @@
 // * принимать команды call.answer / call.reject / call.hangup / call.make /
 // ping / shutdown.
 //
-// Медиа (RTP/PCM) пока НЕ выводится в Python: H323Plus владеет им внутри
-// процесса. Проброс PCM — следующий шаг (см. tools/h323d/README.md).
+// Медиа (Этап 1м): H323Plus владеет RTP/кодеками внутри процесса, но PCM
+// оттуда больше НЕ уходит в PSoundChannel (микрофон/динамики хоста). Мы
+// переопределяем H323EndPoint::OpenAudioChannel и вешаем на кодек свой
+// McuPcmAudioChannel (кольцевой буфер PCM16 mono 8 кГц). Оттуда:
+//   * pcm.write — Python кладёт исходящий PCM (микрофон/тон) в encoder-канал;
+//   * pcm.read  — Python забирает входящий PCM (декодер) из decoder-канала;
+//   * --dump-pcm DIR — оба направления пишутся в WAV, чтобы медиа стало
+//     проверяемым вне Python (стенд h323_native_two_hosts.py меряет RMS).
 //
 // Сборка и запуск — см. Makefile рядом.
 //
@@ -55,8 +61,10 @@
 #include <ptlib.h>
 #include <h323.h>
 
+#include "base64.hpp"
 #include "ipc.hpp"
 #include "json.hpp"
+#include "pcm.hpp"
 
 // Forward declaration. ОБЯЗАТЕЛЬНО в глобальной области, а не внутри
 // `namespace { }`: объявление класса внутри анонимного namespace создаёт
@@ -75,6 +83,7 @@ struct Options {
  std::string socket_path = "/tmp/mcu-h323.sock";
  std::string endpoint_name = "MCU";
  int port = 1720;
+std::string dump_pcm;  ///< --dump-pcm DIR: WAV-дампы обоих направлений (медиа-стенд)
  bool auto_answer = true;
  bool verbose = false;
 };
@@ -187,6 +196,64 @@ void register_call(const std::string &token, const std::string &alias,
  emit_call_event(event, rec);
 }
 
+
+// --- PCM-каналы (Этап 1м) ---------------------------------------------------
+// Реестр живых PCM-каналов вызова. Указателями НЕ владеем: канал уходит
+// кодексу через AttachChannel(autoDelete=TRUE), и H323Plus удаляет его сам,
+// когда закрывает логический канал. Поэтому канал при закрытии сам вычёркивает
+// себя из реестра (on_destroyed) — пользоваться «нашим» указателем после этого
+// было бы UB.
+std::mutex g_pcm_mu;
+std::map<std::string, mcu_pcm::McuPcmChannel *> g_pcm_mic;  // encoder: Python -> RTP
+std::map<std::string, mcu_pcm::McuPcmChannel *> g_pcm_spk;  // decoder: RTP -> Python
+
+// Отдача декодированного кадра в Python событием pcm.in. Вызывается из потока
+// кодека: g_server->send() кладёт строку в очередь и НЕ ждёт записи в сокет.
+const mcu_pcm::FrameSink kPcmSink = [](const std::string &token,
+                                       const uint8_t *data, size_t len) {
+  if (!g_server) return;
+  mcu_json::Builder b;
+  b.add("event", "pcm.in");
+  b.add("token", token);
+  b.add("data", mcu_b64::encode(data, len));
+  g_server->send(b.str());
+};
+
+void pcm_add(const std::string &token, mcu_pcm::McuPcmChannel *ch) {
+  std::lock_guard<std::mutex> lk(g_pcm_mu);
+  (ch->is_encoding() ? g_pcm_mic : g_pcm_spk)[token] = ch;
+}
+
+void pcm_forget(mcu_pcm::McuPcmChannel *dead) {
+  std::lock_guard<std::mutex> lk(g_pcm_mu);
+  for (auto *m : {&g_pcm_mic, &g_pcm_spk}) {
+    for (auto it = m->begin(); it != m->end();) {
+      if (it->second == dead) {
+        it = m->erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
+// Запись исходящего PCM (команда pcm.out). Замок держим на время записи:
+// pcm_forget берёт тот же замок, поэтому уничтожение канала не обгонит запись.
+bool pcm_send(const std::string &token, const uint8_t *data, size_t len) {
+  if (token.empty()) return false;
+  std::lock_guard<std::mutex> lk(g_pcm_mu);
+  auto it = g_pcm_mic.find(token);
+  if (it == g_pcm_mic.end()) return false;
+  return it->second->PutOutbound(data, len);
+}
+
+// Наш IPC-токен вызова по соединению H323Plus. Пусто — если соединения нет в
+// реестре: тогда каналу ключом служит токен H323Plus (дампы остаются рабочей).
+std::string ipc_token_of(H323Connection *conn) {
+  std::lock_guard<std::mutex> lk(g_calls_mu);
+  auto it = g_by_conn.find(conn);
+  return it == g_by_conn.end() ? std::string() : it->second;
+}
 } // namespace
 
 // --- Forward declarations ----------------------------------------------------
@@ -203,6 +270,11 @@ class McuEndPoint : public H323EndPoint {
  void *userData,
  H323Transport *transport,
  H323SignalPDU *setupPDU) override;
+// PCM вместо микрофона/динамиков хоста (см. McuPcmChannel в pcm.hpp).
+PBoolean OpenAudioChannel(H323Connection &connection,
+                          PBoolean isEncoding,
+                          unsigned bufferSize,
+                          H323AudioCodec &codec) override;
 };
 
 // --- H323Connection ----------------------------------------------------------
@@ -317,6 +389,53 @@ H323Connection *McuEndPoint::CreateConnection(unsigned callReference,
  }
  log_verbose("CreateConnection: исходящий вызов");
  return conn;
+}
+
+// --- PCM: что кодек считает «звуковым устройством» ---------------------------
+// Базовая реализация открыла бы микрофон/динамики хоста (h323ep.cxx:3089): на
+// сервере без звука это отказ, а MCU нужен PCM в Python-микшере, а не в AIR
+// хоста. Здесь кодек получает McuPcmChannel поверх кольцевого буфера.
+PBoolean McuEndPoint::OpenAudioChannel(H323Connection &connection,
+                                       PBoolean isEncoding,
+                                       unsigned bufferSize,
+                                       H323AudioCodec &codec) {
+  // Silence detection G.711 не шлёт пакеты в паузах: для MCU это неверно, а
+  // медиа-стенд меряет RMS по всему дампу.
+  codec.SetSilenceDetectionMode(H323AudioCodec::NoSilenceDetection);
+
+  const bool encoding = isEncoding == TRUE;
+  std::string token = ipc_token_of(&connection);
+  if (token.empty()) token = to_std(connection.GetCallToken());
+  // Частота берётся из media format'а: 8 кГц у G.711/G.729, 16 кГц у G.722.
+  const unsigned rate = codec.GetMediaFormat().GetTimeUnits() * 1000;
+
+  auto *ch = new mcu_pcm::McuPcmChannel(encoding, token, rate,
+                                        mcu_pcm::FrameSink(), g_opts.dump_pcm);
+  // AttachChannel возвращает channel->IsOpen(), а сам кодек Open() не зовёт
+  // (базовая OpenAudioChannel открывает канал руками) — открываем здесь.
+  const PSoundChannel::Directions dir =
+      encoding ? PSoundChannel::Recorder : PSoundChannel::Player;
+  if (!ch->Open(PString(), dir, 1, rate, 16)) {
+    log_info("PCM: не удалось открыть канал token=" + token);
+    delete ch;
+    return FALSE;
+  }
+  ch->SetBuffers(bufferSize, 2);
+  if (!encoding) ch->EnableSink(bufferSize, kPcmSink);
+  ch->on_destroyed = [](mcu_pcm::McuPcmChannel *dead) { pcm_forget(dead); };
+  pcm_add(token, ch);
+  if (!codec.AttachChannel(ch)) {
+    // Владение не перешло: убираем запись, иначе реестр держит висящий указатель.
+    pcm_forget(ch);
+    ch->on_destroyed = nullptr;
+    delete ch;
+    return FALSE;
+  }
+  log_verbose(std::string("PCM: ") + (encoding ? "encoder" : "decoder") +
+              " token=" + token + " rate=" + std::to_string(rate) +
+              " buf=" + std::to_string(bufferSize) +
+              (g_opts.dump_pcm.empty() ? "" : " dump=" + g_opts.dump_pcm));
+  return TRUE;
 }
 
 namespace {
@@ -441,7 +560,19 @@ void handle_command(const std::string &line) {
  log_verbose("IPC: call.make " + address + " -> " + to_std(h323token));
  return;
  }
- emit_error("неизвестная команда: " + cmd);
+if (cmd == "pcm.out") {
+  // Поток (50 кадров/с), а не команда: пустой/битый кадр молча пропускаем,
+  // иначе error-шторм забьёт и IPC, и лог. Ветка ОБЯЗАНА стоять до
+  // emit_error(...) ниже: иначе каждый кадр падал как «неизвестная команда».
+  const std::string b64 = msg.count("data") ? msg["data"] : "";
+  if (b64.empty()) return;
+  std::vector<uint8_t> bytes = mcu_b64::decode(b64);
+  if (bytes.empty()) return;
+  if (!pcm_send(token, bytes.data(), bytes.size()))
+    emit_error("pcm.out: нет encoder-канала для " + token);
+  return;
+}
+emit_error("неизвестная команда: " + cmd);
 }
 
 // --- Разбор argv -------------------------------------------------------------
@@ -461,12 +592,13 @@ bool parse_args(int argc, char **argv, Options &out) {
  else if (a == "--auto-answer") out.auto_answer = true;
  else if (a == "--no-auto-answer") out.auto_answer = false;
  else if (a == "--verbose" || a == "-v") out.verbose = true;
+else if (a == "--dump-pcm") out.dump_pcm = need_value("--dump-pcm");
  else if (a == "--help" || a == "-h") {
- std::printf(
- "mcu_h323d — H.323-хост на H323Plus (ADR-0002, Вариант B)\n"
- "Использование: mcu_h323d [--socket PATH] [--port N] [--name NAME]\n"
- " [--no-auto-answer] [--verbose]\n");
- std::exit(0);
+      std::printf(
+          "mcu_h323d — H.323-хост на H323Plus (ADR-0002, Вариант B)\n"
+          "Использование: mcu_h323d [--socket PATH] [--port N] [--name NAME]\n"
+          "               [--no-auto-answer] [--dump-pcm DIR] [--verbose]\n");
+      std::exit(0);
  } else {
  std::fprintf(stderr, "Неизвестный аргумент: %s\n", a.c_str());
  return false;
@@ -503,6 +635,8 @@ int main(int argc, char **argv) {
  return 3;
  }
  log_info("IPC-сокет: " + g_opts.socket_path);
+if (!g_opts.dump_pcm.empty())
+log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
 
  // «ready» шлём при подключении Python-клиента, а не при старте:
  // события, отправленные в пустоту, теряются (write_loop их не находит
@@ -519,6 +653,22 @@ int main(int argc, char **argv) {
  McuEndPoint endpoint;
  g_ep = &endpoint;
  endpoint.SetLocalUserName(PString(g_opts.endpoint_name));
+
+  // Таблица возможностей. Конструктор H323EndPoint кодеки НЕ выставляет —
+  // в нём только autoStart*Audio=TRUE (h323ep.cxx:674), поэтому без явного
+  // AddAllCapabilities таблица пуста, SETUP/Alerting проходят, H.245 не
+  // соглашает НИ ОДНОГО аудио-канала, и OpenAudioChannel не вызывается
+  // вообще: вызов «установлен», а звука нет и PCM-реестр пуст. В эталонном
+  // samples/simple/main.cxx:449 этот вызов есть; берём ту же форму.
+  // Видео снимаем сразу: нативного видео-канала у хоста нет, а «предложить»
+  // его в соглашении — риск, что пир выберет то, что мы не обслуживаем.
+  endpoint.AddAllCapabilities(0, P_MAX_INDEX, "*");
+  endpoint.RemoveCapability(H323Capability::e_Video);
+  log_info("возможностей в таблице: " +
+           std::to_string(endpoint.GetCapabilities().GetSize()));
+
+  // PCM-TRACE (темп Read/Write кодека) — только по --verbose.
+  mcu_pcm::g_trace_enabled = g_opts.verbose;
 
  H323ListenerTCP *listener = new H323ListenerTCP(
  endpoint, PIPSocket::Address("0.0.0.0"), static_cast<WORD>(g_opts.port));

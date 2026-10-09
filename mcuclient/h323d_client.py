@@ -12,6 +12,7 @@ H323Plus — C++-библиотека без Python-биндингов. Поэт
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import threading
@@ -137,6 +138,19 @@ class H323dClient:
         if not address:
             return False
         return self.send_command("call.make", address=address, **extra)
+
+    def pcm_out(self, token: str, data: bytes) -> bool:
+        """Подать исходящий PCM16 mono в encoder-канал вызова (pcm.out).
+
+        Хост читает из ring кадрами по 20 мс и кодирует в RTP; без данных
+        отдаёт тишину. Входящий PCM хост присылает событием ``pcm.in``
+        (поля ``token`` и ``data`` — base64 тех же 20-мс кадров).
+        """
+        if not data:
+            return False
+        return self.send_command(
+            "pcm.out", token=token, data=base64.b64encode(data).decode("ascii")
+        )
 
     def shutdown(self) -> bool:
         return self.send_command("shutdown")

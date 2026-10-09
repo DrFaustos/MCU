@@ -14,7 +14,12 @@
   * ``call.connected``   — установка с обеих сторон;
   * ``call.hangup``      — сброс и ``call.disconnected`` в обе стороны;
   * ошибка на неизвестный токен (``error`` вместо молчания);
-  * хост живёт после завершённого вызова (ping/pong).
+  * хост живёт после завершённого вызова (ping/pong);
+  * МЕДИА: тон, поданный командой ``pcm.out``, уходит в RTP и возвращается на
+    другой стороне декодированным PCM (событие ``pcm.in``) и WAV-дампом; RMS
+    входящего потока обязан быть выше порога тишины. Без этой проверки вызов
+    «установлен» и с пустой таблицей возможностей: сигнализация проходит,
+    звука нет.
 
 Это регрессия на баги Этапа 1: раньше при --no-auto-answer ``OnIncomingCall``
 возвращал FALSE, и вызов сбрасывался с EndedByNoAccept — ответить afterwards
@@ -33,8 +38,11 @@ RC=0 — всё сошлось, RC=1 — есть упавшая проверк�
 from __future__ import annotations
 
 import argparse
+import base64
+import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -44,10 +52,27 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(HERE))  # lib.wav_metrics живёт в scripts/testbed/lib
 
+from lib.wav_metrics import measure_wav  # noqa: E402
 from mcuclient.h323_host import find_host_binary  # noqa: E402
 from mcuclient.h323d_client import H323dClient, H323dEvent  # noqa: E402
+
+
+# --- Параметры медиа-проверки -------------------------------------------------
+# G.711 узкополосный: 8 кГц, 16 бит, mono; кадр 20 мс = 320 байт — ровно
+# столько читает кодек (McuPcmChannel::Read).
+MEDIA_RATE = 8000
+MEDIA_FRAME_MS = 20
+MEDIA_FRAME_BYTES = MEDIA_RATE * 2 * MEDIA_FRAME_MS // 1000  # 320
+TONE_HZ = 800
+TONE_AMP = 8000
+TONE_SECONDS = 2.0
+#: Порог RMS. Тишина после G.711 — единицы (шум квантования), синус амплитуды
+#: 8000 даёт ~5657. 800 отрезает и тишину, и глубокую просадку кодека.
+MEDIA_RMS_MIN = 800.0
 
 
 class Collector:
@@ -55,11 +80,32 @@ class Collector:
 
     def __init__(self) -> None:
         self._events: List[Tuple[str, Dict[str, Any]]] = []
+        self._pcm: Dict[str, List[bytes]] = {}
         self._lock = threading.Lock()
 
     def add(self, ev: H323dEvent) -> None:
+        # pcm.in — поток (50 кадров base64 в секунду). В общую ленту его
+        # нельзя: dump() захлебнётся и затрёт смысловые события.
+        if ev.event == 'pcm.in':
+            data = str(ev.fields.get('data', '') or '')
+            if not data:
+                return
+            try:
+                raw = base64.b64decode(data)
+            except Exception:
+                return
+            with self._lock:
+                self._pcm.setdefault(str(ev.fields.get('token', '') or ''), []).append(raw)
+            return
         with self._lock:
             self._events.append((ev.event, dict(ev.fields)))
+
+    def pcm(self, token: str = '') -> bytes:
+        """Весь входящий PCM токена; пустой token — склейка всех токенов."""
+        with self._lock:
+            if token:
+                return b''.join(self._pcm.get(token, []))
+            return b''.join(b for chunks in self._pcm.values() for b in chunks)
 
     def wait(
         self,
@@ -97,7 +143,12 @@ class Checker:
 
 
 def start_host(
-    binary: str, name: str, port: int, workdir: Path, logdir: Path
+    binary: str,
+    name: str,
+    port: int,
+    workdir: Path,
+    logdir: Path,
+    dump_dir: Optional[Path] = None,
 ) -> Tuple[subprocess.Popen, Path]:
     """Поднимает один mcu_h323d. Сокет держим в коротком каталоге.
 
@@ -111,15 +162,20 @@ def start_host(
     libdir = os.environ.get("H323_LIB_DIR", "/usr/local/lib")
     existing = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = f"{libdir}:{existing}" if existing else libdir
+    argv = [
+        binary,
+        "--socket", str(sock),
+        "--port", str(port),
+        "--name", f"MCU-{name}",
+        "--no-auto-answer",
+        "--verbose",
+    ]
+    if dump_dir is not None:
+        # Медиа обязано быть проверяемым вне Python: WAV обоих направлений на
+        # диск. Он пишется независимо от целостности IPC.
+        argv += ["--dump-pcm", str(dump_dir)]
     proc = subprocess.Popen(
-        [
-            binary,
-            "--socket", str(sock),
-            "--port", str(port),
-            "--name", f"MCU-{name}",
-            "--no-auto-answer",
-            "--verbose",
-        ],
+        argv,
         cwd=str(ROOT),
         env=env,
         stdout=log,
@@ -133,6 +189,83 @@ def tail_log(path: Path, lines: int = 15) -> str:
         return "(лога нет)"
     body = path.read_text(errors="replace").strip().splitlines()
     return "\n".join(body[-lines:])
+
+
+def pcm_rms(data: bytes) -> float:
+    """RMS по PCM16 mono (та же метрика, что у verify_audio_not_silence.py)."""
+    count = len(data) // 2
+    if count == 0:
+        return 0.0
+    samples = struct.unpack('<' + str(count) + 'h', data[: count * 2])
+    return (sum(v * v for v in samples) / count) ** 0.5
+
+
+def tone_pcm(seconds: float) -> bytes:
+    """Синус TONE_HZ, PCM16 mono MEDIA_RATE."""
+    total = int(MEDIA_RATE * seconds)
+    step = 2.0 * math.pi * TONE_HZ / MEDIA_RATE
+    out = bytearray()
+    for i in range(total):
+        out += struct.pack('<h', int(TONE_AMP * math.sin(i * step)))
+    return bytes(out)
+
+
+def pump_tone(client: H323dClient, token: str, seconds: float) -> bool:
+    """Кладёт тон в encoder-канал вызова (pcm.out).
+
+    Первые полсекунды шлём без пауз: McuPcmChannel::Read ждёт кадр не дольше
+    20 мс и, не дождав данных, отдаёт ТИШИНУ (так медиа не зависает). Без запаса
+    в ring канал читал бы тишину даже при исправном pcm.out. Дальше темп чуть
+    быстрее реального, чтобы запас не опустошался.
+    """
+    body = tone_pcm(seconds + 0.5)
+    prefill = MEDIA_RATE  # 0.5 с при 16000 байт/с
+    for off in range(0, len(body), MEDIA_FRAME_BYTES):
+        chunk = body[off : off + MEDIA_FRAME_BYTES]
+        if not client.pcm_out(token, chunk):
+            return False
+        if off >= prefill:
+            time.sleep(MEDIA_FRAME_MS * 0.75 / 1000.0)
+    return True
+
+
+def wait_wav(path: Path, timeout: float = 8.0):
+    """Ждёт закрытия WAV-дампа и возвращает метрики; None — не дождались.
+
+    Дамп закрывается в McuPcmChannel::Close(), а его зовёт кодек, закрывая
+    логический канал, т.е. уже после завершения вызова: размеры в заголовке
+    правятся только там, раньше читать бессмысленно.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            metrics = measure_wav(path)
+        except Exception:
+            time.sleep(0.2)
+            continue
+        if metrics.frames > 0:
+            return metrics
+        time.sleep(0.2)
+    return None
+
+
+def make_workdir() -> Optional[Path]:
+    """Короткий каталог под unix-сокеты хостов — или None.
+
+    sun_path в AF_UNIX ограничен 108 байтами. tempfile.mkdtemp берёт TMPDIR, а
+    у агентов TMPDIR указывает в глубокий scratch-каталог (~130 байт) — bind()
+    отказывает, хосты стартуют с rc=3 и стенд умирает до первой проверки.
+    Поэтому каталог берём в /tmp явно, с запасом на имя сокета.
+    """
+    for base in ("/tmp", "/var/tmp"):
+        try:
+            d = Path(tempfile.mkdtemp(prefix="mcu_h323_", dir=base))
+        except OSError:
+            continue
+        if len(str(d / "h323_A.sock")) < 100:
+            return d
+        shutil.rmtree(d, ignore_errors=True)
+    return None
 
 
 def main() -> int:
@@ -149,17 +282,26 @@ def main() -> int:
     print(f"[i] хост: {binary}, порты A={args.port_a} B={args.port_b}")
 
     ck = Checker()
-    workdir = Path(tempfile.mkdtemp(prefix="mcuh323_"))
+    workdir = make_workdir()
+    if workdir is None:
+        print("[!] нет короткого каталога для unix-сокетов (/tmp, /var/tmp)")
+        return 1
     logdir = workdir / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
 
     hosts: Dict[str, Tuple[subprocess.Popen, Path]] = {}
     clients: Dict[str, H323dClient] = {}
     collectors: Dict[str, Collector] = {}
+    # --dump-pcm на каждое направление: имена файлов совпадают
+    # (call-1.mic.wav / call-1.spk.wav), в одном каталоге перезаписались бы.
+    pcm_dirs: Dict[str, Path] = {}
     rc = 1
     try:
         for name, port in (("A", args.port_a), ("B", args.port_b)):
-            hosts[name] = start_host(binary, name, port, workdir, logdir)
+            pcm_dirs[name] = workdir / 'pcm' / name
+            pcm_dirs[name].mkdir(parents=True, exist_ok=True)
+            hosts[name] = start_host(binary, name, port, workdir, logdir,
+                                      pcm_dirs[name])
         time.sleep(1.5)  # процессы PTLib поднимаются не мгновенно
 
         for name, (proc, sock) in hosts.items():
@@ -234,6 +376,28 @@ def main() -> int:
             print(tail_log(logdir / "h323_B.log"))
             return 1
 
+        # --- медиа: тон A -> RTP -> B -------------------------------------
+        # Сигнализации мало: вызов «установился» и когда таблица возможностей
+        # была пустой. Здесь проверяется именно звук.
+        ck.check(
+            pump_tone(clients["A"], tok_a, seconds=TONE_SECONDS),
+            "A: тон подан в encoder-канал (pcm.out)",
+        )
+        # pcm.in прибывает кадрами 20 мс из потока кодека.
+        time.sleep(0.5)
+        pcm_b = collectors["B"].pcm(tok_b) or collectors["B"].pcm()
+        ck.check(
+            len(pcm_b) >= MEDIA_FRAME_BYTES,
+            "B: pcm.in приносит входящий PCM",
+            str(len(pcm_b)) + " байт",
+        )
+        rms_b = pcm_rms(pcm_b)
+        ck.check(
+            rms_b >= MEDIA_RMS_MIN,
+            "B: тон доехал по RTP (RMS pcm.in)",
+            "rms=" + format(rms_b, ".0f") + " (мин " + format(MEDIA_RMS_MIN, ".0f") + ")",
+        )
+
         # --- сброс ---
         if not ck.check(clients["A"].hangup(tok_a), f"A: call.hangup({tok_a}) отправлен"):
             return 1
@@ -241,6 +405,27 @@ def main() -> int:
         db = collectors["B"].wait("call.disconnected", lambda d: d.get("token") == tok_b, 10.0)
         ck.check(da is not None, "A: call.disconnected", str(da))
         ck.check(db is not None, "B: call.disconnected дошёл от пира", str(db))
+
+        # --- медиа: WAV-дампы обоих направлений ---------------------------
+        # mic на A = то, что кодек унёс в RTP (изолирует pcm.out от RTP);
+        # spk на B = то, что декодер достал из RTP (изолирует RTP от pcm.in).
+        mic_a = wait_wav(pcm_dirs["A"] / (tok_a + ".mic.wav"))
+        spk_b = wait_wav(pcm_dirs["B"] / (tok_b + ".spk.wav"))
+        ck.check(
+            mic_a is not None and mic_a.rms >= MEDIA_RMS_MIN,
+            "A: тон дошёл до кодека (дамп mic.wav)",
+            "" if mic_a is None else "rms=" + format(mic_a.rms, ".0f") + " dur=" + format(mic_a.duration_s, ".2f") + "с",
+        )
+        ck.check(
+            spk_b is not None and spk_b.rms >= MEDIA_RMS_MIN,
+            "B: входящий поток не тишина (дамп spk.wav)",
+            "" if spk_b is None else "rms=" + format(spk_b.rms, ".0f") + " dur=" + format(spk_b.duration_s, ".2f") + "с",
+        )
+        ck.check(
+            spk_b is not None and spk_b.duration_s >= 0.5,
+            "B: медиа шло всю длительность вызова",
+            "" if spk_b is None else "dur=" + format(spk_b.duration_s, ".2f") + "с",
+        )
 
         # --- хост переживает завершённый вызов ---
         for name in ("A", "B"):
@@ -271,7 +456,7 @@ def main() -> int:
                 proc.wait(timeout=5)
             print(f"[i] хост {name}: exit={proc.returncode}")
         if os.environ.get("KEEP_LOGS") == "1":
-            print(f"[i] логи хостов: {logdir}")
+            print(f"[i] логи хостов: {logdir}, PCM-дампы: {workdir / 'pcm'}")
         else:
             shutil.rmtree(workdir, ignore_errors=True)
 

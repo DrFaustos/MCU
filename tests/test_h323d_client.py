@@ -4,6 +4,7 @@
 AF_UNIX-сокет — без нативного H323Plus.
 """
 
+import base64
 import socket
 import sys
 import threading
@@ -11,7 +12,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _ipc_path импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _ipc_path import unix_socket_path  # noqa: E402
 from mcuclient.h323d_client import (  # noqa: E402
     H323dClient,
     H323dEvent,
@@ -122,37 +127,41 @@ def _fake_host(path, ready=True):
 
 
 def test_client_connects_and_gets_ready(tmp_path):
-    path = str(tmp_path / "mcu_test.sock")
-    srv, t, _ = _fake_host(path)
-    events = []
-    client = H323dClient(path, on_event=lambda ev: events.append(ev.event))
-    try:
-        assert client.connect(timeout=2.0) is True
-        assert client.connected is True
-        deadline = time.time() + 2.0
-        while time.time() < deadline and "ready" not in events:
-            time.sleep(0.02)
-        assert "ready" in events
-        assert client.ready_port == 1720
-    finally:
-        client.close()
-        srv.close()
+    # unix_socket_path: bind() обязан получить путь короче sun_path — tmp_path
+    # из TMPDIR агента/CI в него не влезает и тест падал до первой проверки.
+    with unix_socket_path(tmp_path, "mcu_test.sock") as sock_p:
+        path = str(sock_p)
+        srv, t, _ = _fake_host(path)
+        events = []
+        client = H323dClient(path, on_event=lambda ev: events.append(ev.event))
+        try:
+            assert client.connect(timeout=2.0) is True
+            assert client.connected is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and "ready" not in events:
+                time.sleep(0.02)
+            assert "ready" in events
+            assert client.ready_port == 1720
+        finally:
+            client.close()
+            srv.close()
 
 
 def test_client_sends_command(tmp_path):
-    path = str(tmp_path / "mcu_test2.sock")
-    srv, t, received = _fake_host(path, ready=False)
-    client = H323dClient(path)
-    try:
-        assert client.connect(timeout=2.0) is True
-        assert client.shutdown() is True
-        deadline = time.time() + 2.0
-        while time.time() < deadline and not received:
-            time.sleep(0.02)
-        assert any("shutdown" in line for line in received)
-    finally:
-        client.close()
-        srv.close()
+    with unix_socket_path(tmp_path, "mcu_test2.sock") as sock_p:
+        path = str(sock_p)
+        srv, t, received = _fake_host(path, ready=False)
+        client = H323dClient(path)
+        try:
+            assert client.connect(timeout=2.0) is True
+            assert client.shutdown() is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not received:
+                time.sleep(0.02)
+            assert any("shutdown" in line for line in received)
+        finally:
+            client.close()
+            srv.close()
 
 
 def test_client_connect_missing_socket_returns_false(tmp_path):
@@ -167,3 +176,39 @@ def test_client_send_without_connection_returns_false():
     assert client.shutdown() is False
     assert client.answer("t") is False
     assert client.hangup("t") is False
+
+
+# --- pcm.out: форма команды, которой в хост идёт исходящий PCM ---
+# Медиа-стенд проверяет звук целиком, но требует собранного хоста. Эти два
+# теста держат контракт Python-стороны (base64-кадр + пустой кадр не шлём):
+# хост декодирует base64 молча, и битое кодирование выглядело бы как «тишина
+# в трубке», а не как ошибка.
+
+
+def test_pcm_out_sends_base64_frame():
+    client = H323dClient("/tmp/unused.sock")
+    sent: dict = {}
+
+    def fake_send(cmd, **fields):
+        sent["cmd"] = cmd
+        sent.update(fields)
+        return True
+
+    client.send_command = fake_send
+    # Кадр 20 мс при 8 кГц/16 бит = 320 байт. bytes(range(320)) нельзя:
+    # значения обязаны быть < 256.
+    payload = bytes(i % 256 for i in range(320))
+    assert client.pcm_out("call-1", payload) is True
+    assert sent["cmd"] == "pcm.out"
+    assert sent["token"] == "call-1"
+    assert base64.b64decode(sent["data"]) == payload
+
+
+def test_pcm_out_empty_data_is_not_sent():
+    client = H323dClient("/tmp/unused.sock")
+
+    def boom(*_args, **_fields):
+        raise AssertionError("пустой кадр уходить хосту не должен")
+
+    client.send_command = boom
+    assert client.pcm_out("call-1", b"") is False
