@@ -115,6 +115,10 @@ GET:
 | `/api/frame.png` | последний кадр источника, PNG (404, если кадров нет) |
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
 | `/api/video.mjpeg` | MJPEG-поток (501, если нет кодировщика JPEG) |
+| `/api/web_recording` | `{recording, video, audio, frames}` — запись web-конференции |
+| `/api/conference` | `{participants:[...], webrtc}` — веб-участники; `webrtc`: доступен ли aiortc |
+| `/api/mediasoup` | `{available, stats}` — состояние связи со sidecar (`features.web.mediasoup`) |
+| `/api/webrtc/sessions` | `{sessions:[...], available}` — активные WebRTC-сессии и их роли |
 
 POST (тело — JSON):
 
@@ -142,6 +146,16 @@ POST (тело — JSON):
 | `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
 | `/api/web_port` | `{port}` | порт web-панели |
+| `/api/web_recording` | `{enabled?}` | запись web-конференции: вкл/выкл/toggle |
+| `/api/conference/join` | `{name, role?}` | войти в конференцию (`role` по умолчанию `participant`) |
+| `/api/conference/leave` | `{id}` | выйти из конференции |
+| `/api/conference/rename` | `{id, name}` | переименовать веб-участника |
+| `/api/conference/media` | `{id, video?, audio?}` | включить/выключить треки участника |
+| `/api/webrtc/offer` | `{sdp, type?, role?, subscribe?, participant?}` | SDP-offer браузера: `role` — `publish`/`subscribe`, `subscribe` — id участников, чьё медиа смотреть; без aiortc отвечает 503 |
+| `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию |
+| `/api/mediasoup/join` | `{participant}` | подключить участника к комнате mediasoup |
+| `/api/mediasoup/leave` | `{participant}` | отключить участника от комнаты |
+| `/api/mediasoup/signal` | `{action, participant, ...}` | пробросить signaling-сообщение в sidecar |
 
 Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
 

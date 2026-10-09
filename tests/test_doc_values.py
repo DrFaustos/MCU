@@ -13,6 +13,7 @@ passed) ровно там, где врала инструкция для чел�
 mcuclient/config.py. Придуманный режим красит прогон сам, без правки теста.
 """
 
+import ast
 import copy
 import re
 import subprocess
@@ -272,3 +273,91 @@ def test_set_srtp_keeps_legacy_flag_in_sync():
     assert cfg.require_encryption is True
     cfg.set_srtp("optional")
     assert cfg.require_encryption is False
+
+#: REST-раздел docs/WEB_CONTROL.md против развилки web_server.py. do_GET и
+#: do_POST — тонкие обёртки: настоящая развилка `path == "/api/..."` живёт в
+#: _handle_api_get/_handle_api_post, поэтому парсим по две функции на метод.
+SERVER_FILE = ROOT / "mcuclient" / "web_server.py"
+DOC_API = ROOT / "docs" / "WEB_CONTROL.md"
+API_HANDLERS = {"GET": ("do_GET", "_handle_api_get"),
+    "POST": ("do_POST", "_handle_api_post")}
+API_ROW_RE = re.compile(r"^\|\s*`(/api/[a-z0-9_./]+)`")
+POST_SECTION_RE = re.compile(r"^POST\b")
+
+
+def _is_api_const(node):
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and node.value.startswith("/api/"))
+
+
+def _server_api_routes():
+    """{GET: {путь, ...}, POST: {путь, ...}} — что сервер реально различает."""
+    funcs = {}
+    for node in ast.walk(ast.parse(SERVER_FILE.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.FunctionDef):
+            funcs.setdefault(node.name, node)
+    out = {}
+    for method, names in API_HANDLERS.items():
+        found = set()
+        for name in names:
+            fn = funcs.get(name)
+            assert fn is not None, f"в web_server.py нет функции {name}"
+            # Обход обязан стоять ВНУТРИ цикла по names. На уровне выше fn
+            # оставался бы последним значением списка: do_GET молча не
+            # проверялся, и GET-таблица «теряла» /api/events, /api/frame.png,
+            # /api/frame.jpg, /api/video.mjpeg — то есть сам страж врал
+            # «сервер ответит 404» на существующие маршруты.
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+                    continue
+                op = node.ops[0]
+                if isinstance(op, ast.Eq) and _is_api_const(node.comparators[0]):
+                    found.add(node.comparators[0].value)
+                elif isinstance(op, ast.In) and isinstance(node.comparators[0], ast.Tuple):
+                    for el in node.comparators[0].elts:
+                        if _is_api_const(el):
+                            found.add(el.value)
+        out[method] = found
+    return out
+
+
+def _doc_api_routes():
+    """{GET: {путь: строка}, POST: {путь: строка}} — строки таблиц дока."""
+    lines = DOC_API.read_text(encoding="utf-8").splitlines()
+    split = next((i for i, line in enumerate(lines) if POST_SECTION_RE.match(line)), None)
+    assert split is not None, "в docs/WEB_CONTROL.md нет POST-секции"
+    out = {"GET": {}, "POST": {}}
+    for i, line in enumerate(lines):
+        match = API_ROW_RE.match(line)
+        if not match:
+            continue
+        method = "POST" if i >= split else "GET"
+        out[method][match.group(1)] = i + 1
+    return out
+
+
+def test_rest_api_tables_list_exactly_the_server_routes():
+    """Таблицы REST API обязаны совпадать с развилкой сервера — в обе стороны.
+
+    Ревизия 2026-10-09: GET-таблица перечисляла 14 путей против 18 в коде,
+    POST-таблица — 22 против 32. То есть web-конференция, mediasoup-sidecar,
+    запись панели и WebRTC-сессии были доступны оператору только из исходников
+    (ms-conference.js дёргал /api/mediasoup, которого в справочнике не значилось).
+    Обратное направление важнее: путь, обещанный таблицей и отсутствующий в
+    развилке, — это 404 в лицо оператору, причём документ утверждает, что он есть.
+    """
+    code = _server_api_routes()
+    doc = _doc_api_routes()
+    for method in ("GET", "POST"):
+        assert code[method], f"парсер не нашёл маршруты {method} в web_server.py"
+        assert doc[method], f"в docs/WEB_CONTROL.md не найдено ни одной строки {method}"
+    bad = []
+    for method in ("GET", "POST"):
+        # doc[method] — словарь «путь: строка дока» (строка нужна в сообщении),
+        # code[method] — множество путей; вычитаем по ключам, не по словарю.
+        documented = set(doc[method])
+        for path in sorted(documented - code[method]):
+            bad.append(f"{method} {path}: обещан доком (строка {doc[method][path]}), сервер ответит 404")
+        for path in sorted(code[method] - documented):
+            bad.append(f"{method} {path}: в сервере есть, в docs/WEB_CONTROL.md не описан")
+    assert not bad, "таблицы REST API разошлись с кодом:\n" + "\n".join(bad)
