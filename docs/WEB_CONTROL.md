@@ -115,6 +115,10 @@ GET:
 | `/api/frame.png` | последний кадр источника, PNG (404, если кадров нет) |
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
 | `/api/video.mjpeg` | MJPEG-поток (501, если нет кодировщика JPEG) |
+| `/api/conference` | `{participants:[{id,name,kind,video,audio}], webrtc:bool}` — конференция и доступен ли WebRTC |
+| `/api/webrtc/sessions` | `{sessions:[...], webrtc:bool}` — живые WebRTC-сессии панели |
+| `/api/web_recording` | статус записи веб-конференции (`{recording, file?}`) |
+| `/api/mediasoup` | `{available, stats}` — состояние SFU-sidecar (`null`-статистика, если не поднят) |
 
 POST (тело — JSON):
 
@@ -139,9 +143,19 @@ POST (тело — JSON):
 | `/api/audio_device` | `{device}` | выбрать микрофон по id |
 | `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
 | `/api/codecs` | `{profile}` | профиль кодеков |
-| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`disable`/`optional`/`mandatory`) и TLS панели |
+| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
 | `/api/web_port` | `{port}` | порт web-панели |
+| `/api/webrtc/offer` | `{sdp, type?, subscribe?}` | SDP-offer браузера: ingest (публикация) или подписка на чужие треки (`subscribe` — список id) |
+| `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели |
+| `/api/web_recording` | `{enabled?}` | запись веб-конференции вкл/выкл/toggle (`WebRecorder`: кадры + аудио-микс) |
+| `/api/conference/join` | `{name, role?}` | войти в конференцию из браузера (`role`: participant/presenter) |
+| `/api/conference/leave` | `{id}` | выйти из конференции |
+| `/api/conference/rename` | `{id, name}` | переименовать участника |
+| `/api/conference/media` | `{id, video?, audio?}` | включить/выключить передачу медиа участнику |
+| `/api/mediasoup/join` | `{participant}` | войти в комнату SFU-sidecar (mediasoup) |
+| `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU |
+| `/api/mediasoup/signal` | `{action, participant, ...}` | сигнализация SFU (`createWebRtcTransport`, `connect`, `publish`, `subscribe` и т.п.) |
 
 Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
 
@@ -236,9 +250,10 @@ API конференции: `GET /api/conference`, `POST /api/conference/join` (
 `/leave`, `/rename`, `/media`. WebRTC: `POST /api/webrtc/offer` с
 `role=publish|viewer` и `subscribe=[id,...]` для зрителя.
 
-Ограничения: **нет записи веб-потока**, лимит 64 веб-участника. Зрители
-получают и видео, и **аудио** других веб-участников (аудио-fan-out). TURN
-поддерживается (см. §7b). Полноценный SFU (симулкаст, джиттер-буферы) — дальше.
+Ограничения: нет **симулкаста** и джиттер-буферов (полноценный SFU — дальше),
+лимит 64 веб-участника. Запись веб-конференции есть (§9): `WebRecorder` пишет
+кадры `FrameHub` и аудио-микс `AudioMixSession`. Зрители получают и видео, и
+**аудио** других веб-участников (аудио-fan-out). TURN поддерживается (см. §7b).
 
 ### Оптимизации fan-out (latest-wins + общий кэш)
 
@@ -293,7 +308,7 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 и аудио-треки; аудио хранится как последний s16-кадр на шине.
 
 Ограничения ingest: это **приём** в MCU (раздача — через fan-out); для
-интернета/NAT настройте STUN/TURN (§7b); аудио **не микшируется** — каждый
+интернета/NAT настройте STUN/TURN (§7b); аудио **микшируется**: каждый
 зритель получает **один смешанный аудио-трек** (голоса всех, кроме
 себя) через `AudioMixSession`; видео — по треку на публикатора.
 
