@@ -352,6 +352,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "announced_ip": "",
                 "listen_ip": "0.0.0.0",
                 "log_level": "warn",
+                # Бинарник Node: путь, если Node нет в PATH. По нему и
+                # проверяют доступность, и запускают сайдкар.
+                "node": "node",
+                # Таймаут HTTP control API, сек (health, rooms, produce...).
+                "timeout": 10.0,
+                # Комнат на worker у сайдкара. 0 = не переопределять (200).
+                "max_rooms": 0,
             },
         },
     },
@@ -370,6 +377,15 @@ def _check_int(key: str, value: Any, lo: int, hi: int) -> int:
     if not (lo <= value <= hi):
         raise ConfigError(f"{key}: значение {value} вне диапазона [{lo}, {hi}]")
     return value
+
+
+def _check_num(key: str, value: Any, lo: float, hi: float) -> float:
+    """Вещественное число в диапазоне (таймауты, интервалы опроса)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{key}: ожидалось число, получено {type(value).__name__}")
+    if not (lo <= value <= hi):
+        raise ConfigError(f"{key}: значение {value} вне диапазона [{lo}, {hi}]")
+    return float(value)
 
 
 def _check_bool(key: str, value: Any) -> bool:
@@ -649,6 +665,17 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             _check_int("features.web.mediasoup.port", ms.get("port", 4443), PORT_MIN, PORT_MAX)
             if not isinstance(ms.get("token", ""), str):
                 raise ConfigError("features.web.mediasoup.token: ожидалась строка")
+            if not isinstance(ms.get("node", "node"), str):
+                raise ConfigError(
+                    "features.web.mediasoup.node: ожидалась строка "
+                    "(имя или путь к бинарнику Node)")
+            # Таймаут и лимит комнат читает супервизор (mediasoup_supervisor),
+            # значит битое значение должно ловиться при загрузке, а не
+            # молча уходить в float()/str() на старте процесса.
+            _check_num("features.web.mediasoup.timeout",
+                       ms.get("timeout", 10.0), 0.5, 600.0)
+            _check_int("features.web.mediasoup.max_rooms",
+                       ms.get("max_rooms", 0), 0, 100000)
 
     return raw
 

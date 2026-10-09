@@ -79,6 +79,81 @@
 
 ## Журнал исправлений
 
+### 2026-10-09 — у mediasoup были настройки, которых конфиг не знал
+
+Тот же механизм вранья, что и с `srtp: "disable"`, только вывернутый: доки
+ничего не обещали, а код понимал настройку, которую оператор не мог задать.
+
+**1. Проверка и запуск сайдкара смотрели в разные бинарники.**
+
+`node_available()` читал `features.web.mediasoup.node` и делал
+`shutil.which(node)`, а `start()` поднимал `Popen(["node", "src/server.js"])` —
+литерал. Если Node стоит по абсолютному пути и его нет в `PATH` (модули, venv,
+контейнер), проверка проходила по `/opt/node20/bin/node`, а `Popen` получал
+голый `node` и падал с `FileNotFoundError`; его проглатывал `except Exception`,
+и в логе оставалось только «не удалось запустить сайдкар» — без следа про путь.
+
+Воспроизведено живьём зондом: `argv из Popen: ['node', 'src/server.js']` при
+настройке `node=/opt/node20/bin/node`. Исправлено одним источником истины —
+`node_binary()`, который зовут и `node_available()`, и `start()`; в сообщение
+«не найден» добавлен сам путь.
+
+**2. Две настройки были физически недоступны.**
+
+`timeout` читался (`float(cfg.get("timeout", 10.0))`), но не был объявлен ни в
+`DEFAULT_CONFIG`, ни в `config.example.json`, ни в доке — `_deep_merge` с
+дефолтами проглатывает неизвестный ключ молча, так что это тихий no-op, а не
+`ConfigError`. `max_rooms`: у сайдкара лимит комнат на worker есть
+(`MCU_MEDIASOUP_MAX_ROOMS`, по умолчанию 200), но супервизор его не пробрасывал.
+
+Объявлены все три (`node`, `timeout`, `max_rooms`) — в `DEFAULT_CONFIG`, в
+операторском шаблоне и в `docs/WEB_CONTROL.md`; добавлена валидация
+(новый `_check_num` для таймаута, `_check_int` для `max_rooms`, проверка строки
+для `node`), чтобы битое значение ловилось при загрузке, а не на старте процесса.
+
+**3. Почему класс возврата не случаен, и чем он закрыт.**
+
+Зонд «leaf-ключи конфига, которые не читает никто» дал 0 из 75 — мёртвых
+настроек нет. Вреден обратный 방향: код читает, шаблона нет. Закрыто стражем
+`test_supervisor_settings_are_declared_in_config_template` (`tests/test_doc_values.py`,
+теперь 10 кейсов): AST-разбор вынимает из `mediasoup_supervisor.py` все чтения
+секции — и прямые (`self._ms_config().get("key")`), и через локальную
+переменную (`cfg = self._ms_config()`, именно так работает `_env()`) — и
+требует наличия каждого ключа в `DEFAULT_CONFIG` и в `config.example.json`.
+
+Регрессии: `test_node_from_config_drives_check_and_launch` (заданный путь
+доходит до `Popen`), `test_node_binary_defaults_to_plain_node`,
+`test_env_forwards_max_rooms_only_when_set`,
+`test_mediasoup_timeout_must_be_a_number_in_range`,
+`test_mediasoup_max_rooms_must_be_int`, `test_mediasoup_node_must_be_a_string`.
+
+**4. Девять живых настроек, которых не было в операторском шаблоне.**
+
+Тем же сканом поднялось массово: `sip.identity.{domain,user,display_name}`,
+`sip.tls.{cert_file,key_file,verify_peer,self_signed_days}`, `sip.null_audio`,
+`sip.codecs.profile` — есть в `DEFAULT_CONFIG`, читаются кодом, но их нет в
+`config.example.json`. Копирующий шаблон оператор не узнавал ни про
+SIP-over-TLS, ни про настройку From-URI, ни про профиль кодеков.
+
+Проверено не мнением, а боевым путём: `config.json` с одной строкой ->
+`load_config` -> снимок 62 публичных свойств. Сдвигаются `identity`, `sip_tls`,
+`null_audio`, `codec_profile`, `audio_codecs`/`video_codecs`,
+`sip_display_name` — значит все девять настоящие, а не декоративные. Шаблон
+дополнен значениями, равными дефолтам, и снимок конфига до/после правки
+идентичен (`diff` пуст): дополнять шаблон можно только так.
+
+Закрыто вторым краем того же стража —
+`test_example_config_declares_only_settings_the_code_knows`: каждый путь
+шаблона обязан существовать в `DEFAULT_CONFIG` и совпадать с ним по типу
+(`bool` сверяется отдельно и первым: он подкласс `int`, и `false` в JSON иначе
+проходил бы как целое). Значения не сверяются намеренно —
+`features.recording_path` в шаблоне операторский «./recordings», а не XDG-путь
+из дефолтов.
+
+Набор: 1064 passed pytest'ом и 1064 кейса мини-раннером (числа совпали);
+`ruff check . --select E,F,W --ignore E501`, `ruff check . --select
+F821,F811,F841,E9` и `mypy mcuclient --ignore-missing-imports` — без ошибок.
+
 ### 2026-10-09 — DTMF-дубликат в номере зала и «зелёный» стенд без pjsua2
 
 Две независимые починки, обе воспроизведены живьём, обе закрыты регрессией.

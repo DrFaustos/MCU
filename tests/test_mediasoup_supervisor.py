@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 
 from mcuclient.mediasoup_supervisor import MediasoupSupervisor
 
@@ -122,3 +123,53 @@ def test_stats_reports_error_when_down():
     stats = sup.stats()
     assert stats["ok"] is False
     assert "error" in stats
+
+
+def test_node_from_config_drives_check_and_launch(tmp_path: pathlib.Path,
+                                                 monkeypatch):
+    """Один бинарник и для проверки доступности, и для запуска.
+
+    Воспроизведено живьём 2026-10-09: node_available() спрашивал у конфига
+    features.web.mediasoup.node, а start() поднимал Popen(["node", ...]).
+    Если Node стоит по абсолютному пути и его нет в PATH (модули, venv,
+    контейнер), which() находил заданный путь, Popen — нет; FileNotFoundError
+    проглатывался except Exception в start(), и в логе оставалось только
+    «не удалось запустить сайдкар» — без следа про путь.
+    """
+    seen = {}
+
+    def _popen(argv, **k):
+        seen["argv"] = list(argv)
+        return _FakeProc(returncode=None, stdout=None)
+
+    wanted = "/opt/node20/bin/node"
+
+    # which знает ТОЛЬКО про заданный путь: машина, где Node нет в PATH.
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, *a, **k: wanted if name == wanted else None)
+
+    sup = MediasoupSupervisor(_Cfg(enabled=True, node=wanted),
+                              sidecar_dir=_sidecar_dir(tmp_path),
+                              popen=_popen, client=_FakeClient(available=True))
+    assert sup.node_available() is True
+    assert sup.start(wait_seconds=0.5) is True
+    assert seen["argv"] == [wanted, "src/server.js"], seen["argv"]
+    sup.stop()
+
+
+def test_node_binary_defaults_to_plain_node():
+    """Без настройки поведение не меняется: голое `node` из PATH."""
+    assert MediasoupSupervisor(_Cfg(enabled=True)).node_binary() == "node"
+    # Пустая строка в конфиге — тоже «как по умолчанию», а не Popen([""]).
+    assert MediasoupSupervisor(
+        _Cfg(enabled=True, node="  ")).node_binary() == "node"
+
+
+def test_env_forwards_max_rooms_only_when_set():
+    """Лимит комнат у сайдкара есть (MCU_MEDIASOUP_MAX_ROOMS), но из
+    Python-конфига он был недостижим — настройка физически не работала."""
+    env = MediasoupSupervisor(_Cfg(enabled=True, max_rooms=7))._env()
+    assert env["MCU_MEDIASOUP_MAX_ROOMS"] == "7"
+    # 0 (по умолчанию) = не переопределять дефолт сайдкара (200).
+    assert "MCU_MEDIASOUP_MAX_ROOMS" not in MediasoupSupervisor(
+        _Cfg(enabled=True))._env()

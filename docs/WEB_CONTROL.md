@@ -325,7 +325,12 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 Кроме встроенного SFU-lite на `aiortc` есть **опциональный внешний SFU** на [mediasoup](https://mediasoup.org/) (`mediasoup-sidecar/` — Node.js сервис с C++ worker'ами). Он даёт **симулкаст** и **масштаб** на несколько worker'ов, которых у `aiortc` нет.
 
 * Включается в `features.web.mediasoup.enabled` (по умолчанию **выкл**);  при старте приложение поднимает сайдкар дочерним процессом  (`mcuclient/mediasoup_supervisor.py`) и общается с ним по HTTP  control API (`mcuclient/mediasoup_client.py`). Медиа идёт по RTP,  через API — только управление.
-* Требует **Node.js ≥ 20** и открытый диапазон UDP `rtc_min..rtc_max`  (по умолчанию 40000-40100); для интернета — `announced_ip` и TURN.
+* Требует **Node.js ≥ 20** и открытый диапазон UDP `rtc_min..rtc_max`  (по умолчанию 40000-40100); для интернета — `announced_ip` и TURN;
+  если Node стоит вне `PATH`, укажите его в `features.web.mediasoup.node` —
+  по этому же значению проверяется доступность и запускается процесс (разные
+  бинарники давали «Node не найден» при проверке и молчаливый провал старта).
+  `timeout` — таймаут HTTP control API, сек; `max_rooms` — комнат на worker
+  (0 = 200 по умолчанию у сайдкара).
 * Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
 * **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
   cp .env.example .env && docker compose up -d --build` — см.

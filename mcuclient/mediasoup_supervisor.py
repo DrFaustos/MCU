@@ -78,6 +78,11 @@ class MediasoupSupervisor:
             env["MCU_MEDIASOUP_ANNOUNCED_IP"] = str(cfg["announced_ip"])
         if cfg.get("listen_ip"):
             env["MCU_MEDIASOUP_LISTEN_IP"] = str(cfg["listen_ip"])
+        # Комнат на worker: у сайдкара такой лимит есть (config.js:
+        # MCU_MEDIASOUP_MAX_ROOMS, по умолчанию 200), но из Python-конфига он
+        # не пробрасывался — настройка была физически недостижима.
+        if cfg.get("max_rooms"):
+            env["MCU_MEDIASOUP_MAX_ROOMS"] = str(cfg["max_rooms"])
         env.setdefault("MEDIASOUP_LOG_LEVEL", str(cfg.get("log_level", "warn")))
         return env
 
@@ -106,9 +111,21 @@ class MediasoupSupervisor:
         return self._client
 
     # -- жизненный цикл ----------------------------------------------------
+    def node_binary(self) -> str:
+        """Бинарник Node из `features.web.mediasoup.node` (по умолчанию `node`).
+
+        Один источник и для проверки доступности, и для запуска. Раньше
+        `node_available()` спрашивал конфиг, а `start()` поднимал литерал
+        `"node"`: если Node стоит по абсолютному пути и отсутствует в PATH
+        (модули, venv, контейнер), проверка проходила по одному бинарнику,
+        а Popen получал другой и падал с FileNotFoundError. Тот
+        проглатывался `except Exception`, и оставалась только строка
+        «не удалось запустить сайдкар» — без следа про путь.
+        """
+        return str(self._ms_config().get("node") or "node").strip() or "node"
+
     def node_available(self) -> bool:
-        node = self._ms_config().get("node", "node")
-        return shutil.which(node) is not None
+        return shutil.which(self.node_binary()) is not None
 
     def start(self, wait_seconds: float = 20.0) -> bool:
         """Запустить сайдкар и дождаться готовности control API.
@@ -121,7 +138,11 @@ class MediasoupSupervisor:
             if self.running:
                 return True
             if not self.node_available():
-                log.error("mediasoup: Node.js не найден в PATH — сайдкар не запущен")
+                # Путь в сообщении — то, чего не хватало при отладке: без него
+                # «не найден» не отличить «не туда посмотрели» от «не туда
+                # запускаем».
+                log.error("mediasoup: Node.js '%s' не найден в PATH — "
+                          "сайдкар не запущен", self.node_binary())
                 return False
             entry = self._sidecar_dir / "src" / "server.js"
             if not entry.exists():
@@ -129,7 +150,9 @@ class MediasoupSupervisor:
                 return False
             try:
                 self._proc = self._popen(
-                    ["node", "src/server.js"],
+                    # Тот же бинарник, чью доступность проверял
+                    # node_available(): см. node_binary().
+                    [self.node_binary(), "src/server.js"],
                     cwd=str(self._sidecar_dir),
                     env=self._env(),
                     stdout=subprocess.PIPE,

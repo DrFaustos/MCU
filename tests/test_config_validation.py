@@ -125,6 +125,34 @@ def test_recording_dir_is_absolute():
     assert "recordings" in d.parts
 
 
+def test_mediasoup_timeout_must_be_a_number_in_range():
+    """timeout читает супервизор (float(cfg["timeout"])) — значит битое
+    значение обязано ловиться при загрузке конфига, а не на старте процесса."""
+    cfg = _cfg()
+    cfg["features"]["web"]["mediasoup"]["timeout"] = 9999
+    with _raises(ConfigError, "timeout"):
+        validate_config(cfg)
+
+    cfg = _cfg()
+    cfg["features"]["web"]["mediasoup"]["timeout"] = "10"
+    with _raises(ConfigError, "timeout"):
+        validate_config(cfg)
+
+
+def test_mediasoup_max_rooms_must_be_int():
+    cfg = _cfg()
+    cfg["features"]["web"]["mediasoup"]["max_rooms"] = "many"
+    with _raises(ConfigError, "max_rooms"):
+        validate_config(cfg)
+
+
+def test_mediasoup_node_must_be_a_string():
+    cfg = _cfg()
+    cfg["features"]["web"]["mediasoup"]["node"] = 5
+    with _raises(ConfigError, "node"):
+        validate_config(cfg)
+
+
 def test_parse_listen_bad_port():
     with _raises(ValueError):
         parse_listen("0.0.0.0:notaport")

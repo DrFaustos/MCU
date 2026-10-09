@@ -12,6 +12,18 @@
     "srtp": "",
     "max_calls": 16,
     "auto_answer": true,
+    "null_audio": false,
+    "identity": {
+      "domain": "",
+      "user": "",
+      "display_name": ""
+    },
+    "tls": {
+      "cert_file": "",
+      "key_file": "",
+      "verify_peer": false,
+      "self_signed_days": 3650
+    },
     "stun": {
       "server": "",
       "enable_ice": true
@@ -36,6 +48,7 @@
       "rtcp_mux": "off"
     },
     "codecs": {
+      "profile": "max_compat",
       "audio": [
         "PCMU/8000/1",
         "PCMA/8000/1",
@@ -127,7 +140,10 @@
         "rtc_max": 40100,
         "announced_ip": "",
         "listen_ip": "0.0.0.0",
-        "log_level": "warn"
+        "log_level": "warn",
+        "node": "node",
+        "timeout": 10.0,
+        "max_rooms": 0
       }
     }
   }

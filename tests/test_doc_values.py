@@ -15,6 +15,7 @@ mcuclient/config.py. Придуманный режим красит прогон
 
 import ast
 import copy
+import json
 import re
 import subprocess
 import sys
@@ -361,3 +362,134 @@ def test_rest_api_tables_list_exactly_the_server_routes():
         for path in sorted(code[method] - documented):
             bad.append(f"{method} {path}: в сервере есть, в docs/WEB_CONTROL.md не описан")
     assert not bad, "таблицы REST API разошлись с кодом:\n" + "\n".join(bad)
+
+#: mcuclient/mediasoup_supervisor.py читает секцию features.web.mediasoup через
+#: cfg.get("ключ"). Настройка, которой нет ни в DEFAULT_CONFIG, ни в
+#: config.example.json, не ругается никак — merge просто не видит лишнего, и
+#: оператор получает тихий no-op. Так потерялись три ключа (2026-10-09):
+#: `node` читал node_available(), а start() поднимал литерал "node" (разные
+#: бинарники => молчаливый FileNotFoundError); `timeout` и `max_rooms` не были
+#: объявлены вообще нигде. Страж ниже не даёт классу вернуться.
+SUPERVISOR_FILE = ROOT / "mcuclient" / "mediasoup_supervisor.py"
+EXAMPLE_CONFIG = ROOT / "config.example.json"
+
+
+def _section_keys_read(file_text: str, getter: str) -> set:
+    """Имена ключей, которые код читает из секции через .get("ключ").
+
+    Берёт обе формы: прямой вызов (self._ms_config().get("key")) и чтение из
+    локальной переменной, которой секцию присвоили (cfg = self._ms_config()).
+    Без второй половины про бы молчал: `_env()` работает именно через cfg.
+    """
+    tree = ast.parse(file_text)
+    holders = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        fn = node.value.func
+        if isinstance(fn, ast.Attribute) and fn.attr == getter:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    holders.add(target.id)
+    keys = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "get" or not node.args:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            continue
+        recv = node.func.value
+        direct = (isinstance(recv, ast.Call) and isinstance(recv.func, ast.Attribute)
+            and recv.func.attr == getter)
+        via_var = isinstance(recv, ast.Name) and recv.id in holders
+        if direct or via_var:
+            keys.add(first.value)
+    return keys
+
+
+def test_supervisor_settings_are_declared_in_config_template():
+    """Каждый ключ mediasoup, до которого дотягивается код, обязан быть виден
+    оператору: в DEFAULT_CONFIG и в шаблоне config.example.json.
+
+    Обратный случай (ключ объявлен и никем не читается) безвреден: его хотя бы
+    видно. А нечитаемый из шаблона ключ исчезает бесследно — приложение делает
+    вид, что настройку применяет.
+    """
+    keys = _section_keys_read(SUPERVISOR_FILE.read_text(encoding="utf-8"),
+        "_ms_config")
+    assert keys, "парсер не нашёл ни одного чтения секции в mediasoup_supervisor.py"
+    defaults = DEFAULT_CONFIG["features"]["web"]["mediasoup"]
+    template = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    template = template["features"]["web"]["mediasoup"]
+    bad = []
+    for key in sorted(keys):
+        if key not in defaults:
+            bad.append("%s: читается супервизором, но нет в DEFAULT_CONFIG" % key)
+        if key not in template:
+            bad.append("%s: читается супервизором, но нет в config.example.json" % key)
+    assert not bad, "настройки mediasoup недостижимы из конфига:\n" + "\n".join(bad)
+
+#: config.example.json — операторская форма: её копируют в config.json.
+#: Ключ, которого нет в DEFAULT_CONFIG, _deep_merge подхватывает молча, и
+#: приложение его никогда не читает — настройка выглядит применённой. Та же
+#: ложь, что `srtp: "disable"`, только формой шире: не значение, а вся
+#: настройка. Тест выше закрыл край «код читает, шаблона нет»; этот — край
+#: «шаблон обещает, коду всё равно».
+_MISSING = object()
+
+
+def _template_leaves(node, path=""):
+    """(путь, значение) для каждого узла шаблона; путь — через точку."""
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        where = "%s.%s" % (path, key) if path else str(key)
+        yield where, value
+        for item in _template_leaves(value, where):
+            yield item
+
+
+def test_example_config_declares_only_settings_the_code_knows():
+    """Каждая строка config.example.json обязана быть в DEFAULT_CONFIG и того же типа.
+
+    Тип важен не меньше пути: `timeout: "10"` вместо 10 падает ConfigError'ом
+    ровно у того, кто послушался шаблона, а не у того, кто его пишет.
+    """
+    example = json.loads(
+        (ROOT / "config.example.json").read_text(encoding="utf-8"))
+
+    def lookup(path):
+        node = DEFAULT_CONFIG
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return _MISSING
+            node = node[part]
+        return node
+
+    bad = []
+    for path, value in _template_leaves(example):
+        default = lookup(path)
+        if default is _MISSING:
+            bad.append("%s: есть в config.example.json, нет в DEFAULT_CONFIG" % path)
+            continue
+        if isinstance(value, dict) or isinstance(default, dict):
+            if isinstance(value, dict) != isinstance(default, dict):
+                bad.append("%s: в шаблоне %s, в DEFAULT_CONFIG %s" % (
+                    path, type(value).__name__, type(default).__name__))
+            continue
+        if isinstance(value, list):
+            # Элементы списков не сверяем: порядок в них = приоритет, а набор
+            # кодеков живёт в CODEC_PROFILES и меняется чаще шаблона.
+            if not isinstance(default, list):
+                bad.append("%s: в шаблоне list, в DEFAULT_CONFIG %s" % (
+                    path, type(default).__name__))
+            continue
+        # bool — подкласс int, поэтому сравнивается отдельно и первым.
+        if isinstance(value, bool) != isinstance(default, bool) \
+                or type(value) is not type(default):
+            bad.append("%s: в шаблоне %s, в DEFAULT_CONFIG %s" % (
+                path, type(value).__name__, type(default).__name__))
+    assert not bad, ("config.example.json разошёлся с DEFAULT_CONFIG:\n"
+                     + "\n".join(bad))

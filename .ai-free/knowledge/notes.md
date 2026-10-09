@@ -556,3 +556,62 @@ DTMF-стенд.
   только ПОСЛЕ _deep_merge с DEFAULT_CONFIG (config.py:1221-1225),
   отсутствующего ключа в проде не бывает. Исправлен тест, а не валидатор.
 <!-- source: agent -->
+
+
+## Конфиг: настройки, которые код читает, а шаблон не знает (2026-10-09)
+
+- **Симптом.** mediasoup-sidecar не поднимался, если Node стоял вне PATH;
+  настройки timeout/max_rooms молча игнорировались. Ошибки в логе нет.
+- **Корневая причина.** Две разные формы одного расхождения. (1) В
+  mcuclient/mediasoup_supervisor.py node_available() читал cfg["node"] и делал
+  shutil.which(), а start() поднимал Popen(["node", "src/server.js"]) — литерал:
+  проверка по одному бинарнику, запуск по другому, FileNotFoundError проглатывался
+  except Exception (воспроизведено: argv=['node', ...] при node=/opt/node20/bin/node).
+  (2) cfg.get("timeout") и MCU_MEDIASOUP_MAX_ROOMS не были объявлены ни в
+  DEFAULT_CONFIG, ни в config.example.json, ни в доке. _deep_merge с дефолтами
+  проглатывает НЕИЗВЕСТНЫЙ ключ молча — тихий no-op, а не ConfigError (в отличие
+  от неверного ЗНАЧЕНИЯ, которое ловится).
+- **Правка.** Один источник истины node_binary() (зовут и node_available, и
+  start); в лог «не найден» добавлен путь. node/timeout/max_rooms объявлены в
+  DEFAULT_CONFIG, config.example.json, docs/WEB_CONTROL.md; валидация —
+  новый _check_num (таймаут) + _check_int (max_rooms) + строка для node.
+- **Метод поиска.** Зонд «leaf-ключи, которые не читает никто» дал 0 из 75 —
+  мёртвых настроек нет; вреден ОБРАТНЫЙ случай (код читает, шаблона нет), его и
+  надо сканировать. Парсить надо обе формы чтения: прямую (self._ms_config().
+  get("key")) и через локальную переменную (cfg = self._ms_config()) — _env()
+  работает именно через cfg, с прямой формой страж молчал бы.
+- **Закрыто стражем** `test_supervisor_settings_are_declared_in_config_template`:
+  AST-разбор достает чтения секции и требует каждый ключ в DEFAULT_CONFIG и
+  config.example.json (число кейсов — ниже, его сверяет страж чисел).
+- **Регрессии:** test_node_from_config_drives_check_and_launch,
+  test_node_binary_defaults_to_plain_node, test_env_forwards_max_rooms_only_when_set,
+  test_mediasoup_timeout_must_be_a_number_in_range,
+  test_mediasoup_max_rooms_must_be_int, test_mediasoup_node_must_be_a_string.
+- **Второй край того же класса (массово).** 9 leaf-ключей есть в DEFAULT_CONFIG
+  и читаются кодом, но их нет в config.example.json:
+  sip.identity.{domain,user,display_name},
+  sip.tls.{cert_file,key_file,verify_peer,self_signed_days}, sip.null_audio,
+  sip.codecs.profile. Все девять живые — проверено боевым путём оператора
+  (config.json с одной строкой -> load_config -> снимок 62 публичных свойств):
+  сдвигаются identity, sip_tls, null_audio, codec_profile, audio_codecs /
+  video_codecs, sip_display_name. Оператор, скопировавший шаблон, не узнавал ни
+  про SIP-over-TLS, ни про From-URI, ни про профиль кодеков. Шаблон дополнен
+  значениями, равными дефолтам; снимок конфига до/после идентичен
+  (.agent/snap_tpl.py before|after, затем diff) — дополнение поведению не вредит.
+- **Закрыто вторым стражем** `test_example_config_declares_only_settings_the_code_knows`:
+  каждый путь шаблона обязан существовать в DEFAULT_CONFIG и совпадать по типу.
+  bool сверяется ОТДЕЛЬНО и первым — он подкласс int, иначе false в JSON
+  проходил бы как целое. Значения не сверяются намеренно:
+  features.recording_path в шаблоне — операторский «./recordings», а не
+  XDG-путь из дефолтов.
+- **Кейсы:** `tests/test_doc_values.py` (11), `tests/test_config_validation.py` (16),
+  `tests/test_mediasoup_supervisor.py` (10).
+- **Линтеры в этом окружении:** ruff/mypy в боевом python3 ОТСУТСТВУЮТ
+  (`No module named`; pip блокирует PEP 668). Поднимать в scratch-venv:
+  $SCRATCH/lintenv (ruff 0.16.10, mypy 2.4.0). Гнать ровно CI-развилки:
+  `ruff check . --select E,F,W --ignore E501`,
+  `ruff check . --select F821,F811,F841,E9`, `mypy mcuclient --ignore-missing-imports`.
+  ГОЛОЙ `ruff check .` даёт 711 ошибок (профиль по умолчанию включает I001 и пр.) —
+  это не про CI, не пугаться и не «чинить».
+- **Проверка среза:** pytest 1063 passed / мини-раннер 1063 кейса (числа совпали).
+<!-- source: agent -->
