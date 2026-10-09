@@ -494,3 +494,20 @@ DTMF-стенд.
 <!-- source: agent -->
 
 
+
+
+## Контракт обёрток стендов (scripts/testbed/lib/stand.sh) (2026-10-09)
+
+- **Симптом.** run_two_instance_*.sh без установленного pjsua2 печатали [skip] и возвращали 0: CI зелёный, хотя стенд не выполнялся. Параллельные прогоны дополнительно теряли DTMF-тоны и ловили нативный abort pjsua2 (grp_lock_acquire: Assertion ... failed).
+- **Контракт (5 требований, проверяется шагом CI «Testbed wrapper guards»):** stand_require_pjsua2 (стек проверен ДО прогона), stand_gate (flock на MCU_STAND_LOCK — один стенд за раз), stand_skip_seen + stand_report_skip ([skip] — не успех), обязательный маркер успеха grep -q ... *.log, боевой интерпретатор через stand_python (PYTHON=...).
+- **Коды возврата:** 0 — прошёл, 1 — упал, 2 — НЕ выполнялся (нет pjsua2/интерпретатора либо замок занят). Двойка отделена от единицы намеренно и совпадает с run_local_sip_testbed.sh.
+- **Проверка на этом ноутбуке:** PYTHON=/usr/bin/python3 bash scripts/testbed/run_two_instance_test.sh (в python3 из PATH нативного стека нет; боевой — /usr/bin/python3, pjsua2 2.16).
+<!-- source: agent -->
+
+
+## Standalone-раннеры стендов: [skip] обязан давать rc=2 (2026-10-09)
+
+- **Симптом.** scripts/testbed/verify_registration.py и scripts/testbed/test_mcu_sip_call.py без pjsua2 печатали [skip] и возвращали 0 (воспроизведено живьём: rc_vr=0, rc_tm=0). Ручной прогон и любая обёртка без stand.sh считали это успехом.
+- **Правка.** В skip-ветках return 2 («НЕ ВЫПОЛНЯЛСЯ») — тот же контракт, что у обёрток run_two_instance_*.sh: 0 — прошёл, 1 — упал, 2 — не выполнялось. two_instance_*.py оставлены с rc=0 намеренно: их вызывают только обёртки, которые проверяют pjsua2 ДО прогона и ловят [skip] в логе.
+- **Регрессия.** tests/test_stand_exit_codes.py (7 проверок, 0.2 с): rc=2 на [skip] у обоих standalone-раннеров (флаг PJSIP_AVAILABLE подменяется в модуле-раннере — тест зелёный и со стеком, и без), пять требований stand.sh в каждой обёртке, stand_gate при занятом замке (rc=2) и при свободном (rc=0), stand_report_skip (rc=2, сообщение в stderr — проверять БЕЗ «2>&1», иначе ложный провал).
+<!-- source: agent -->

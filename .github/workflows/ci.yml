@@ -91,10 +91,32 @@ jobs:
 
       - name: Shellcheck dev scripts (syntax)
         run: |
-          for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/run_gui.sh \
+          for f in scripts/dev/*.sh scripts/testbed/*.sh scripts/testbed/lib/*.sh \
+                   scripts/run_gui.sh \
                    scripts/install_h323plus.sh scripts/build_h323d.sh; do
             bash -n "$f" && echo "OK  $f" || { echo "FAIL $f"; exit 1; }
           done
+
+      - name: Testbed wrapper guards (stand.sh contract)
+        # каждая обёртка two_instance обязана проверять pjsua2 ДО
+        # прогона, держать замок, не считать успехом [skip] и требовать
+        # маркер успеха в логе. Без этого шага обёртка без pjsua2
+        # рапортовала зелёным (см. scripts/testbed/lib/stand.sh).
+        run: |
+          fail=0
+          for f in scripts/testbed/run_two_instance_*.sh; do
+            grep -q "lib/stand.sh" "$f" || { echo "FAIL $f: нет . lib/stand.sh"; fail=1; }
+            grep -q "stand_require_pjsua2" "$f" || { echo "FAIL $f: нет stand_require_pjsua2"; fail=1; }
+            grep -q "stand_gate" "$f" || { echo "FAIL $f: нет stand_gate"; fail=1; }
+            grep -q "stand_skip_seen" "$f" || { echo "FAIL $f: нет stand_skip_seen"; fail=1; }
+            grep -q "stand_report_skip" "$f" || { echo "FAIL $f: нет stand_report_skip"; fail=1; }
+            grep -Eq "grep -q .*[.]log" "$f" || { echo "FAIL $f: нет маркера успеха в логе"; fail=1; }
+          done
+          if [ "$fail" != 0 ]; then
+            echo "обёртки стендов не соответствуют контракту scripts/testbed/lib/stand.sh"
+            exit 1
+          fi
+          echo "OK: обёртки стендов соответствуют контракту stand.sh"
 
       - name: Dockerfiles present
         run: |

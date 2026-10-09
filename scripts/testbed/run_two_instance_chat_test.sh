@@ -11,7 +11,11 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-PYTHON="${PYTHON:-python3}"
+# shellcheck source=lib/stand.sh
+. "$ROOT/scripts/testbed/lib/stand.sh"
+PYTHON="$(stand_python)"
+stand_require_pjsua2 "$PYTHON" "чат-стенд" || exit 2
+stand_gate "чат-стенд" || exit 2
 LISTEN_PORT="${LISTEN_PORT:-15094}"
 CALL_PORT="${CALL_PORT:-15093}"
 "$PYTHON" scripts/testbed/two_instance_chat.py listen "$LISTEN_PORT" > /tmp/mcu_chat_listen.log 2>&1 &
@@ -23,5 +27,15 @@ wait $LPID; LR=$?
 echo "[i] call=$CR listen=$LR"
 grep -E '^\[' /tmp/mcu_chat_call.log || true
 grep -E '^\[' /tmp/mcu_chat_listen.log | sort -u || true
-[ "$CR" = 0 ] && [ "$LR" = 0 ] && echo '[+] CHAT MCU<->MCU OK' && exit 0
+if stand_skip_seen /tmp/mcu_chat_call.log || stand_skip_seen /tmp/mcu_chat_listen.log; then
+  stand_report_skip /tmp/mcu_chat_call.log /tmp/mcu_chat_listen.log; exit $?
+fi
+# Успех = текст, принятый ВТОРОЙ стороной, а не нулевые коды возврата:
+# именно посимвольное равенство текста ловает баг с wholeMsg (см. lib/stand.sh).
+if [ "$CR" = 0 ] && [ "$LR" = 0 ] &&
+   grep -q "чат принят: " /tmp/mcu_chat_listen.log &&
+   grep -q "отправлено в вызов " /tmp/mcu_chat_call.log; then
+  echo '[+] CHAT MCU<->MCU OK'
+  exit 0
+fi
 echo '[!] CHAT MCU<->MCU FAILED' >&2; exit 1

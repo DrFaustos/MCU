@@ -158,7 +158,9 @@ def _drain_sipp(engine: SipEngine, proc: subprocess.Popen, seconds: float) -> st
 def main(argv: list[str]) -> int:  # noqa: ARG001
     if not PJSIP_AVAILABLE:
         print("[skip] pjsua2 недоступен")
-        return 0
+        # 2, а не 0: без стека здесь ничего не проверялось. rc=0 на [skip] —
+        # ложноположительный зелёный (тот же баг, что закрыт в lib/stand.sh).
+        return 2
 
     report: dict = {"scenario": "register-then-call-6001", "steps": []}
 

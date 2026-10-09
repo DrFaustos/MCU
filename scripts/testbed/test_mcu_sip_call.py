@@ -8,7 +8,9 @@
     scripts/testbed/run_local_sip_testbed.sh
     python3 scripts/testbed/test_mcu_sip_call.py
 
-Возвращает 0, если вызов дошёл до CONFIRMED; иначе 1.
+Коды возврата: 0 — вызов дошёл до CONFIRMED; 1 — не подтверждён;
+2 — НЕ ВЫПОЛНЯЛСЯ (нет pjsua2). Двойка отделена от единицы: «стек не
+запустился» — не то же самое, что «звонок упал» (контракт stand.sh).
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ TIMEOUT_S = 15
 def main() -> int:
     if not PJSIP_AVAILABLE:
         print("[skip] pjsua2 недоступен — тест требует реального SIP-стека")
-        return 0
+        # 2, а не 0: без стека здесь ничего не проверялось. rc=0 на [skip] —
+        # ложноположительный зелёный (тот же баг, что закрыт в lib/stand.sh).
+        return 2
 
     cfg = load_config(None)
     cfg.raw["sip"]["port"] = 15072
