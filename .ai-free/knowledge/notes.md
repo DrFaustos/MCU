@@ -175,8 +175,17 @@ parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
 * счётчик кейсов читать из ФАЙЛА лога, а не из `cat` в terminal(): native-лог
  pjsua2 и лимиты вывода обрезают текст, и казалось, что раннер потерял треть
  набора (было 987, «виделось» 733).
+* фикстуры: раннер подставлял только `tmp_path` и `monkeypatch`. Тесты стендовых
+  кодов возврата (`test_stand_exit_codes.py`) читают `[skip]` через `capsys` →
+  `TypeError: нет значения для аргумента 'capsys'` и exit=1 при зелёном pytest
+  (1046 passed). Аналог — `Capture`/`CaptureResult` в `_runner.py`;
+  `uninstall()` обязан стоять в `finally` РАНЬШЕ `traceback.print_exc()` в
+  `main()`, иначе трейсбек упавшего теста оседает в буфере перехвата и FAIL
+  печатается молча. Перед расширением раннера снимать покрытие AST-пробой:
+  имена параметров тестов vs `SUPPORTED` — так видно, что «неизвестный параметр»
+  на деле аргумент `parametrize`, а не фикстура.
 
-Регрессия: `tests/test_test_runner.py` (13) — семантика раннера на пробах в
+Регрессия: `tests/test_test_runner.py` (14) — семантика раннера на пробах в
 tmp_path, гоняется и pytest'ом, и самим раннером.
 
 ## Боевой интерпретатор — /usr/bin/python3, а НЕ python3 из PATH
