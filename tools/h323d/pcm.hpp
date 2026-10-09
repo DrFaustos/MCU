@@ -200,8 +200,14 @@ class WavWriter {
 inline bool g_trace_enabled = false;
 
 // Вызов: отдать Python-у кадр входящего PCM (уже декодированный).
+// Частоту передаём ВМЕСТЕ с кадром: она берётся из согласованного media
+// format'а вызова (G.711 — 8 кГц, G.722 — 16 кГц), а Python-микшер обязан
+// знать, В КАКОЙ частоте пришли сэмплы. Без неё он сложит в один микс 8- и
+// 16-кГц каналы и вернёт в канал неверную длительность (замедленный либо
+// ускоренный голос) — и ни одной ошибки при этом не будет.
 using FrameSink = std::function<void(const std::string &token,
-                                     const uint8_t *data, size_t len)>;
+                                     const uint8_t *data, size_t len,
+                                     unsigned sample_rate)>;
 
 // PSoundChannel поверх Ring. Направлением управляет isEncoding:
 //   TRUE  — кодек зовёт Read()  (ем исходящий PCM от Python);
@@ -263,7 +269,7 @@ class McuPcmChannel : public PSoundChannel {
       std::lock_guard<std::mutex> lk(frame_mu_);
       // Досылаем неполный кадр, чтобы хвост не потерялся.
       if (sink_ && sink_frame_ > 0) {
-        sink_(token_, sink_buf_.data(), sink_frame_);
+        sink_(token_, sink_buf_.data(), sink_frame_, rate_);
         sink_frame_ = 0;
       }
       sink_ = FrameSink();
@@ -358,7 +364,7 @@ class McuPcmChannel : public PSoundChannel {
           sink_frame_ += take;
           off += take;
           if (sink_frame_ >= sink_frame_size_) {
-            sink_(token_, sink_buf_.data(), sink_frame_size_);
+            sink_(token_, sink_buf_.data(), sink_frame_size_, rate_);
             sink_frame_ = 0;
           }
         }

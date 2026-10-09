@@ -179,8 +179,14 @@ class MediaBus:
             return sorted(set(self._video) | set(self._audio))
 
 
-def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> bytes:
-    """Привести PCM s16 к моно и целевой частоте (numpy). Без numpy — как есть."""
+def resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> bytes:
+    """Привести PCM s16 к моно и целевой частоте (numpy). Без numpy — как есть.
+
+    Функция публичная: её зовёт :mod:`mcuclient.h323_audio_bridge`, чтобы свести
+    в один микс каналы разной частоты (G.711 — 8 кГц, G.722 — 16 кГц). Вторую
+    копию реземплера держать нельзя: починка уехала бы только в одну из них
+    (см. tests/test_resample_fallback.py — пустой ответ без numpy чинили здесь).
+    """
     if not pcm:
         return b""
     if _np is None:
@@ -227,6 +233,10 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
         dst = _np.linspace(0.0, len(arr) - 1.0, n)
         arr = _np.interp(dst, src, arr.astype(_np.float64))
     return _np.clip(arr, -32768, 32767).astype(_np.int16).tobytes()
+
+
+#: Совместимость: тесты и внутренние вызовы обращаются по прежнему имени.
+_resample_mono = resample_mono
 
 
 def _fit_frame(pcm: bytes, frame_bytes: int) -> bytes:
@@ -319,10 +329,13 @@ class AudioMixSession:
             pcm, rate, channels = item
             mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
             self._mixer.set_buffer(pid, mono)
-        # Убрать из микшера тех, кто больше не публикует.
-        for pid in list(self._mixer.participant_ids):
-            if pid not in publishers:
-                self._mixer.remove(pid)
+        # Убрать из микшера тех, кто больше не публикует. Имя переменной
+        # отличается от цикла выше: participant_ids микшера — ParticipantId
+        # (Union[int, str]), publishers — List[str], и mypy отвергал
+        # повторное присваивание pid другого типа.
+        for buffered in list(self._mixer.participant_ids):
+            if buffered not in publishers:
+                self._mixer.remove(buffered)
 
         recipients = self._recipients
         if callable(recipients):
@@ -374,7 +387,10 @@ class AudioMixSession:
             return self._mixed.get(recipient)
 
     def active_publishers(self) -> List[str]:
-        return list(self._mixer.participant_ids)
+        # В этом микшере живут только веб-публикаторы (str-id), но тип id у
+        # микшера шире: SIP/H.323-слой и mcu_core зовут его числами. Сужаем
+        # явно, а не кастом — чужой int-id сюда физически не попадает.
+        return [pid for pid in self._mixer.participant_ids if isinstance(pid, str)]
 
 
 class Conference:

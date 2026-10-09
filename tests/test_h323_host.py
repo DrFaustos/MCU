@@ -212,3 +212,57 @@ def test_full_ipc_roundtrip():
     cmds = [r.get("cmd") for r in received]
     assert "call.answer" in cmds
     assert "call.hangup" in cmds
+
+
+# --- call.media: согласованный аудио-канал (Этап 1м/3) ----------------------
+
+
+def test_parse_media_event_carries_codec_and_rate():
+    ev = parse_host_event(
+        '{"event":"call.media","token":"call-1","kind":"audio",'
+        '"direction":"decoder","rate":8000,"codec":"G.711u"}'
+    )
+    assert ev is not None
+    assert ev.kind == "call.media"
+    assert ev.token == "call-1"
+    assert ev.codec == "G.711u"
+    assert ev.sample_rate == 8000
+    assert ev.direction == "decoder"
+
+
+def test_parse_media_event_bad_rate_is_zero_not_crash():
+    ev = parse_host_event('{"event":"call.media","rate":"abc","codec":"G.722"}')
+    assert ev is not None
+    assert ev.sample_rate == 0
+    assert ev.codec == "G.722"
+
+
+def test_parse_media_event_missing_fields_defaults():
+    ev = parse_host_event('{"event":"call.media","token":"c"}')
+    assert ev is not None
+    assert (ev.codec, ev.sample_rate, ev.direction) == ("", 0, "")
+
+
+def test_media_bus_payload_carries_codec_and_rate():
+    ev = parse_host_event(
+        '{"event":"call.media","token":"c1","kind":"audio","direction":"encoder",'
+        '"rate":16000,"codec":"G.722"}'
+    )
+    payload = event_to_bus_payload(ev)
+    assert payload["proto"] == "h323"
+    assert payload["token"] == "c1"
+    assert payload["codec"] == "G.722"
+    assert payload["rate"] == 16000
+    assert payload["direction"] == "encoder"
+
+
+def test_bus_payload_omits_empty_media_fields():
+    payload = event_to_bus_payload(HostEvent(kind="call.media", token="c"))
+    assert "codec" not in payload
+    assert "rate" not in payload
+    assert "direction" not in payload
+
+
+def test_event_map_covers_call_media():
+    """Хост шлёт call.media с PCM-медиа; без строки в карте событие теряется."""
+    assert EVENT_MAP["call.media"] == "call.media"

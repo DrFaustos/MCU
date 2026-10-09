@@ -129,6 +129,8 @@ class H323Endpoint:
         auto_answer: bool = True,
         socket_path: str = "/tmp/mcu_h323d.sock",
         registry: Optional[CallRegistry] = None,
+        audio_mix: bool = True,
+        mix_sample_rate: Optional[int] = None,
     ) -> None:
         # Участники заводятся через CallRegistry — ТОТ ЖЕ реестр, что у
         # SipEngine. Причина не в удобстве: у реестра единый счётчик id на
@@ -145,6 +147,12 @@ class H323Endpoint:
         self._socket_path = socket_path
         self._client: Optional[H323dClient] = None
         self._calls: dict[str, Participant] = {}
+        # Этап 3 (ADR-0002): PCM-каналы хоста сводит H323AudioBridge. Без него
+        # каждый вызов звучит сам с собой: хост-то медиа отдаёт (Этап 1м), но
+        # второму участнику голос не переправляет никто.
+        self._audio: Optional[Any] = None
+        self._audio_mix = bool(audio_mix)
+        self._mix_rate = int(mix_sample_rate) if mix_sample_rate else None
 
     # --- комната (через реестр, а не сохранённой ссылкой) ---
     @property
@@ -169,6 +177,19 @@ class H323Endpoint:
     @property
     def socket_path(self) -> str:
         return self._socket_path
+
+    @property
+    def client(self) -> Optional[H323dClient]:
+        """Клиент хоста mcu_h323d (None, если хост не подключён).
+
+        Наружу он отдаётся не для команд, а чтобы наблюдатель (стенд,
+        веб-панель) подписался на события ЧЕРЕЗ :meth:`H323dClient.on_event`.
+        Свой сокет к тому же хосту открывать нельзя: mcu_h323d принимает
+        ровно одного IPC-клиента и вежливо закрывает второго
+        (tools/h323d/ipc.hpp, accept_loop) — у второй стороны молча
+        исчезали и события, и команды.
+        """
+        return self._client
 
     def find_by_token(self, token: str) -> Optional[Participant]:
         """Ищет участника по call-токену H323Plus."""
@@ -332,6 +353,12 @@ class H323Endpoint:
                     participant.id,
                     host_token,
                 )
+        if self._audio is not None and host_token:
+            # Буфер микшера освобождаем сами:call.disconnected от хоста — не
+            # гарантия (хост мог его уже отправить до нашей подписки, а на
+            # старой сборке и вовсе не шлёт). Иначе «фантом» продолжает
+            # попадать в микс всех остальных.
+            self._audio.forget(host_token)
         participant.state = CallState.DISCONNECTED
         self._registry.drop(participant.id)
         for token, p in list(self._calls.items()):
@@ -442,10 +469,61 @@ class H323Endpoint:
             )
             return False
         self._client = client
+        self._start_audio_bridge()
         return True
+
+    def _start_audio_bridge(self) -> None:
+        """Поднимает :class:`~mcuclient.h323_audio_bridge.H323AudioBridge`.
+
+        Импорт здесь, а не на уровне модуля: мост тянет audio_mixer (numpy), а
+        эндпоинт обязан импортироваться и без научных зависимостей, и без
+        собранного H323Plus — тот же graceful degradation, что и в start().
+        """
+        if not self._audio_mix:
+            log.info("H.323: аудио-микширование выключено — участники не услышат друг друга")
+            return
+        try:
+            from .h323_audio_bridge import MIX_RATE_DEFAULT, H323AudioBridge  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 — без моста приём H.323 всё ещё полезен
+            log.exception("H.323: модуль аудио-моста не загрузился")
+            return
+        bridge = H323AudioBridge(
+            self._client, self, mix_sample_rate=self._mix_rate or MIX_RATE_DEFAULT
+        )
+        if not bridge.start():
+            log.warning("H.323: аудио-мост не подписался на события хоста")
+            return
+        self._audio = bridge
+
+    @property
+    def audio(self) -> Optional[Any]:
+        """Аудио-мост (Этап 3) или None, если микширование выключено/не поднялось."""
+        return self._audio
+
+    def audio_stats(self) -> Dict[str, Any]:
+        """Счётчики моста для логов и веб-панели (пустой dict, если моста нет)."""
+        if self._audio is None:
+            return {"enabled": False}
+        st = self._audio.stats()
+        return {
+            "enabled": st.enabled,
+            "mix_rate": st.mix_rate,
+            "channels": st.channels,
+            "rx_frames": st.rx_frames,
+            "tx_frames": st.tx_frames,
+            "rx_bytes": st.rx_bytes,
+            "tx_bytes": st.tx_bytes,
+            "undecodable": st.undecodable,
+        }
 
     def stop(self) -> None:
         """Снимает всех H.323-участников и отключается от хоста."""
+        # Мост гасим ПЕРВЫМ: он читает события того же клиента. Если закрыть
+        # клиент раньше, pcm.in перестанет прибывать, а буферы микшера останутся
+        # висеть на завершённых вызовах.
+        if self._audio is not None:
+            self._audio.stop()
+            self._audio = None
         for p in list(self._calls.values()):
             self.disconnect(p)
         if self._client is not None:

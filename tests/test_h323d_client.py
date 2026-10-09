@@ -212,3 +212,103 @@ def test_pcm_out_empty_data_is_not_sent():
 
     client.send_command = boom
     assert client.pcm_out("call-1", b"") is False
+
+
+# --- replay `ready` позднему подписчику --------------------------------------
+# Хост шлёт `ready` ровно ОДИН раз — в момент ПОДКЛЮЧЕНИЯ клиента
+# (tools/h323d/main.cpp: set_on_client_connected), а не по подписке. Наблюдатель,
+# севший на уже подключённый клиент (стенд трёх хостов, веб-панель), без replay
+# никогда не узнал бы порт и режим ответа: wait("ready") валился бы по таймауту
+# при полностью живом хосте.
+
+
+def _fake_host_lines(path, lines):
+    """Сервер-заглушка: сразу после accept выливает готовые строки событий."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def run():
+        conn, _ = srv.accept()
+        for ln in lines:
+            conn.sendall(ln.encode("utf-8") + b"\n")
+        conn.settimeout(2.0)
+        try:
+            while conn.recv(1024):
+                pass
+        except OSError:
+            pass
+        conn.close()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return srv, t
+
+
+def test_late_subscriber_gets_ready_replay(tmp_path):
+    with unix_socket_path(tmp_path, "mcu_replay.sock") as sock_p:
+        path = str(sock_p)
+        srv, _t = _fake_host_lines(path, ['{"event":"ready","port":1720}'])
+        seen: list = []
+        client = H323dClient(path, on_event=lambda ev: seen.append(ev.event))
+        try:
+            assert client.connect(timeout=2.0) is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and "ready" not in seen:
+                time.sleep(0.02)
+            assert "ready" in seen
+            late: list = []
+            client.on_event(lambda ev: late.append(ev.event))
+            assert late == ["ready"], late
+        finally:
+            client.close()
+            srv.close()
+
+
+def test_ready_replay_survives_subscriber_error(tmp_path):
+    """Ошибка обработчика на replay не имеет права ронять саму подписку."""
+    with unix_socket_path(tmp_path, "mcu_replay_err.sock") as sock_p:
+        path = str(sock_p)
+        srv, _t = _fake_host_lines(path, ['{"event":"ready","port":1720}'])
+        client = H323dClient(path)
+        try:
+            assert client.connect(timeout=2.0) is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and client.ready_port is None:
+                time.sleep(0.02)
+            assert client.ready_port == 1720
+
+            def boom(_ev):
+                raise RuntimeError("кривой наблюдатель")
+
+            client.on_event(boom)
+            ok: list = []
+            client.on_event(lambda ev: ok.append(ev.event))  # подписка жива
+            assert ok == ["ready"], ok
+        finally:
+            client.close()
+            srv.close()
+
+
+def test_late_subscriber_gets_only_ready_replay(tmp_path):
+    """События вызовов не переигрываются: их порядок задаёт состояние комнаты."""
+    with unix_socket_path(tmp_path, "mcu_replay_calls.sock") as sock_p:
+        path = str(sock_p)
+        srv, _t = _fake_host_lines(path, [
+            '{"event":"ready","port":1720}',
+            '{"event":"call.incoming","token":"t1","alias":"peer"}',
+        ])
+        seen: list = []
+        client = H323dClient(path, on_event=lambda ev: seen.append(ev.event))
+        try:
+            assert client.connect(timeout=2.0) is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and len(seen) < 2:
+                time.sleep(0.02)
+            assert seen[:2] == ["ready", "call.incoming"], seen
+            late: list = []
+            client.on_event(lambda ev: late.append(ev.event))
+            assert late == ["ready"], late
+        finally:
+            client.close()
+            srv.close()

@@ -17,7 +17,7 @@ import json
 import socket
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .log import get_logger
 
@@ -78,7 +78,16 @@ class H323dClient:
         on_event: Optional[Callable[[H323dEvent], None]] = None,
     ) -> None:
         self._path = socket_path
-        self._on_event = on_event
+        # Подписчиков может быть несколько: события читают и эндпоинт (состояния
+        # вызовов, участники комнаты), и аудио-мост (pcm.in, call.media). Колбэк
+        # был ровно один — второй подписчик молча затирал первого, и тот терял
+        # медиа (или, наоборот, комната лишалась событий вызова).
+        self._callbacks: List[Callable[[H323dEvent], None]] = []
+        if on_event is not None:
+            self._callbacks.append(on_event)
+        self._cb_lock = threading.Lock()
+        #: Последний `ready` хоста — для replay позднему подписчику (см. on_event).
+        self._last_ready: Optional[H323dEvent] = None
         self._sock: Optional[socket.socket] = None
         self._reader: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -88,6 +97,40 @@ class H323dClient:
     @property
     def connected(self) -> bool:
         return self._sock is not None and self._running.is_set()
+
+    def on_event(self, cb: Callable[[H323dEvent], None]) -> None:
+        """Добавить обработчик событий (можно до connect)."""
+        if cb is None:
+            return
+        with self._cb_lock:
+            if cb not in self._callbacks:
+                self._callbacks.append(cb)
+            ready = self._last_ready
+        # Replay `ready`. Хост присылает его ровно ОДИН раз — в момент
+        # подключении клиента (main.cpp: set_on_client_connected), а не по
+        # подписке. Поздний подписчик — наблюдатель стенда или веб-панель,
+        # севшие на уже подключённый клиент, — никогда не узнал бы порт и
+        # режим ответа: wait("ready") в стенде валился бы по таймауту при
+        # полностью живом хосте. Только ready, не события вызовов: их replay
+        # перепутал бы порядок состояний.
+        if ready is not None:
+            try:
+                cb(ready)
+            except Exception:  # noqa: BLE001 — replay не имеет права ронять подписку
+                log.exception("H.323-хост: ошибка обработчика на replay ready")
+
+    def unsubscribe_event(self, cb: Callable[[H323dEvent], None]) -> None:
+        """Убрать обработчик. Нужно владельцам временных подписок (мосты).
+
+        Без отписки подписчик переживает stop() и дёргается на уже закрытом
+        клиенте; повторная подписка того же колбэка удваивала бы обработку
+        каждого кадра (для pcm.in это двойная отправка микса в канал).
+        """
+        with self._cb_lock:
+            try:
+                self._callbacks.remove(cb)
+            except ValueError:
+                pass
 
     def connect(self, timeout: float = 5.0) -> bool:
         """Подключиться к хосту. False — хост не запущен/недоступен."""
@@ -187,10 +230,15 @@ class H323dClient:
                             self.ready_port = int(ev.fields.get("port", 0))
                         except (TypeError, ValueError):
                             self.ready_port = None
+                        # Копируем событие ПОЗДНИМ подписчикам: хост шлёт ready
+                        # один раз — на подключении клиента, а не на подписку.
+                        self._last_ready = ev
                         log.info("H.323-хост готов, порт %s", self.ready_port)
-                    if self._on_event is not None:
+                    with self._cb_lock:
+                        subs = list(self._callbacks)
+                    for cb in subs:
                         try:
-                            self._on_event(ev)
+                            cb(ev)
                         except Exception:  # noqa: BLE001
                             log.exception("H.323-хост: ошибка обработчика %s", ev.event)
         except OSError:

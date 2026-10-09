@@ -34,13 +34,16 @@ HOST_BINARY = "mcu_h323d"
 # Перечислены ТОЛЬКО события, которые mcu_h323d реально отправляет (см.
 # emit_call_event/emit_error в tools/h323d/main.cpp). call.outgoing появился
 # вместе с командой call.make: хост шлёт его для исходящего соединения.
-# call.media (согласованный кодек) — намеренно НЕТ: проброс логических
-# каналов в IPC ещё не сделан, событие хост не генерирует.
+# call.media добавлен вместе с PCM-медиа (Этап 1м/3): OpenAudioChannel сообщает
+# согласованный кодек и ЕГО ЧАСТОТУ. Частота — не украшение: G.711 даёт 8 кГц,
+# G.722 — 16 кГц, и без неё микшер сложил бы в один микс каналы разной частоты,
+# а терминал услышал бы замедленный голос без единой ошибки в логе.
 EVENT_MAP: dict[str, str] = {
     "call.incoming": "call.incoming",
     "call.outgoing": "call.outgoing",
     "call.connected": "call.state",
     "call.disconnected": "call.state",
+    "call.media": "call.media",
 }
 
 
@@ -58,6 +61,12 @@ class HostEvent:
     message: str = ""
     #: адрес вызова для исходящих (поле ``alias``/``ip`` события call.outgoing)
     address: str = ""
+    #: --- аудио-канал (событие ``call.media``, Этап 1м/3) -------------------
+    #: Частота — не украшение: G.711 даёт 8 кГц, G.722 — 16 кГц, и без неё
+    #: микшер сложил бы в один микс каналы разной частоты.
+    codec: str = ""
+    sample_rate: int = 0
+    direction: str = ""
 
 
 @dataclass
@@ -95,6 +104,12 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         port = 0
     alias = str(obj.get("alias", "") or "")
     ip = str(obj.get("ip", "") or "")
+    # Частота канала (call.media). Битое значение — 0, а не исключение: разбор
+    # событий не имеет права ронять читателя IPC.
+    try:
+        sample_rate = int(obj.get("rate", 0) or 0)
+    except (TypeError, ValueError):
+        sample_rate = 0
     return HostEvent(
         kind=kind,
         token=str(obj.get("token", "") or ""),
@@ -106,6 +121,9 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         message=str(obj.get("message", "") or ""),
         # Для call.outgoing хост кладёт набранный адрес в alias/ip.
         address=str(obj.get("address", "") or "") or (alias if not ip else ""),
+        codec=str(obj.get("codec", "") or ""),
+        sample_rate=sample_rate,
+        direction=str(obj.get("direction", "") or ""),
     )
 
 
@@ -129,6 +147,14 @@ def event_to_bus_payload(ev: HostEvent) -> dict[str, Any]:
         payload["reason"] = ev.reason
     if ev.message:
         payload["message"] = ev.message
+    # Параметры аудио-канала: без них событие call.media бесполезно и для UI
+    # (кодек в списке участников), и для микшера (частота).
+    if ev.codec:
+        payload["codec"] = ev.codec
+    if ev.sample_rate:
+        payload["rate"] = ev.sample_rate
+    if ev.direction:
+        payload["direction"] = ev.direction
     return payload
 
 

@@ -149,6 +149,7 @@ def start_host(
     workdir: Path,
     logdir: Path,
     dump_dir: Optional[Path] = None,
+    auto_answer: bool = False,
 ) -> Tuple[subprocess.Popen, Path]:
     """Поднимает один mcu_h323d. Сокет держим в коротком каталоге.
 
@@ -167,9 +168,14 @@ def start_host(
         "--socket", str(sock),
         "--port", str(port),
         "--name", f"MCU-{name}",
-        "--no-auto-answer",
         "--verbose",
     ]
+    # По умолчанию ручной ответ: стенд проверяет call.answer отдельно. Для
+    # MCU-стороны трёхстороннего стенда нужен обратный режим — хост отвечает
+    # сам, иначе H323Endpoint берёт режим у хоста (ready.auto_answer) и тоже
+    # ждёт, а звонки в комнату не отвечаются вовсе.
+    if not auto_answer:
+        argv.append("--no-auto-answer")
     if dump_dir is not None:
         # Медиа обязано быть проверяемым вне Python: WAV обоих направлений на
         # диск. Он пишется независимо от целостности IPC.

@@ -23,11 +23,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Union
 
 from .log import get_logger
 
 log = get_logger("mixer")
+
+#: Идентификатор участника. SIP/H.323-слой и `mcu_core` оперируют числами,
+#: веб-слой (`MediaBus`, `AudioMixSession`) — строками (`SIP_PUBLISHER_ID`,
+#: имена браузеров). Микшер id только хранит и сравнивает, поэтому оба
+#: допустимы. Объявленный здесь `int` отвергал веб-вызывающий код: mypy
+#: давал 6 ошибок `str` vs `int` в `webrtc_sfu.py` (проверено боевым mypy).
+ParticipantId = Union[int, str]
 
 try:  # numpy is in project deps; fallback is pure Python.
     import numpy as _np
@@ -71,7 +78,7 @@ class MixResult:
 
     pcm: bytes
     active_channels: int
-    speaker_id: Optional[int]
+    speaker_id: Optional[ParticipantId]
 
 
 def _to_int16_array(pcm: bytes):
@@ -101,7 +108,8 @@ def rms_level(pcm: bytes) -> float:
     return (acc / n) ** 0.5
 
 
-def _aligned_int16_sum(np_mod, buffers: Dict[int, bytes], ids: List[int], dtype):
+def _aligned_int16_sum(np_mod, buffers: Dict[ParticipantId, bytes],
+                       ids: List[ParticipantId], dtype):
     """Sum int16 PCM buffers of DIFFERENT lengths (zero-padded to the longest).
 
     Разная длина — норма, а не экзотика: ptime у терминалов разный (20/30 мс),
@@ -139,18 +147,18 @@ class AudioMixer:
 
     def __init__(self, config: MixerConfig | None = None) -> None:
         self.config = config or MixerConfig()
-        self._buffers: Dict[int, bytes] = {}
-        self._last_speaker: Optional[int] = None
+        self._buffers: Dict[ParticipantId, bytes] = {}
+        self._last_speaker: Optional[ParticipantId] = None
 
     @property
-    def participant_ids(self) -> List[int]:
+    def participant_ids(self) -> List[ParticipantId]:
         return list(self._buffers.keys())
 
-    def set_buffer(self, participant_id: int, pcm: bytes) -> None:
+    def set_buffer(self, participant_id: ParticipantId, pcm: bytes) -> None:
         """Stores/updates a participant PCM buffer (decoded from its codec)."""
         self._buffers[participant_id] = pcm or b""
 
-    def remove(self, participant_id: int) -> None:
+    def remove(self, participant_id: ParticipantId) -> None:
         """Removes a participant from the mixer (on disconnect)."""
         self._buffers.pop(participant_id, None)
         if self._last_speaker == participant_id:
@@ -160,7 +168,7 @@ class AudioMixer:
         self._buffers.clear()
         self._last_speaker = None
 
-    def _active(self) -> List[int]:
+    def _active(self) -> List[ParticipantId]:
         """Ids of channels that are not silence by RMS."""
         active = []
         for pid, pcm in self._buffers.items():
@@ -173,14 +181,15 @@ class AudioMixer:
         pcm, active, speaker = self._mix_ids(list(self._buffers.keys()))
         return MixResult(pcm=pcm, active_channels=len(active), speaker_id=speaker)
 
-    def mix_for(self, participant_id: int) -> MixResult:
+    def mix_for(self, participant_id: ParticipantId) -> MixResult:
         """Mix for a specific participant: everyone except themselves."""
         others = [pid for pid in self._buffers if pid != participant_id]
         pcm, active, speaker = self._mix_ids(others)
         return MixResult(pcm=pcm, active_channels=len(active), speaker_id=speaker)
 
     # -- internal ----------------------------------------------------------
-    def _mix_ids(self, ids: Iterable[int]) -> tuple[bytes, List[int], Optional[int]]:
+    def _mix_ids(self, ids: Iterable[ParticipantId]) -> (
+            tuple[bytes, List[ParticipantId], Optional[ParticipantId]]):
         ids = list(ids)
         if not ids:
             return b"", [], None
@@ -209,7 +218,8 @@ class AudioMixer:
             self._last_speaker = max(active, key=lambda pid: rms_level(buffers[pid]))
         return out, active, self._last_speaker
 
-    def _sum_scaled(self, buffers: Dict[int, bytes], ids: List[int], divisor: int) -> bytes:
+    def _sum_scaled(self, buffers: Dict[ParticipantId, bytes],
+                    ids: List[ParticipantId], divisor: int) -> bytes:
         if _np is not None:
             acc = _aligned_int16_sum(_np, buffers, ids, _np.float64)
             if acc is None:
@@ -219,7 +229,8 @@ class AudioMixer:
         return self._sum_scaled_py(buffers, ids, divisor)
 
     @staticmethod
-    def _sum_scaled_py(buffers: Dict[int, bytes], ids: List[int], divisor: int) -> bytes:
+    def _sum_scaled_py(buffers: Dict[ParticipantId, bytes],
+                       ids: List[ParticipantId], divisor: int) -> bytes:
         import array
 
         arrays = []
@@ -243,7 +254,8 @@ class AudioMixer:
             out[i] = _clamp_int16(acc[i] // d)
         return out.tobytes()
 
-    def _sum_and_clip(self, buffers: Dict[int, bytes], ids: List[int]) -> bytes:
+    def _sum_and_clip(self, buffers: Dict[ParticipantId, bytes],
+                      ids: List[ParticipantId]) -> bytes:
         if _np is not None:
             acc = _aligned_int16_sum(_np, buffers, ids, _np.int32)
             if acc is None:

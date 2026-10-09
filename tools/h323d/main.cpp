@@ -210,11 +210,13 @@ std::map<std::string, mcu_pcm::McuPcmChannel *> g_pcm_spk;  // decoder: RTP -> P
 // Отдача декодированного кадра в Python событием pcm.in. Вызывается из потока
 // кодека: g_server->send() кладёт строку в очередь и НЕ ждёт записи в сокет.
 const mcu_pcm::FrameSink kPcmSink = [](const std::string &token,
-                                       const uint8_t *data, size_t len) {
+                                       const uint8_t *data, size_t len,
+                                       unsigned sample_rate) {
   if (!g_server) return;
   mcu_json::Builder b;
   b.add("event", "pcm.in");
   b.add("token", token);
+  b.add_int("rate", sample_rate);
   b.add("data", mcu_b64::encode(data, len));
   g_server->send(b.str());
 };
@@ -253,6 +255,31 @@ std::string ipc_token_of(H323Connection *conn) {
   std::lock_guard<std::mutex> lk(g_calls_mu);
   auto it = g_by_conn.find(conn);
   return it == g_by_conn.end() ? std::string() : it->second;
+}
+
+// ``call.media``: хост сообщает, какой аудио-канал согласован.
+// Раньше этого события не было, и Python-сторона не могла ни показать кодек
+// (UI/`Participant.audio_codec` оставались пустыми), ни свести каналы микшера
+// в одну частоту. Направление нужно микшеру: encoder — куда он КЛАДЁТ микс,
+// decoder — откуда он его берёт.
+void emit_media_event(H323Connection *conn, const char *direction,
+                      unsigned rate, const std::string &codec) {
+  if (!g_server) return;
+  std::string token;
+  {
+    std::lock_guard<std::mutex> lk(g_calls_mu);
+    auto it = g_by_conn.find(conn);
+    if (it != g_by_conn.end()) token = it->second;
+  }
+  if (token.empty()) token = to_std(conn->GetCallToken());
+  mcu_json::Builder b;
+  b.add("event", "call.media");
+  b.add("token", token);
+  b.add("kind", "audio");
+  b.add("direction", direction);
+  b.add_int("rate", static_cast<long long>(rate));
+  b.add("codec", codec);
+  g_server->send(b.str());
 }
 } // namespace
 
@@ -431,6 +458,8 @@ PBoolean McuEndPoint::OpenAudioChannel(H323Connection &connection,
     delete ch;
     return FALSE;
   }
+  emit_media_event(&connection, encoding ? "encoder" : "decoder", rate,
+                   to_std(codec.GetMediaFormat()));
   log_verbose(std::string("PCM: ") + (encoding ? "encoder" : "decoder") +
               " token=" + token + " rate=" + std::to_string(rate) +
               " buf=" + std::to_string(bufferSize) +
