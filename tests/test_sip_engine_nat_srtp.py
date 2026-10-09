@@ -137,7 +137,15 @@ class _EpCfg:
         self.uaConfig = _Ua()
 
 
-def test_configure_nat_sets_max_calls_and_stun_and_nat_type():
+def test_configure_nat_sets_max_calls_and_stun_and_nat_type(monkeypatch):
+    # STUN прошивается через make_string_vector(_pj, ...) — то есть через
+    # МОДУЛЬНЫЙ _pj. Без явной подмены биндинга тест был зелёным только там,
+    # где pjsua2 установлен, и краснел в CI (там _pj is None, типа StringVector
+    # нет, и код по контракту ОБЯЗАН STUN не применять). Проверяем маппинг
+    # конфига -> uaConfig на фейковом биндинге, как и соседние тесты.
+    import mcuclient.sip_engine as se
+
+    monkeypatch.setattr(se, "_pj", _FakePj)
     eng = _engine(_cfg(
         sip_patch={
             "max_calls": 24,
@@ -256,8 +264,13 @@ def test_ua_config_ice_field_contract():
     assert not hasattr(ua, "enableIce"), "enableIce вернулся: NAT-настройки пересмотреть"
 
 
-def test_configure_nat_normalizes_stun_scheme_from_config():
+def test_configure_nat_normalizes_stun_scheme_from_config(monkeypatch):
     """Конфиг `stun:host:port` не должен уходить в натив со схемой."""
+    # Биндинг подписываем явно: без pjsua2 в окружении (CI) прошивка STUN не
+    # выполняется вовсе, и проверка схемы превращалась в красное по окружению.
+    import mcuclient.sip_engine as se
+
+    monkeypatch.setattr(se, "_pj", _FakePj)
     eng = _engine(_cfg(sip_patch={"stun": {"server": "stun:stun.example.org:3478"}}))
     ep_cfg = _EpCfg()
     eng._configure_nat(ep_cfg)

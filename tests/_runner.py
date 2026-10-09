@@ -255,17 +255,28 @@ def main(argv: list[str]) -> int:
             fn = getattr(mod, name)
             if not callable(fn):
                 continue
+            cases = param_cases(fn) or [{}]
+            if collect_only:
+                # --collect-only — это КОЛЛЕКЦИЯ, а не план исполнения.
+                # pytest считает и кейсы под skipif: он их именно собирает,
+                # а пропускает уже на исполнении. Раньше здесь стоял общий
+                # с skip_reason `continue`, и коллекция мини-раннера отставала
+                # на каждый активный skipif-кейс: в CI (без pjsua2) — на 2
+                # теста test_sip_interop, отсюда "1067 vs 1069" и прежнее
+                # "1020 vs 1022" от 2026-10-08. Локально дефект невидим,
+                # потому что pjsua2 установлен и skipif не срабатывает.
+                for params in cases:
+                    print(f"COLLECT {path.name}::{name}{case_id(params)}",
+                          flush=True)
+                    collected += 1
+                continue
             reason = skip_reason(fn)
             if reason:
                 skipped += 1
                 print(f"SKIP {path.name}::{name} ({reason})", flush=True)
                 continue
-            for params in param_cases(fn) or [{}]:
+            for params in cases:
                 label = f"{path.name}::{name}{case_id(params)}"
-                if collect_only:
-                    print(f"COLLECT {label}", flush=True)
-                    collected += 1
-                    continue
                 try:
                     with contextlib.ExitStack() as stack:
                         tmp_path = None

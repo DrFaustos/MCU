@@ -210,6 +210,29 @@ def test_runner_collect_only_does_not_execute(tmp_path):
     assert "1 cases collected" in out, out
 
 
+def test_runner_collect_only_counts_skipif_cases(tmp_path):
+    """--collect-only обязан считать и кейсы под skipif — как это делает pytest.
+
+    Коллекция — это НЕ план исполнения: pytest собирает такой кейс и помечает
+    пропуском только на запуске. Раньше в мини-раннере ветка skipif стояла ДО
+    печата COLLECT, и коллекция отставала на каждый активный skipif-кейс.
+    Локально дефект невидим (там pjsua2 установлен и условие ложно), а в CI
+    pjsua2 нет — и обязательные точки проверки расходились молча:
+    «раннер 1067, pytest 1069» (2026-10-09) и «1020 vs 1022» (2026-10-08).
+
+    Второй прогон того же файла закрепляет обратное: на ИСПОЛНЕНИИ кейс обязан
+    остаться пропуском, а не «пройти» только потому, что его посчитали.
+    """
+    rc, out = _run(tmp_path, SKIPIF_CASE, "--collect-only")
+    assert rc == 0, out
+    assert "COLLECT test_probe.py::test_never_runs" in out, out
+    assert "1 cases collected" in out, out
+
+    rc, out = _run(tmp_path, SKIPIF_CASE)
+    assert rc == 0, out
+    assert "0 passed, 0 failed, 1 skipped" in out, out
+
+
 def test_runner_covers_every_case_pytest_collects(tmp_path):
     """Покрытие раннера обязано совпадать с pytest по числу кейсов.
     

@@ -176,7 +176,7 @@ parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
  pjsua2 и лимиты вывода обрезают текст, и казалось, что раннер потерял треть
  набора (было 987, «виделось» 733).
 
-Регрессия: `tests/test_test_runner.py` (13) — семантика раннера на пробах в
+Регрессия: `tests/test_test_runner.py` (14) — семантика раннера на пробах в
 tmp_path, гоняется и pytest'ом, и самим раннером.
 
 ## Боевой интерпретатор — /usr/bin/python3, а НЕ python3 из PATH
