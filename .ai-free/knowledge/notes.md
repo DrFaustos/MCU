@@ -185,7 +185,7 @@ parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
   имена параметров тестов vs `SUPPORTED` — так видно, что «неизвестный параметр»
   на деле аргумент `parametrize`, а не фикстура.
 
-Регрессия: `tests/test_test_runner.py` (14) — семантика раннера на пробах в
+Регрессия: `tests/test_test_runner.py` (15 кейсов) — семантика раннера на пробах в
 tmp_path, гоняется и pytest'ом, и самим раннером.
 
 ## Боевой интерпретатор — /usr/bin/python3, а НЕ python3 из PATH
@@ -519,4 +519,40 @@ DTMF-стенд.
 - **Симптом.** scripts/testbed/verify_registration.py и scripts/testbed/test_mcu_sip_call.py без pjsua2 печатали [skip] и возвращали 0 (воспроизведено живьём: rc_vr=0, rc_tm=0). Ручной прогон и любая обёртка без stand.sh считали это успехом.
 - **Правка.** В skip-ветках return 2 («НЕ ВЫПОЛНЯЛСЯ») — тот же контракт, что у обёрток run_two_instance_*.sh: 0 — прошёл, 1 — упал, 2 — не выполнялось. two_instance_*.py оставлены с rc=0 намеренно: их вызывают только обёртки, которые проверяют pjsua2 ДО прогона и ловят [skip] в логе.
 - **Регрессия.** tests/test_stand_exit_codes.py (7 проверок, 0.2 с): rc=2 на [skip] у обоих standalone-раннеров (флаг PJSIP_AVAILABLE подменяется в модуле-раннере — тест зелёный и со стеком, и без), пять требований stand.sh в каждой обёртке, stand_gate при занятом замке (rc=2) и при свободном (rc=0), stand_report_skip (rc=2, сообщение в stderr — проверять БЕЗ «2>&1», иначе ложный провал).
+<!-- source: agent -->
+
+
+## Документы как данные: страж значений и чисел (2026-10-09)
+
+- **Симптом.** docs/WEB_CONTROL.md и docs/SIP_ADDRESSING.md предписывали
+  оператору `srtp: "disable"`. Config.set_srtp("disable") -> ConfigError,
+  POST /api/encryption отвечал 400, config.json по инструкции доков не
+  загружался. Такого режима в коде не было НИКОГДА (git log -S'"disable"'
+  -- mcuclient/config.py пуст), в доки строку внёс b5de10a: опечатка в docs,
+  а не устаревшее описание. Правки пошли в доки, алиас в код не добавляли.
+- **Почему жило зелёным.** Ни один тест не читал markdown как данные.
+- **Правка.** tests/test_doc_values.py: (а) перечисления и присваивания из
+  markdown сравниваются с кортежами режимов mcuclient/config.py;
+  (б) config.example.json грузится load_config — боевым путём; (в) ссылки
+  `tests/<файл>.py` (N) сверяются с числом кейсов из `tests/_runner.py
+  --collect-only` (0.3 с, 1054 кейса, 102 файла).
+- **Грабль маркеров.** Привязывать токен ко ВСЕМ перечислениям, где он
+  встречается, нельзя: цепочка `off/optional/mandatory` пересекается с
+  ICE_TRICKLE_MODES/RTCP_MUX_MODES и выдаёт ложное «режима mandatory нет».
+  Маркер обязан быть уникальным: SRTP — "mandatory", web_tls —
+  "self_signed", кодек-профили — "max_compat".
+- **Метрика — КЕЙСЫ, а не def test_:** у test_stand_exit_codes.py 6 функций,
+  7 кейсов из-за parametrize.
+- **Область действия — часть контракта, проверяется своим тестом:**
+  инструкции (README + docs/*.md) и .ai-free/knowledge/notes.md под
+  стражем, docs/STATUS.md исключён (журнал обязан цитировать исправленное
+  заблуждение дословно, его числа привязаны к дате). Без теста на границу
+  исключение неотличимо от подгонки: расширение deny-list до README
+  красит прогон — так же легко вычеркнули бы и сам README.
+- **Не править продукт под чужой контракт:** первый вариант теста звал
+  validate_config на сыром config.example.json и падал на 18 полях
+  («sip.null_audio: ожидалось true/false, получено NoneType» — _check_bool
+  зовёт .get() без дефолта). Дефекта нет: validate_config вызывается
+  только ПОСЛЕ _deep_merge с DEFAULT_CONFIG (config.py:1221-1225),
+  отсутствующего ключа в проде не бывает. Исправлен тест, а не валидатор.
 <!-- source: agent -->

@@ -15,6 +15,7 @@ mcuclient/config.py. Придуманный режим красит прогон
 
 import copy
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +43,19 @@ DOCS = [ROOT / "README.md"] + sorted((ROOT / "docs").glob("*.md"))
 #: описание бага, а не инструкция. Перефразировать журнал под регулярку
 #: значило бы спрятать формулировку, которую оператор видел в доках.
 JOURNAL_DOCS = {"docs/STATUS.md"}
+#: Документы, где число «N проверок» обязано быть актуальным сегодня: те же
+#: инструкции, что и у стража значений, плюс база знаний (в ней расхождение
+#: нашли первым). Журнал исправлений НЕ входит: его числа привязаны к дате
+#: записи, а переписывать каждую прошлую запись при каждом новом тесте —
+#: значит стирать из журнала то, сколько проверок было тогда.
+COUNT_DOCS = [path for path in DOCS
+    if path.relative_to(ROOT).as_posix() not in JOURNAL_DOCS]
+COUNT_DOCS.append(ROOT / ".ai-free" / "knowledge" / "notes.md")
+
+#: Форма ссылки `tests/<файл>.py` (N): цифра стоит сразу после скобки.
+#: «(без pjsua2)» и «(в т.ч. сборки без __disown__)» в документах тоже есть,
+#: считать их числовыми ссылками нельзя.
+CITED_RE = re.compile(r"(tests/[a-z0-9_]+\.py)`? *\((\d+)")
 
 #: Пустая строка в SRTP_MODES — «авто по legacy-флагу», в документах её не
 #: перечисляют, поэтому в допустимое множество значений не входит.
@@ -131,6 +145,56 @@ def test_scope_covers_instructions_and_excludes_the_changelog():
         tick + 'srtp: ' + quote + 'disable' + quote + tick + ', web-панель на HTTP',
     ])
     assert len(found) == 2, found
+
+
+def _collected_cases():
+    """Сколько кейсов собирает обязательная точка проверки — по файлам.
+
+    Метрика — КЕЙСЫ, а не число `def test_`: из одной функции с parametrize
+    получается несколько проверок, и «(7 проверок)» в документах считает именно
+    их. Раннер печатает `COLLECT <файл>::<тест>` — тот же счётчик, что потом
+    виден в строке «N passed».
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tests" / "_runner.py"), "--collect-only"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stdout[-2000:]
+    counts = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("COLLECT "):
+            name = line[len("COLLECT "):].split("::")[0].strip()
+            counts[name] = counts.get(name, 0) + 1
+    assert counts, "раннер не собрал ни одного кейса"
+    return counts
+
+
+def test_cited_case_counts_match_the_runner():
+    """Числа `tests/<файл>.py` (N) в живых документах не имеют права отставать.
+
+    2026-10-09 поймало три вранья сразу: моё собственное (6 вместо 7 — число не
+    пересчитали после добавления ещё одной проверки) и два в docs/AI_CONTEXT.md
+    (9 вместо 11 и 13 вместо 15). Видно это только против того, что печатает
+    обязательная точка проверки: сверяться с числом `def test_` — значит врать
+    самому на каждом parametrize.
+    """
+    counts = _collected_cases()
+    bad = []
+    for path in COUNT_DOCS:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        where = path.relative_to(ROOT).as_posix()
+        for match in CITED_RE.finditer(text):
+            name = Path(match.group(1)).name
+            claimed = int(match.group(2))
+            lineno = text[:match.start()].count("\n") + 1
+            gap = f"{where}:{lineno} {match.group(1)}"
+            real = counts.get(name)
+            if real is None:
+                bad.append(f"{gap}: такой файл раннер не собирает")
+            elif real != claimed:
+                bad.append(f"{gap}: заявлено {claimed}, собирается {real}")
+    assert not bad, "числа тестов в документах разошлись:\n" + "\n".join(bad)
 
 
 def test_example_config_boots_the_app_the_same_way_the_product_does(tmp_path):
