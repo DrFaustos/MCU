@@ -143,9 +143,42 @@ sys.stdout/sys.stderr, `readouterr()` отдаёт накопленное и о�
 `tests/test_test_runner.py` — проверяет захват, очистку буфера вторым
 readouterr и что отчёт самого раннера не попадает в перехваченный поток.
 
-Проверено: `python3 tests/_runner.py` — **exit=0, 1047 passed, 0 failed,
-0 skipped**; `pytest` — **1047 passed, 0 failed, 0 skipped** (на один тест
-больше — добавлена регрессия); живой
+**4. Документы обещали режим шифрования, которого в коде не было никогда.**
+
+`docs/WEB_CONTROL.md` и `docs/SIP_ADDRESSING.md` предписывали оператору
+`srtp: "disable"`. Код такого режима не принимает: `SRTP_MODES` в
+`mcuclient/config.py` — `off` / `optional` / `mandatory` (пустая строка =
+авто по legacy-флагу). Воспроизведено живьём: `Config.set_srtp("disable")` →
+`ConfigError`, то есть `POST /api/encryption` из панели отвечал 400, а
+`config.json`, собранный по инструкции из доков, не загружался. Источника в
+истории у обещания нет: `git log -S'"disable"' -- mcuclient/config.py` пуст,
+а в доки строку внёс `b5de10a` — то есть опечатка в документах, а не
+устаревшее описание удалённой функции. Правки пошли в доки, алиас в код не
+добавляли.
+
+Почему это жило под зелёным набором: **docs как данные не читал ни один
+тест**. Добавлен `tests/test_doc_values.py` (6 проверок): страж вынимает из
+markdown перечисления и присваивания регуляркой и сверяет с кортежами
+режимов из `config.py` — придуманный режим красит прогон сам, без правки
+теста; `config.example.json` загружается `load_config` (боевым путём); у
+`set_srtp` и `validate_config` проверяется один и тот же запрет — расхождение
+двух валидаторов одного поля дало бы ровно тот класс бага, что уже закрыт для
+`sip_address`.
+
+Отрицательный результат, зафиксированный в докстринге: первый вариант теста
+звал `validate_config` на сыром `config.example.json` и падал на 18 полях
+(`sip.null_audio: ожидалось true/false, получено NoneType` — `_check_bool`
+зовёт `.get()` без дефолта). Дефекта в продукте нет: `validate_config`
+вызывается только ПОСЛЕ `_deep_merge` с `DEFAULT_CONFIG`
+(`config.py:1221-1225`), отсутствующего ключа там не бывает. Проверялся
+внутренний хелпер с чужим контрактом — исправили тест, а не 18 мест
+валидатора.
+
+Проверено: RED — возврат `disable` в `docs/WEB_CONTROL.md` красит страж с
+указанием файла и строки; GREEN — обе точки проверки ниже.
+
+Проверено: `python3 tests/_runner.py` — **exit=0, 1053 passed, 0 failed,
+0 skipped**; `pytest` — **1053 passed, 0 failed, 0 skipped**; живой
 DTMF-стенд `PYTHON=/usr/bin/python3 bash
 scripts/testbed/run_two_instance_dtmf_test.sh` — rc=0 и
 `[+] DTMF приняты: 1984#` без дубликата; `bash -n` на всех обёртках;

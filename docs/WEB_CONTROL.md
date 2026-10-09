@@ -139,7 +139,7 @@ POST (тело — JSON):
 | `/api/audio_device` | `{device}` | выбрать микрофон по id |
 | `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
 | `/api/codecs` | `{profile}` | профиль кодеков |
-| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`disable`/`optional`/`mandatory`) и TLS панели |
+| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
 | `/api/web_port` | `{port}` | порт web-панели |
 
