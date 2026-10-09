@@ -124,7 +124,28 @@ standalone-раннеров `verify_registration.py` и `test_mcu_sip_call.py`;
 видит `scripts/testbed/lib/*.sh`. Регрессия:
 `tests/test_stand_exit_codes.py` (7 проверок, зелёна и со стеком, и без него).
 
-Проверено: `pytest` — **1046 passed, 0 failed, 0 skipped**; живой
+**3. Обязательная точка проверки краснела там, где код был цел.**
+
+`python3 tests/_runner.py` — с него docs/AI_CONTEXT.md предписывает начинать
+проверку — возвращал exit=1: `TypeError: нет значения для аргумента 'capsys'`
+на тех же тестах из пункта 2. Под pytest они зелёные (1046 passed):
+расхождение было не в движке, а в том, что мини-раннер не знал третью
+pytest-фикстуру. Третий сбой того же рода: первые два были monkeypatch и
+потерянные при сборке кейсы.
+
+Добавлен минимальный аналог capsys (`Capture`/`CaptureResult`): перехват
+sys.stdout/sys.stderr, `readouterr()` отдаёт накопленное и обнуляет буферы —
+как в pytest. `uninstall()` поставлен в `finally` раньше `traceback.print_exc()`
+в main(): иначе трейсбек упавшего теста попал бы в буфер перехвата и FAIL
+печатся бы молча, без объяснения.
+
+Регрессия: `test_runner_supports_capsys_fixture` в страже раннера
+`tests/test_test_runner.py` — проверяет захват, очистку буфера вторым
+readouterr и что отчёт самого раннера не попадает в перехваченный поток.
+
+Проверено: `python3 tests/_runner.py` — **exit=0, 1047 passed, 0 failed,
+0 skipped**; `pytest` — **1047 passed, 0 failed, 0 skipped** (на один тест
+больше — добавлена регрессия); живой
 DTMF-стенд `PYTHON=/usr/bin/python3 bash
 scripts/testbed/run_two_instance_dtmf_test.sh` — rc=0 и
 `[+] DTMF приняты: 1984#` без дубликата; `bash -n` на всех обёртках;

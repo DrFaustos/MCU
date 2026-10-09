@@ -1,8 +1,9 @@
 """Мини-раннер тестов без pytest.
 
 Понимает ровно то, что реально используют тесты проекта: фикстуру tmp_path,
-фикстуру monkeypatch (setattr/delattr/setenv/delenv/chdir с полным откатом) и
-маркеры pytest.mark.parametrize / skipif / skip, а также pytest.skip() и
+фикстуру monkeypatch (setattr/delattr/setenv/delenv/chdir с полным откатом),
+фикстуру capsys (перехват sys.stdout/sys.stderr, readouterr с очисткой буфера)
+и маркеры pytest.mark.parametrize / skipif / skip, а также pytest.skip() и
 pytest.importorskip() (их Skipped — наследник BaseException, не Exception).
 
 --collect-only печатает кейсы, ничего не исполняя: этим сверяют покрытие
@@ -21,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import inspect
+import io
 import itertools
 import os
 import pathlib
@@ -120,6 +122,53 @@ class MonkeyPatch:
         while self._undo:
             step = self._undo.pop()
             step[0](*step[1:])
+
+
+class CaptureResult:
+    """Пара (.out, .err) — форма, которую ждут от capsys.readouterr()."""
+
+    def __init__(self, out, err):
+        self.out = out
+        self.err = err
+
+
+class Capture:
+    """Аналог pytest capsys: перехват sys.stdout и sys.stderr в буферы.
+
+    readouterr() ведёт себя как в pytest: отдаёт накопленное и обнуляет
+    буферы, поэтому второй вызов не видит текст первого. Буферы при этом
+    переустанавливаются: иначе print после readouterr ушёл бы в уже
+    выпитый StringIO и текст пропал бы молча.
+
+    """
+
+    def __init__(self):
+        self._out = io.StringIO()
+        self._err = io.StringIO()
+        self._saved = None
+
+    def install(self):
+        if self._saved is not None:
+            return
+        self._saved = (sys.stdout, sys.stderr)
+        sys.stdout = self._out
+        sys.stderr = self._err
+
+    def uninstall(self):
+        if self._saved is None:
+            return
+        sys.stdout, sys.stderr = self._saved
+        self._saved = None
+
+    def readouterr(self):
+        out = self._out.getvalue()
+        err = self._err.getvalue()
+        self._out = io.StringIO()
+        self._err = io.StringIO()
+        if self._saved is not None:
+            sys.stdout = self._out
+            sys.stderr = self._err
+        return CaptureResult(out, err)
 
 
 def load(path: pathlib.Path):
@@ -223,11 +272,18 @@ def call_test(fn, params, tmp_path):
             kwargs[pname] = tmp_path
         elif pname == "monkeypatch":
             kwargs[pname] = MonkeyPatch()
+        elif pname == "capsys":
+            kwargs[pname] = Capture()
         else:
             raise TypeError(f"нет значения для аргумента {pname!r}")
+    cap = kwargs.get("capsys")
+    if cap is not None:
+        cap.install()
     try:
         fn(**kwargs)
     finally:
+        if cap is not None:
+            cap.uninstall()
         patch = kwargs.get("monkeypatch")
         if patch is not None:
             patch.undo()

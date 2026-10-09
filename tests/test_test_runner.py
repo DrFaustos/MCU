@@ -9,8 +9,10 @@
  test_sip_registration, test_sip_engine_nat_srtp);
 2. молча не собирал те файлы, которых не понимал: 733 кейса вместо
  987, и итог при этом выглядел зелёным.
+3. не знал фикстуру capsys: тесты стендовых кодов возврата падали с
+ TypeError на аргументе capsys, когда pytest оставался зелёным.
 
-Оба сбоя выглядят либо как «код сломан», либо как «всё хорошо»,
+Все три сбоя выглядят либо как «код сломан», либо как «всё хорошо»,
 поэтому семантика раннера проверяется здесь — на изолированных
 пробах в tmp_path. Сам раннер вызывается отдельным процессом: он
 живёт в tests/, завершается через os._exit (деструкторы pjsua2) и
@@ -112,6 +114,23 @@ IMPORTORSKIP = _src(
 )
 
 
+CAPSYS_CASE = _src(
+        "import sys",
+        "",
+        "def test_captures(capsys):",
+        " print('в поток')",
+        " print('в ошибки', file=sys.stderr)",
+        " res = capsys.readouterr()",
+        " assert res.out.count('в поток') == 1, res.out",
+        " assert 'в ошибки' in res.err, res.err",
+        " assert capsys.readouterr().out == '', 'readouterr обязан очищать буфер'",
+        "",
+        "def test_report_is_not_swallowed(capsys):",
+        " res = capsys.readouterr()",
+        " assert 'PASS' not in res.out and 'passed' not in res.out, res.out",
+    )
+
+
 def _run(tmp_path, source, *extra):
     """Прогон раннера над одним файлом-пробой: возвращает (rc, stdout)."""
     case = tmp_path / "test_probe.py"
@@ -147,6 +166,15 @@ def test_runner_supports_tmp_path_fixture(tmp_path):
     rc, out = _run(tmp_path, TMP_PATH_CASE)
     assert rc == 0, out
     assert "1 passed, 0 failed, 0 skipped" in out, out
+
+
+def test_runner_supports_capsys_fixture(tmp_path):
+    # Тесты стендовых кодов возврата (test_stand_exit_codes) читают [skip]
+    # через capsys. Без фикстуры раннер падал с TypeError на аргументе, и
+    # обязательная точка проверки краснела там, где pytest был зелёный.
+    rc, out = _run(tmp_path, CAPSYS_CASE)
+    assert rc == 0, out
+    assert "2 passed, 0 failed, 0 skipped" in out, out
 
 
 def test_runner_rolls_back_monkeypatch_env(tmp_path):
