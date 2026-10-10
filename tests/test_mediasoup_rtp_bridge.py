@@ -38,6 +38,8 @@ def _pcm(v=1000, n=160):
 class _FakeClient:
     def __init__(self, fail_transport=False, fail_produce=False):
         self.calls = []
+        # id транспортов, закрытых на сайдкаре: утечка видна по этому списку.
+        self.closed: list = []
         self.fail_transport = fail_transport
         self.fail_produce = fail_produce
         self.ip = "127.0.0.1"
@@ -63,6 +65,15 @@ class _FakeClient:
         if self.fail_produce:
             raise RuntimeError("produce failed")
         return {"ok": True, "producerId": "prod-sip"}
+
+    def close_transport(self, room_id, transport_id):
+        # Реальный клиент умеет закрывать ОДИН транспорт (POST
+        # /transports/close). Фейк обязан уметь то же: без этого метода мост
+        # уходит в ветку «клиент не умеет» и ничего не закрывает, а прогон
+        # остаётся зелёным — т.е. проверка утечки была бы фиктивной.
+        self.calls.append(("close", transport_id))
+        self.closed.append(transport_id)
+        return {"ok": True}
 
     def recv_one(self):
         data, _ = self._sock.recvfrom(2048)
@@ -490,3 +501,68 @@ def test_start_error_names_every_refusal_reason():
     finally:
         br.stop()
         ok.close()
+
+
+# --- утечка транспортов на сайдкаре -----------------------------------------
+
+
+def test_created_transport_is_closed_on_every_refusal():
+    """Транспорт, от которого мост отказался, обязан быть закрыт на сайдкаре.
+
+    `stop()` ранее только обнулял `_transport_id`, и для сайдкара это значило
+    «транспорт живёт дальше»: он держит UDP-порт из rtc_min..rtc_max (по
+    умолчанию 40000-40100 = 101 порт). Пока повторных попыток не было, утечки
+    не было; с ретраем (отказ больше не кэшируется навсегда) каждый цикл
+    «отказался — попробовал снова» добавлял ещё один транспорт, и диапазон
+    исчерпался бы примерно за 17 минут непрерывных отказов.
+
+    Здесь ровно те пути отказа, где транспорт УЖЕ создан: «адрес
+    прослушивания» (до `stop()`) и `produce_plain` (через `stop()`).
+    """
+    c_wild = _FakeClient()
+    c_wild.ip = "0.0.0.0"
+    c_wild.base_url = "http://0.0.0.0:4443"
+    br = MediasoupRtpBridge(c_wild, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.start() is False
+        assert br.transport_id is None
+        assert c_wild.closed == ["pt-1"], (
+            "отказавший транспорт не освобождён на сайдкаре: "
+            "утечка UDP-порта из rtc_min..rtc_max")
+    finally:
+        br.stop()
+        c_wild.close()
+
+    c_prod = _FakeClient(fail_produce=True)
+    br = MediasoupRtpBridge(c_prod, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.start() is False
+        assert c_prod.closed == ["pt-1"], (
+            "откат produce_plain обязан освободить транспорт")
+    finally:
+        br.stop()
+        c_prod.close()
+
+
+def test_stop_frees_the_transport_of_a_started_bridge():
+    """Остановленный мост освобождает транспорт: иначе комната liveёт с мусором."""
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=_RecordingEndpoint())
+    assert br.start() is True
+    assert c.closed == [], "поднятый мост не имел права ничего закрывать"
+    br.stop()
+    assert c.closed == ["pt-1"], c.closed
+    c.close()
+
+
+def test_repeated_stop_does_not_close_the_same_transport_twice():
+    """Повторная остановка не шлёт close за тем же id (второй close — 400)."""
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.start() is True
+        br.stop()
+        br.stop()
+        assert c.closed == ["pt-1"], c.closed
+    finally:
+        c.close()

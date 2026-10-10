@@ -185,7 +185,9 @@ class MediasoupRtpBridge:
             # Транспорт на sidecar создан, но слать ему некуда. Поднять
             # «мост, который молча глушит звук» — значит оставить
             # оператора с started: true и тишиной в обоих каналах.
-            self._transport_id = None
+            # Транспорт обязаны ОСВОБОДИТЬ на сайдкаре, а не просто забыть id:
+            # он держит UDP-порт, а повторные попытки поднимают новый.
+            self._close_remote_transport()
             self._start_error = ("sidecar вернул адрес прослушивания — "
                                  "достижимый адрес взять негде; задайте "
                                  "features.web.mediasoup.listen_ip или "
@@ -222,14 +224,41 @@ class MediasoupRtpBridge:
                  self._transport_id, self._producer_id, ms_ip, ms_port)
         return True
 
+    def _close_remote_transport(self) -> None:
+        """Закрыть PlainTransport на сайдкаре и забыть его id.
+
+        Обязано вызываться на КАЖДОМ пути, где мост отказывается от
+        созданного транспорта. До этого ``_transport_id = None`` значило для
+        сайдкара «транспорт живёт дальше»: он держит UDP-порт из
+        ``rtc_min..rtc_max``, и повторные попытки поднять мост (а сайдкар
+        поднимается секунды после старта) накопили бы их до исчерпания
+        диапазона. Отказ закрытия называется, а не проглатывается: «транспорт
+        не закрыт» — это утечка, о которой оператор должен узнать из журнала.
+        """
+        transport_id, self._transport_id = self._transport_id, None
+        if not transport_id:
+            return
+        closer = getattr(self._client, "close_transport", None)
+        if not callable(closer):
+            # Фейк/старый клиент без метода — не ошибка программы, но и
+            # молчать нельзя: утечка ровно та же.
+            log.debug("RTP-мост: у клиента нет close_transport — транспорт %s "
+                      "остался на сайдкаре", transport_id)
+            return
+        try:
+            closer(self._room_id, transport_id)
+        except Exception as exc:  # noqa: BLE001 — остановка не имеет права бросать
+            log.debug("RTP-мост: транспорт %s не закрыт на сайдкаре (%s: %s)",
+                      transport_id, type(exc).__name__, exc)
+
     def stop(self) -> None:
         if self._endpoint is not None:
             try:
                 self._endpoint.stop()
             except Exception:  # noqa: BLE001
                 log.debug("RTP-мост: остановка эндпоинта с ошибкой", exc_info=True)
+        self._close_remote_transport()
         self._producer_id = None
-        self._transport_id = None
         self._started = False
 
     # -- медиа -------------------------------------------------------------

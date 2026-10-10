@@ -341,7 +341,19 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
   «всё в порядке» (в `GET /api/status` было бы `started: true`, `sendErrors: 0`).
   Для внешнего сайдкара задайте `listen_ip` (конкретный интерфейс) или
   `announced_ip` — тогда сайдкар отвечает адресом, годным и для отправки.
-* Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
+* Control API: `/health`, `/rooms`, `/rooms/close`, `/rooms/stats`, `/transports/webrtc|plain|close`, `/transports/connect`, `/produce`, `/produce/plain`, `/consume`, `/consumer/set-layers` (симулкаст), `/producer/request-keyframe`. Полный перечень и тела — в `mediasoup-sidecar/README.md`; он сверяется с кодом тестом `tests/test_sidecar_api_paths.py`.
+* **Закрыть один транспорт.** `POST /transports/close` обязан вызываться каждым
+  отказом RTP-моста от уже созданного `PlainTransport`: без него транспорт
+  освобождается только вместе с комнатой и держит UDP-порт из
+  `rtc_min..rtc_max` (по умолчанию 40000-40100 = 101 порт), а повторные попытки
+  поднять мост (отказ больше не кэшируется навсегда — сайдкар поднимается
+  секунды после старта) накапливали бы их до исчерпания диапазона.
+* **Отказ mediasoup ≠ «выключено».** `GET /api/status` при `enabled: true` и
+  недоступном сайдкаре отдаёт `mediasoup_rtp: {started: false, reason: ...}`,
+  а не `None` (None — только когда режим выключен оператором). Повторная
+  попытка достучаться до сайдкара — не чаще, чем раз в 10 с: мост дёргается на
+  каждый кадр (замерено 3000 обращений за минуту звонка), поэтому повтор без
+  троттла вылился бы в шторм запросов к control API.
 * **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
   cp .env.example .env && docker compose up -d --build` — см.
   `docker/sfu/README.md`.

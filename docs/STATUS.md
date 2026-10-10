@@ -79,6 +79,108 @@
 
 ## Журнал исправлений
 
+### 2026-10-10 — отказ сайдкара на 20 секунд становился «mediasoup выключен» до перезапуска
+
+**Симптом.** `mediasoup` включён (`enabled: true`), сайдкар в момент первого
+обращения ещё поднимается (это секунды после старта). Мост не поднялся — и
+больше не поднимется НИКОГДА, до перезапуска приложения: сайдкар ожил, а
+`mediasoup_rtp_bridge()` по-прежнему `None`. Замерено зондом
+`.agent/probe_ms_retry.py`: 1 обращение к control API за всё время. Панель при
+этом отдаёт `mediasoup_rtp: None` — ровно то же значение, что при выключенном
+режиме, а `POST /api/mediasoup` отвечает 503 «mediasoup не включён».
+
+**Корень.** В ленивой фабрике `False` в кэше значил ДВА разных состояния:
+«выключено оператором» и «пробовали — не вышло». Раз кэш выставлен, повторной
+попытки нет. Ветка `except` в `mediasoup_signaling()` писала только `log.debug`
+и не называла причину; в `mediasoup_rtp_bridge()` была та же молчаливая ветка
+(`log.debug` + `_ms_rtp = False`, `_ms_rtp_error` пустой). Прошлый срез
+(`6b93fb8`) закрыл схлопывание отказа в `None` только для `bridge.start()`, а
+отказ signaling/ensure_room остался молчаливым.
+
+**Почему наивный починка опасен (замерено).** `push_sip_pcm_to_sfu()` дёргает
+фабрику мостов на каждый кадр — **3000 обращений за минуту звонка на сессию**.
+Ретрай «пробовать при каждом вызове» выливается в 3000 запросов к control API в
+минуту. Поэтому повтор есть, но ограничен: `MS_RETRY_INTERVAL = 10.0`, общий
+срок (`_ms_rtp_retry_at`) для обеих фабрик. «Выключено оператором» по-прежнему
+кэшируется как `False` и НЕ повторяется — иначе выключенный режим стучался бы в
+несуществующий сайдкар.
+
+**Второй дефект, который создал бы сам ретрай.** Точечного закрытия транспорта у
+сайдкара не было: `room.close()` закрывает комнату целиком, а `stop()` моста
+лишь обнулял `_transport_id` — для сайдкара это значило «транспорт живёт
+дальше». Пока повторных попыток не было, утечки не было; с ретраем каждый цикл
+«отказал — попробовал снова» поднимал новый `PlainTransport`, а он держит
+UDP-порт из `rtc_min..rtc_max` (по умолчанию 40000-40100 = 101 порт) — диапазон
+исчерпался бы примерно за 17 минут непрерывных отказов, и сайдкар перестал бы
+создавать транспорты вовсе. Лечить отказ ценой утечки ресурсов нельзя, поэтому в
+срез вошли: `Room.closeTransport()` + маршрут `POST /transports/close` +
+`MediasoupClient.close_transport()` + вызов на КАЖДОМ пути отказа моста от уже
+созданного транспорта (`_close_remote_transport()`, в т.ч. в `stop()`;
+повторный `stop()` тот же id не шлёт).
+
+**Живая проверка (не статическая).** Сайдкар с `rtc_min/max = 40600..40604`
+(5 портов), внешний HTTP-клиент (`.agent/probe_sidecar_close.mjs`): close
+отвечает `ok`; повторный close того же id — 400 «Транспорт … не найден» (значит
+снят с учёта комнаты); цикл «создал/закрыл» прошёл 8 раз подряд, т.е. порты
+освобождаются; контроль честности проверки — те же 8 транспортов БЕЗ закрытия
+упёрлись в `no more available ports` на пятом. `npm run smoke` (`RC=0`) маршрут
+не проверяет: он поднимает `Room` прямо в процессе, без HTTP.
+
+**Третье лицо того же дефекта.** 503 `POST /api/mediasoup` врал «mediasoup не
+включён», когда режим включён, а сайдкар недоступен: `ms-conference.js`
+показывает этот текст браузеру как причину отказа входа. Теперь текст даёт
+`_ms_unavailable()`: «не включён» — только когда `_ms_signaling is False`.
+
+**Стражи.** `tests/test_mediasoup_retry.py` (6 кейсов): причина отказа доезжает
+до `/api/status`; мост и signaling поднимаются после оживления сайдкара; 3000
+вызовов hot-path дают ровно 1 обращение к control API; граница — «выключено» не
+ретраится и остаётся `None`. `tests/test_sidecar_api_paths.py` (4 кейса): пути
+клиента ⊆ развилка `server.js`, маршрут без вызова обязан быть объявлен в
+`SERVER_ONLY_ROUTES` с причиной, таблица `mediasoup-sidecar/README.md` обязана
+перечислять каждый маршрут, проба на подсе проверяет ОБА направления (первая
+версия пробы имела `server ⊂ client` и молчала на одном направлении —
+поймано своим же кейсом). +3 кейса на утечку транспортов в
+`tests/test_mediasoup_rtp_bridge.py`, +1 на тело запроса в
+`tests/test_mediasoup_client.py`, +1 на 503 в `tests/test_mediasoup_endpoints.py`.
+Страж путей поймал находку при первом же прогоне: `POST /rooms/stats` сайдкар
+различает, а README его не перечислял.
+
+**RED (снят до правки).** На HEAD с новыми тестами: 8 failed —
+`test_refusal_is_retried_after_sidecar_wakes_up`,
+`test_signaling_refusal_is_retried_after_sidecar_wakes_up`,
+`test_signaling_refusal_reason_reaches_the_panel`,
+`test_created_transport_is_closed_on_every_refusal`,
+`test_stop_frees_the_transport_of_a_started_bridge`,
+`test_repeated_stop_does_not_close_the_same_transport_twice`,
+`test_close_transport_body` (`AttributeError: no attribute 'close_transport'`),
+`test_mediasoup_503_names_the_real_reason`. Кейсы-границы
+(`test_disabled_mediasoup_is_not_retried`,
+`test_retry_is_rate_limited_on_the_hot_path`,
+`test_signaling_refusal_is_not_retried_on_every_frame`) проходят НАМЕРЕННО: они
+не дают правке стать «всегда пробуй снова».
+
+**Проверено.** `python3 tests/_runner.py` (без pytest, stub) → exit=0, **1160
+passed, 0 failed, 3 skipped**; `/usr/bin/python3 tests/_runner.py` → **1163
+passed, 0 failed, 0 skipped**; `/usr/bin/python3 -m pytest tests/` (junitxml) →
+**tests=1163, failures=0, errors=0**; `--collect-only` с обеих сторон → **1163**;
+`ruff check .` в обеих CI-развилках (`E,F,W --ignore E501` и
+`F821,F811,F841,E9`) — All checks passed по всему дереву; `node --check` по
+`room.js`/`server.js` и `npm run smoke` — RC=0; `mypy mcuclient
+--ignore-missing-imports` = **5 ошибок = baseline** (сверено на worktree от
+HEAD: те же 5 в тех же трёх файлах — numpy-типизация, правка новых не добавила).
+
+**Не закрыто тем же резцом.** Публичная точка — API, а не экран:
+`mcuclient/webui/index.html` (`renderStatus()` читает 26 полей) не рисует ни
+`mediasoup_rtp`, ни `sip_ports`/`frame_errors` — причину отказа оператор видит
+через `GET /api/status`, но не на панели. Дальше: срок повтора ОДИН на две
+фабрики, поэтому отказ моста откладывает и попытку signaling;
+`MS_RETRY_INTERVAL` — константа, а не настройка `features.web.mediasoup`, и
+интервал в 10 с нельзя подстроить под медленный сайдкар; `False` в
+`_ms_signaling` теперь означает строго «выключено», и включение
+`enabled: true` на лету (через PATCH конфига) этот кэш не сбрасывает — путь
+смены настройки на лету не проверялся; `closeTransport` вычищает `consumers`
+по флагу `closed`, а mediasoup выставляет его не гарантированно синхронно.
+
 ### 2026-10-10 — панель рапортовала о звуке, которого не было, а справочник — о полях, которых не было
 
 **Симптом 1 (счётчики лгут).** Зонд `.agent/probe_sip_port_silent.py`: порт

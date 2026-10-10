@@ -97,6 +97,31 @@ export class Room {
     return t;
   }
 
+  /**
+   * Закрыть ОДИН транспорт. До этого маршрута транспорт освобождался только
+   * вместе с комнатой, а Python пересоздаёт PlainTransport при каждой повторной
+   * попытке поднять RTP-мост (сайдкар поднимается секунды после старта): без
+   * закрытия каждый повтор занимал ещё UDP-порт из rtc_min..rtc_max (по
+   * умолчанию 40000-40100 = 101 порт), и через ~17 минут непрерывных отказов
+   * сайдкар перестал бы создавать транспорты вовсе.
+   */
+  closeTransport(id) {
+    const transport = this.getTransport(id);
+    this.transports.delete(id);
+    try {
+      transport.close();
+    } catch {
+      /* уже закрыт */
+    }
+    // Producer'ы этого транспорта закрывает сам mediasoup, а server.js снимает
+    // их с учёта по событию 'transportclose'. Consumer'ы mediasoup тоже
+    // закрывает; их записи в map при этом остаются, поэтому вычищаются closed.
+    for (const [consumerId, consumer] of this.consumers) {
+      if (consumer.closed) this.consumers.delete(consumerId);
+    }
+    logger.info(`Комната ${this.id}: транспорт ${id} закрыт`);
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;

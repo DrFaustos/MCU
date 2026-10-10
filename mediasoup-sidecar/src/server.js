@@ -130,6 +130,16 @@ async function handle(method, path, body) {
     return { ok: true };
   }
 
+  // Закрыть ОДИН транспорт (Python закрывает PlainTransport при повторной
+  // попытке поднять RTP-мост). Без этого маршрута транспорт освобождался
+  // только вместе с комнатой, а каждый повтор попытки поднимал новый
+  // PlainTransport на ещё одном UDP-порту из rtc_min..rtc_max.
+  if (method === 'POST' && path === '/transports/close') {
+    const room = getRoom(body.roomId);
+    room.closeTransport(body.transportId);
+    return { ok: true };
+  }
+
   // produce (браузер публикует трек)
   if (method === 'POST' && path === '/produce') {
     const room = getRoom(body.roomId);
