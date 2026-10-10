@@ -39,13 +39,30 @@ from .log import get_logger
 
 log = get_logger("vsource")
 
+#: Сколько секунд ждём подтверждения, что виртуальная камера открылась.
+#: При успехе это миллисекунды, при отказе — отказ приходит сразу. Ограничено,
+#: потому что ждём в потоке вызывающего (UI): зависший драйвер не должен
+#: подвешивать интерфейс.
+_OPEN_TIMEOUT_S = 5.0
+
+#: Объявление типа ДО try. mypy 2.4 (блокирующий шаг CI: `mypy mcuclient`)
+#: иначе отвергает `np = None` в ветке ImportError: для него `np` — переменная
+#: типа Module из успешно импортнувшейся ветки. Голый `np: Any` выше `try`
+#: годится на обеих машинах: с numpy импорт просто переприсваивает переменную
+#: с типом Any, без numpy законно присваивание None. `# type: ignore` не годится:
+#: warn_unused_ignores включён, и на машине БЕЗ numpy такое игнорирование
+#: оказалось бы неиспользуемым — та же ошибка, только с другой стороны.
+np: Any
+
 try:  # pragma: no cover
     import numpy as np
     import pyvirtualcam
 
     _HAVE_CAM = True
+    _HAVE_NUMPY = True
 except ImportError as exc:  # pragma: no cover
     _HAVE_CAM = False
+    _HAVE_NUMPY = False
     np = None
     log.warning("Коммутатор видео недоступен: %s", exc)
 
@@ -109,6 +126,11 @@ class VideoSourceSwitcher:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running = False
+        # Исход запуска: открыто ли устройство (_ready) и сказал ли поток
+        # что-то определённое (_settled — взводится и при успехе, и при смерти).
+        # Нужны, чтобы start() возвращал честный результат, а не True вслепую.
+        self._ready = threading.Event()
+        self._settled = threading.Event()
         self._last_error: str | None = None
         self._frames_sent = 0
         # Внешний потребитель превью (RGB-кадр) — для тайла «Своя камера».
@@ -133,6 +155,7 @@ class VideoSourceSwitcher:
 
     @property
     def running(self) -> bool:
+        """Коммутатор запущен (поток жив). После отказа запуска — False."""
         return self._running
 
     @property
@@ -161,7 +184,12 @@ class VideoSourceSwitcher:
 
     # --- управление ---
     def start(self, source: SourceInfo | None = None) -> bool:
-        """Запустить коммутатор (фоновый поток захвата -> виртуальная камера)."""
+        """Запустить коммутатор (фоновый поток захвата -> виртуальная камера).
+
+        Ждём, пока поток откроет виртуальное устройство, и возвращаем
+        :keyword:`False`, если открытие не удалось (нет /dev/video0, модуль
+        без прав и т.п.). Раньше всегда возвращался :keyword:`True` вслепую.
+        """
         if not self.available:
             self._last_error = "нет mss/numpy/pyvirtualcam/cv2"
             log.error("Коммутатор видео недоступен: %s", self._last_error)
@@ -175,9 +203,27 @@ class VideoSourceSwitcher:
                 self._source = source
         self._last_error = None
         self._stop.clear()
+        self._ready.clear()
+        self._settled.clear()
+        # _running поднимается ДО запуска потока. Прежний порядок
+        # (присваивание после start()) проигрывал гонку: поток, упавший
+        # мгновенно (нет /dev/video0), успевал поставить False в finally, а это
+        # присваивание стирало его на True — running врал вечно, и вызывающий
+        # больше никогда не пробовал перезапустить коммутатор.
+        self._running = True
         self._thread = threading.Thread(target=self._loop, name="mcu-vsource", daemon=True)
         self._thread.start()
-        self._running = True
+        if self._settled.wait(_OPEN_TIMEOUT_S) and not self._ready.is_set():
+            # Поток умер, не открыв устройство (finally уже отработал, ресурс
+            # им не удерживается) — состояние сбрасываем и возвращаем отказ.
+            self._running = False
+            self._thread = None
+            if self._last_error is None:
+                self._last_error = "виртуальная камера не открылась"
+            log.error("Коммутатор видео НЕ запущен: %s", self._last_error)
+            return False
+        # Исход за таймаут не наступил: поток завис в нативном вызове драйвера.
+        # Считаем запущенным (как раньше), чтобы не рубить живую камеру.
         log.info("Коммутатор видео запущен: %s -> %s", self.current_source().kind, self.device)
         return True
 
@@ -244,7 +290,15 @@ class VideoSourceSwitcher:
     def _open_capture(self, dev_id: int):
         if not _HAVE_CV2:
             return None
-        cap = cv2.VideoCapture(int(dev_id))
+        try:
+            cap = cv2.VideoCapture(int(dev_id))
+        except Exception as exc:  # noqa: BLE001
+            # Транзиентный отказ (камера занята, драйвер пересоздаётся).
+            # Открытие идёт из потока коммутатора внутри try/except, где
+            # любой бросок ронял его НАВСЕГДО (тот же класс, что чинили для
+            # mediasoup в 6bbfcc7) — гасим, на следующем кадре попробуем.
+            log.debug("Камера %s: не открылась: %s", dev_id, exc)
+            return None
         if not cap.isOpened():
             try:
                 cap.release()
@@ -274,18 +328,35 @@ class VideoSourceSwitcher:
         return frame  # BGR
 
     def _grab_screen(self):
+        if not _HAVE_NUMPY:
+            return None
         import mss  # локальный импорт: не тянуть, если не используется
 
-        if self._sct is None:
-            self._sct = mss.mss()
-        monitors = self._sct.monitors
-        idx = 1 if len(monitors) > 1 else 0
-        self._sct_monitor = idx
-        shot = self._sct.grab(monitors[idx])
+        try:
+            if self._sct is None:
+                self._sct = mss.mss()
+            monitors = self._sct.monitors
+            idx = 1 if len(monitors) > 1 else 0
+            self._sct_monitor = idx
+            shot = self._sct.grab(monitors[idx])
+        except Exception as exc:  # noqa: BLE001
+            # Экран недоступен (Wayland, залетевшая сессия). Сессия могла
+            # стать мёртвой — закрываем, на следующем кадре поднимем новую;
+            # поток из-за одного сбоя захвата умирать не должен.
+            log.debug("Захват экрана: %s", exc)
+            self._close_screen()
+            return None
         return np.array(shot)[..., :3][..., ::-1]  # BGRA -> RGB
 
     def _make_colorbar(self):
         """Тест-таблица с бегущей полосой — видно, что поток живой."""
+        if not _HAVE_NUMPY:
+            # Страховка: np заглушён None, обращение к нему дало бы
+            # AttributeError в потоке коммутатора. Сегодня недостижимо
+            # (numpy и pyvirtualcam импортируются в одном try, поэтому без
+            # numpy available() вообще False) — но поток не должен зависеть
+            # от порядка этих импортов.
+            return None
         img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         bars = 8
         for i in range(bars):
@@ -318,6 +389,9 @@ class VideoSourceSwitcher:
             ) as cam:
                 log.info("Виртуальная камера открыта: %s (%dx%d@%d)",
                          cam.device, self.width, self.height, self.fps)
+                # Устройство открыто — только теперь запуск считается успехом.
+                self._ready.set()
+                self._settled.set()
                 while not self._stop.is_set():
                     t0 = time.time()
                     src = self.current_source()
@@ -371,5 +445,8 @@ class VideoSourceSwitcher:
             log.error("Коммутатор видео остановлен из-за ошибки: %s", exc)
         finally:
             self._running = False
+            # И здесь: умерли ДО ready (или в исключении до установки ошибки) —
+            # start() обязан проснуться сразу, а не выбирать таймаут.
+            self._settled.set()
             self._close_capture()
             self._close_screen()

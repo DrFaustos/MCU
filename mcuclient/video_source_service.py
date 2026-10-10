@@ -94,11 +94,22 @@ class VideoSourceService:
     def virtual_camera_running(self) -> bool:
         return self._vswitch.running
 
+    @property
+    def virtual_camera_error(self) -> Optional[str]:
+        """Причина последнего отказа коммутатора (None — отказов не было)."""
+        return self._vswitch.last_error
+
     def start_virtual_camera(self, kind: str = "camera", device: int | None = None) -> bool:
         """Запустить коммутатор: источник -> виртуальное устройство."""
         src = SourceInfo(kind, kind, device=device)
         ok = self._vswitch.start(src)
-        self._events.emit("media.vsource", active=self._vswitch.running, kind=kind)
+        err = None if ok else (self._vswitch.last_error or "start_failed")
+        payload = {"active": self._vswitch.running, "kind": kind}
+        if err:
+            # Без причины событие бесполезно: last_error коммутатора до этого
+            # момента не читал никто, и отказ вирт-камеры был невидим.
+            payload["error"] = err
+        self._events.emit("media.vsource", **payload)
         return ok
 
     def stop_virtual_camera(self) -> None:

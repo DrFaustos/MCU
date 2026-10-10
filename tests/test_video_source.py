@@ -140,3 +140,118 @@ def test_fit_passthrough_when_size_matches():
     frame = np.zeros((8, 16, 3), dtype=np.uint8)
     out = sw._fit(frame)
     assert out is not None and out.shape == (8, 16, 3)
+
+
+# --- исход запуска (без железа: фейковый pyvirtualcam) -----------------------
+
+
+class _FakeVcam:
+    """Подмена модуля pyvirtualcam.
+
+    Camera() либо открывается (open_error=None), либо всегда бросает — как на
+    машине без v4l2loopback, где пуск виртуальной камеры невозможен.
+    """
+
+    def __init__(self, open_error=None):
+        self.open_error = open_error
+        self.opened = 0
+        self.sent = 0
+        self.PixelFormat = type("PixelFormat", (), {"RGB": "RGB"})
+        outer = self
+
+        class Camera:
+            device = "/dev/fake0"
+
+            def __init__(self, **kwargs):
+                outer.opened += 1
+                if outer.open_error is not None:
+                    raise outer.open_error
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def send(self, frame):
+                outer.sent += 1
+
+            def sleep_until_next_frame(self):
+                pass
+
+        self.Camera = Camera
+
+
+class _fake_vcam_env:
+    """Временный режим «зависимости на месте» с фейковым pyvirtualcam.
+
+    Атрибут pyvirtualcam в модуле есть не всегда (при ImportError его не
+    создают вовсе), поэтому restore делает del, а monkeypatch трогать нельзя:
+    обязательная точка проверки (tests/_runner.py) не обязана знать его
+    monkeypatch здесь неудобен: атрибут pyvirtualcam либо есть, либо его
+    нет вовсе (ImportError), а ветки отката разные — восстанавливаем сами.
+    """
+
+    def __init__(self, fake):
+        self._fake = fake
+        self._saved: dict = {}
+
+    def __enter__(self):
+        import mcuclient.video_source as m
+        self._saved = {"_HAVE_CAM": m._HAVE_CAM, "_HAVE_CV2": m._HAVE_CV2}
+        m._HAVE_CAM = True
+        m._HAVE_CV2 = True
+        self._vcam_existed = hasattr(m, "pyvirtualcam")
+        if self._vcam_existed:
+            self._saved["pyvirtualcam"] = m.pyvirtualcam
+        m.pyvirtualcam = self._fake
+        return self
+
+    def __exit__(self, *exc):
+        import mcuclient.video_source as m
+        m._HAVE_CAM = self._saved["_HAVE_CAM"]
+        m._HAVE_CV2 = self._saved["_HAVE_CV2"]
+        if self._vcam_existed:
+            m.pyvirtualcam = self._saved["pyvirtualcam"]
+        elif hasattr(m, "pyvirtualcam"):
+            del m.pyvirtualcam
+        return False
+
+
+
+def test_start_returns_false_when_device_did_not_open():
+    """start() обязан вернуть отказ, если виртуальное устройство не открылось.
+
+    Бой (машина без v4l2loopback): pyvirtualcam.Camera бросает сразу.
+    Прежний start() возвращал True вслепую, а мгновенно умерший поток в finally
+    выставлял running=False — вызывающий считал запуск успешным и больше не
+    пробовал. Проверяется и то, что поток умер чисто (_thread сброшен).
+    """
+    fake = _FakeVcam(open_error=OSError("не могу открыть /dev/video0"))
+    with _fake_vcam_env(fake):
+        sw = VideoSourceSwitcher(device="/dev/video0", width=32, height=24, fps=20)
+        assert sw.start() is False
+        assert sw.running is False
+        assert sw._thread is None
+        assert fake.opened >= 1
+        assert "dev/video0" in (sw.last_error or "")
+
+
+def test_failed_start_can_be_retried_and_success_returns_true():
+    """Вторая половина гонки: отказ не должен становиться постоянным.
+
+    Тот же класс, что чинили для mediasoup в 6bbfcc7: транзиентный сбой
+    превращался в «выключено навсегда». После отказа тот же коммутатор обязан
+    подняться с первой же повторной попытки, а успех — возвращать True не
+    раньше, чем устройство реально открыто.
+    """
+    with _fake_vcam_env(_FakeVcam(open_error=OSError("нет такого устройства"))):
+        sw = VideoSourceSwitcher(device="/dev/fake0", width=16, height=16, fps=50)
+        assert sw.start() is False
+    good = _FakeVcam()
+    with _fake_vcam_env(good):
+        assert sw.start() is True
+        assert sw.running is True
+        assert good.opened == 1
+        sw.stop()
+        assert sw.running is False

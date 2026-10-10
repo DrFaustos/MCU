@@ -1344,7 +1344,14 @@ if QT_AVAILABLE:
                     d = self.camera_combo.currentData()
                     dev = int(d) if d is not None and d >= 0 else None
                 if not self.engine.virtual_camera_running:
-                    self.engine.start_virtual_camera(kind, dev)
+                    if not self.engine.start_virtual_camera(kind, dev):
+                        # Врать про «Источник видео» после отказа нельзя: источник не
+                        # поднялся, а строка состояния утверждала бы обратное.
+                        self.device_status.setText(
+                            "Коммутатор видео: "
+                            + str(getattr(self.engine, "virtual_camera_error", None)
+                                  or "отказ запуска"))
+                        return
                 else:
                     self.engine.set_video_source(kind, dev)
                 self.device_status.setText(f"Источник видео: {kind}")
@@ -1423,7 +1430,14 @@ if QT_AVAILABLE:
                     dev_id = None
                 active = self.engine.current_video_source() == "camera"
                 if not self.engine.virtual_camera_running:
-                    self.engine.start_virtual_camera("camera", dev_id)
+                    if not self.engine.start_virtual_camera("camera", dev_id):
+                        # Иначе клик по своему тайлу выглядел бы как «выключил камеру»,
+                        # хотя на деле коммутатор не поднялся (нет v4l2loopback, прав).
+                        self.device_status.setText(
+                            "Коммутатор видео: "
+                            + str(getattr(self.engine, "virtual_camera_error", None)
+                                  or "отказ запуска"))
+                        return
                 else:
                     self.engine.set_video_source("off" if active else "camera", dev_id)
                 self._schedule_grid_rebuild()
@@ -1721,6 +1735,16 @@ if QT_AVAILABLE:
                     elif not payload.get("enabled"):
                         self.recording_status.setText(f"Запись сохранена: {file_path or '—'}")
                         self.recording_status.setStyleSheet("color:#7a8592; font-size:11px;")
+                elif event == "media.vsource":
+                    # Отказ запуска коммутатора нигде, кроме журнала, не показывался:
+                    # start() врал True, а сервис слал только active. Теперь здесь причина.
+                    if payload.get("active"):
+                        self.statusBar().showMessage(
+                            "Коммутатор видео: " + str(payload.get("kind", "")), 3000)
+                    else:
+                        self.statusBar().showMessage(
+                            "Коммутатор видео не запущен: "
+                            + str(payload.get("error", "ошибка")), 5000)
                 elif event == "media.screen_share":
                     if payload.get("enabled"):
                         self.statusBar().showMessage("Демонстрация экрана: вкл (виртуальная камера)", 5000)

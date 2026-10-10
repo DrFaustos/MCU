@@ -1914,6 +1914,11 @@ class SipEngine:
     def virtual_camera_running(self) -> bool:
         return self._vsource.virtual_camera_running
 
+    @property
+    def virtual_camera_error(self) -> Optional[str]:
+        """Причина последнего отказа коммутатора источников видео."""
+        return self._vsource.virtual_camera_error
+
     def _select_virtual_device(self) -> None:
         """Назначить виртуальное устройство (v4l2loopback) камерой для звонков."""
         if not endpoint_ready(self._endpoint):
