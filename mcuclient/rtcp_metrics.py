@@ -51,17 +51,67 @@ def _loss_fraction(rx_stat: Any) -> float | None:
     return frac
 
 
+def _mathstat_ms(value: Any) -> float | None:
+    """Значение pjsua2.MathStat (mean/n) в миллисекундах.
+
+    Все jitter-поля биндинга — не числа, а MathStat (проверено на pjsua2 2.16
+    биндингом: ``float(RtcpStat.rxIpdvUsec)`` бросает TypeError). ``n == 0``
+    означает «статистика не набрана» — это отсутствие данных, а не нулевой
+    джиттер, поэтому возвращаем None и идём к следующему источнику.
+    """
+    if value is None:
+        return None
+    mean = getattr(value, "mean", None)
+    if mean is None:
+        return None
+    try:
+        if int(getattr(value, "n", 0) or 0) <= 0:
+            return None
+        usec = float(mean)
+    except (TypeError, ValueError):
+        return None
+    if usec < 0.0:
+        return None
+    return usec / 1000.0
+
+
+def _usec_ms(value: Any) -> float | None:
+    """Числовые микросекунды в мс (старая форма поля и подставные объекты)."""
+    if value is None or hasattr(value, "mean"):
+        return None
+    try:
+        usec = float(value)
+    except (TypeError, ValueError):
+        return None
+    if usec < 0.0:
+        return None
+    return usec / 1000.0
+
+
 def _jitter_ms(stat: Any, rtcp: Any) -> float | None:
-    """Джиттер в мс (rxIpdvUsec, иначе грубо по jbuf.discard)."""
-    for source in (rtcp, stat):
+    """Джиттер приёма в мс.
+
+    Источники по убыванию точности: ``rxIpdvUsec`` (набирается только при
+    PJMEDIA_RTCP_STAT_HAS_IPDV), ``rxStat.jitterUsec`` (реальный RTP-джиттер,
+    есть всегда), ``rxRawJitterUsec`` (PJMEDIA_RTCP_STAT_HAS_RAW_JITTER).
+    Пустой MathStat (n=0) пропускается. Если ничего не набралось, но джиттер-буфер
+    сбрасывает кадры — считаем джиттер заведомо большим (грубая оценка, иначе
+    ABR повышал бы битрейт на деградирующем канале).
+    """
+    rx_stat = getattr(rtcp, "rxStat", None) if rtcp is not None else None
+    for source, field in ((rtcp, "rxIpdvUsec"), (rx_stat, "jitterUsec"),
+                          (rtcp, "rxRawJitterUsec")):
         if source is None:
             continue
-        usec = getattr(source, "rxIpdvUsec", None)
-        if usec is not None:
-            try:
-                return max(0.0, float(usec) / 1000.0)
-            except (TypeError, ValueError):
-                pass
+        try:
+            value = getattr(source, field, None)
+        except Exception:  # noqa: BLE001
+            continue
+        ms = _mathstat_ms(value)
+        if ms is None:
+            ms = _usec_ms(value)
+        if ms is not None:
+            return ms
     jbuf = getattr(stat, "jbuf", None) if stat is not None else None
     if jbuf is not None:
         discard = _int(getattr(jbuf, "discard", 0))

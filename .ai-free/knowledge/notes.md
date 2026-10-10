@@ -1125,3 +1125,19 @@ shellcheck в нём не вызывается (на машине прогона
   (путь PATCH-конфига не проверялся); `closeTransport` вычищает consumers по
   флагу `closed`, который mediasoup выставляет не гарантированно синхронно.
 <!-- source: agent -->
+
+## RTCP/ABR: jitter-поля pjsua2 — MathStat, а не число (2026-10-10)
+
+- **Симптом.** `RtcpSample.jitter_ms` всегда 0.0: ABR не реагировал на джиттер и повышал битрейт на деградирующем канале.
+- **Корень.** `mcuclient/rtcp_metrics.py::_jitter_ms` читал `RtcpStat.rxIpdvUsec` через `float(...)`. В биндинге pjsua2 2.16 это НЕ число, а `MathStat` (`float(...)` -> TypeError), поле набирается только при `PJMEDIA_RTCP_STAT_HAS_IPDV` и приходит с `n=0`. TypeError глотался `except`, резерв по `jbuf.discard` (0) -> None -> подстановка 0.0.
+- **Надёжный источник.** `RtcpStat.rxStat.jitterUsec` — реальный RTP-джиттер, есть всегда (форма тоже `MathStat`: `mean`, `n`). Порядок: `rxIpdvUsec` -> `rxStat.jitterUsec` -> `rxRawJitterUsec` -> грубая оценка по `jbuf.discard`.
+- **Как читать MathStat.** `mean`/`last`/`max`/`min`/`n`; `n == 0` означает «нет данных», а не нулевое значение. Так же устроены `rttUsec`, `rxRawJitterUsec`, `rxStat.jitterUsec`.
+- **Проверка.** `tests/test_rtcp_metrics.py` — 6 кейсов на форму MathStat, ключевой `test_real_binding_shape_not_read_as_zero`.
+- **Грабль.** Фейки в тестах повторяли ЧИСЛОВУЮ форму поля, которой в биндинге нет, — тесты были зелёными при мёртвом разборе. Фейк обязан повторять ТИП поля реального биндинга (тот же класс дефекта, что с фейком `Call.sendDtmf`).
+
+## CI typecheck: mypy без numpy даёт ложное «зелено» (2026-10-10)
+
+- **Факт.** Шаг `typecheck` в `.github/workflows/ci.yml` ставит только `mypy==2.4.*` (в файле НЕТ ни одной строки `pip install -r requirements.txt`), поэтому в CI отсутствует numpy и `import numpy as np` типизируется как `Any`.
+- **Замер.** Локально (numpy 2.5.3 с `py.typed`): `mypy mcuclient --ignore-missing-imports` -> 5 ошибок в 3 файлах (`video_source.py:49`, `audio_mixer.py:35`, `webrtc_sfu.py:29/221/228`). По тому же коммиту CI зелёный. `mypy --no-site-packages mcuclient` (среда без numpy) -> **0 ошибок**: расхождение воспроизводится одной командой.
+- **Следствия.** 1) Блокирующий гейт типов проверяет код в среде, которой нет у пользователя, и молчит на реальные конфликтующие присваивания (`np = None` в переменную типа Module; `arr = ndarray[float64]` в переменную `ndarray[int16]`). 2) Ошибки `video_source.py:49` и `audio_mixer.py:35` — не только разметка: в ветке `except ImportError` переменная модуля становится `None`, и любая проверка `_HAVE_*` обязана предшествовать использованию.
+- **Команда для сверки среды.** `mypy --no-site-packages mcuclient --ignore-missing-imports` (как в CI) против `mypy mcuclient --ignore-missing-imports` (как у разработчика с numpy).

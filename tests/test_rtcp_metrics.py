@@ -161,3 +161,74 @@ def test_collector_returns_none_when_no_samples():
     c = RtcpCollector(_Pj)
     assert c.sample_calls([]) is None
     assert c.sample_calls([None, None]) is None
+class _MathStat:
+    """Как pjsua2.MathStat: mean/n, а не число (проверено биндингом 2.16)."""
+
+    def __init__(self, mean=0, n=0):
+        self.mean = mean
+        self.n = n
+        self.last = mean
+        self.max = mean
+        self.min = mean
+
+
+def _rx_stat(pkt=100, loss=0, jitter=None):
+    rx = _RxStat(pkt=pkt, loss=loss)
+    if jitter is not None:
+        rx.jitterUsec = jitter
+    return rx
+
+
+def test_jitter_reads_mathstat_ipdv_mean():
+    rx = _RxStat(pkt=100, loss=0)
+    rtcp = _Rtcp(rx=rx)
+    rtcp.rxIpdvUsec = _MathStat(mean=50000, n=20)
+    s = _Stat(rtcp=rtcp)
+    sample = parse_stream_stat(s)
+    assert sample is not None
+    assert abs(sample.jitter_ms - 50.0) < 1e-6, sample.jitter_ms
+
+
+def test_jitter_falls_to_rxstat_jitter_usec_when_ipdv_empty():
+    rtcp = _Rtcp(rx=_rx_stat(jitter=_MathStat(mean=12000, n=5)))
+    rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)  # PJMEDIA_RTCP_STAT_HAS_IPDV выключен
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert abs(sample.jitter_ms - 12.0) < 1e-6, sample.jitter_ms
+
+
+def test_jitter_falls_to_raw_jitter():
+    rtcp = _Rtcp(rx=_RxStat(pkt=100, loss=0))
+    rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)
+    rtcp.rxRawJitterUsec = _MathStat(mean=41000, n=9)
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert abs(sample.jitter_ms - 41.0) < 1e-6, sample.jitter_ms
+
+
+def test_jitter_plain_number_still_supported():
+    rtcp = _Rtcp(rx=_RxStat(pkt=100, loss=0), ipdv=25000)
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert abs(sample.jitter_ms - 25.0) < 1e-6, sample.jitter_ms
+
+
+def test_jbuf_delay_when_no_rtcp_jitter_but_discards():
+    rtcp = _Rtcp(rx=_RxStat(pkt=100, loss=0))
+    s = _Stat(rtcp=rtcp, jbuf=_Jbuf(discard=4))
+    sample = parse_stream_stat(s)
+    assert sample is not None
+    assert sample.jitter_ms >= 1000.0, sample.jitter_ms
+
+
+def test_real_binding_shape_not_read_as_zero():
+    """На форме pjsua2 (MathStat везде) парсер обязан назвать джиттер, а не 0."""
+    # 475 принято + 25 потеряно = 500 ожидаемых: доля считается от ожидаемых,
+    # поэтому 25/500 = 0.05, а не 25/475.
+    rtcp = _Rtcp(rx=_rx_stat(pkt=475, loss=25, jitter=_MathStat(mean=8000, n=40)))
+    rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)
+    rtcp.rttUsec = _MathStat(mean=120000, n=40)
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert sample.jitter_ms > 0.0, sample.jitter_ms
+    assert abs(sample.loss_fraction - 0.05) < 1e-9
