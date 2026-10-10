@@ -1750,14 +1750,40 @@ if QT_AVAILABLE:
             self._update_buttons()
 
         def closeEvent(self, event) -> None:  # noqa: N802
+            """Закрытие окна: гасим поллеры, web-панель, H.323 и движок.
+
+            Порядок: сначала свои таймеры (они дёргают движок), затем
+            подсистемы. Хвост этого метода 2026-09-26 (b0392a9) был отрезан
+            вставкой блока web-панели В СЕРЕДИНУ метода и уехал в конец
+            класса: закрытие окна перестало останавливать движок, H.323 и
+            web-сервер, а `super().closeEvent(event)` в чужом методе падало
+            NameError. Каждый stop — под своим guard'ом и с журналом: отказ
+            подсистемы не имеет права оставлять окно висеть, но и молчать не
+            имеет права. Регрессия — tests/test_ui_close_event.py.
+            """
             try:
                 self._video_poll.stop()
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("Не удалось остановить опрос видео")
             try:
                 self._event_poll.stop()
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("Не удалось остановить опрос событий")
+            try:
+                if self._web_server is not None:
+                    self._web_server.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки web-панели при закрытии")
+            try:
+                self.h323.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки H.323 при закрытии")
+            try:
+                self.engine.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки SIP-движка при закрытии")
+            super().closeEvent(event)
+
         # --- встроенная web-панель -------------------------------------
         def _on_web_toggle(self, checked: bool) -> None:
             """Галочка «Включить web-панель»: лениво поднять/остановить сервер."""
@@ -1908,6 +1934,17 @@ if QT_AVAILABLE:
             self.statusBar().showMessage("Web-панель остановлена", 3000)
 
         def _update_web_label(self) -> None:
+            """Подпись адреса web-панели — ТОЛЬКО подпись.
+
+            С 2026-09-26 (b0392a9) к этому методу физически прилип хвост
+            `closeEvent`: новый блок вставили ВНУТРЬ closeEvent, не закрыв
+            его, и `web_server.stop()` / `engine.stop()` / `h323.stop()` /
+            `super().closeEvent(event)` оказались последними строками класса.
+            Следствия, замеренные живьём: клик по галке «web-панель» или «TLS»
+            останавливал web-сервер, SIP-движок и H.323 (т.е. рвал активные
+            вызовы), а последняя строка падала `NameError: name 'event' is not
+            defined`. Регрессия — tests/test_ui_close_event.py.
+            """
             if self._web_server is not None and self._web_server.running:
                 text = f"Адрес: {self._web_server.url}"
                 if getattr(self._web_server, "tls", False):
@@ -1918,15 +1955,6 @@ if QT_AVAILABLE:
                 self.web_url_label.setText(text)
             else:
                 self.web_url_label.setText("выключена")
-
-            try:
-                if self._web_server is not None:
-                    self._web_server.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self.engine.stop()
-            self.h323.stop()
-            super().closeEvent(event)
 
 
 else:  # pragma: no cover
