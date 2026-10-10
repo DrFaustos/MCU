@@ -403,6 +403,18 @@ def main() -> int:
                  "MCU: мост отправляет pcm.out", str(stats))
         ck.check(int(stats.get("undecodable") or 0) == 0,
                  "MCU: битых PCM-кадров нет", str(stats))
+        # Индикатор «говорит»: здесь он считается по НАСТОЯЩЕМУ RTP, а не по
+        # подставному pcm.in (это делают юниты на фейках). G.711 — 8 кГц,
+        # микшер — 16 кГц: без ресемпла на входе RMS был бы иным, и порог
+        # silence_rms поймал бы это не сразу.
+        lv1 = endpoint.audio.levels() if endpoint.audio else {}
+        ck.check(stats.get("speaker_pid") == (p_a.id if p_a else None),
+                 "MCU: мост определил докладчика (говорит A)",
+                 f"speaker_pid={stats.get('speaker_pid')} "
+                 f"ожидался={p_a and p_a.id} levels={lv1}")
+        # Печатается обязательно: уровень молчащего B — это шум линии, он
+        # показывает, какой реальный порог «говорит» нужен вместо RMS 1.0.
+        ck.check(True, "MCU: уровни моста (A говорит, B молчит)", str(lv1))
 
         # --- фаза 2: мьют A (как его ставит веб-панель) ---------------------
         if p_a is not None:
@@ -412,6 +424,22 @@ def main() -> int:
         ck.check(rms_b_muted < SILENT_RMS_MAX,
                  "MCU: мьют участника A заглушил его для B",
                  f"rms={rms_b_muted:.0f} (макс {SILENT_RMS_MAX:.0f})")
+        # Индикатор обязан гаснуть вместе со звуком: терминал A продолжает
+        # слать RTP, глушим мы его в мосту. Ожидание — именно «A погас»:
+        # B подключён и шлёт шум линии, который порог silence_rms формально
+        # считает активным, поэтому «докладчика нет вовсе» здесь было бы
+        # неверным ожиданием (проверено этим стендом: speaker_pid = B).
+        st_muted = endpoint.audio_stats()
+        lv_muted = endpoint.audio.levels() if endpoint.audio else {}
+        ck.check(st_muted.get("speaker_pid") != (p_a.id if p_a else None),
+                 "MCU: замьюченный A больше не докладчик",
+                 f"{st_muted} levels={lv_muted}")
+        ck.check(int(lv_muted.get(p_a.id if p_a else -1, -1)) == 0,
+                 "MCU: у замьюченного A уровень обнулён", str(lv_muted))
+        if p_a is not None:
+            ck.check(p_a.is_speaking is False,
+                     "MCU: у замьюченного A снят признак «говорит»",
+                     f"volume_level={p_a.volume_level}")
 
         # --- фаза 3: мьют снят — голос вернулся -----------------------------
         if p_a is not None:
@@ -422,6 +450,11 @@ def main() -> int:
         ck.check(rms_b_unmuted >= MEDIA_RMS_MIN,
                  "MCU: после снятия мьюта A снова слышен B",
                  f"rms={rms_b_unmuted:.0f} (мин {MEDIA_RMS_MIN:.0f})")
+        st_unmuted = endpoint.audio_stats()
+        ck.check(st_unmuted.get("speaker_pid") == (p_a.id if p_a else None),
+                 "MCU: после снятия мьюта A снова докладчик",
+                 f"speaker_pid={st_unmuted.get('speaker_pid')} "
+                 f"ожидался={p_a and p_a.id}")
 
         # --- фаза 4: обратное направление (B говорит, A слушает) ------------
         pump_a.stop()
@@ -442,6 +475,14 @@ def main() -> int:
         ck.check(rms_a2 >= MEDIA_RMS_MIN,
                  "A: голос B доехал через микшер MCU (обратное направление)",
                  f"rms={rms_a2:.0f} (мин {MEDIA_RMS_MIN:.0f})")
+        # Сменившийся докладчик: тот, кто заговорил первым, не обязан оставаться
+        # главным, когда заговорил другой. Именно это и врал режим speaker, пока
+        # поле is_speaking не стало выставляться.
+        st_swap = endpoint.audio_stats()
+        ck.check(st_swap.get("speaker_pid") == (p_b.id if p_b else None),
+                 "MCU: докладчик сменился на B (он громкий, а не первый)",
+                 f"speaker_pid={st_swap.get('speaker_pid')} "
+                 f"ожидался={p_b and p_b.id}")
         pump_b.stop()
 
         # --- фаза 5: сброс вызова A — из микшера уходит канал ---------------

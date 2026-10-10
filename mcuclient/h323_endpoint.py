@@ -542,6 +542,10 @@ class H323Endpoint:
             "rx_bytes": st.rx_bytes,
             "tx_bytes": st.tx_bytes,
             "undecodable": st.undecodable,
+            # Без этой строки speaker_pid был бы ещё одним полем, которое
+            # считается и никуда не доезжает: наружу смотрят именно сюда
+            # (стенд трёх хостов, диагностика панели).
+            "speaker_pid": st.speaker_pid,
         }
 
     def stop(self) -> None:

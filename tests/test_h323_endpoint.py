@@ -5,6 +5,8 @@
 обработка IPC-событий и graceful degradation.
 """
 
+import base64
+import math
 import sys
 from pathlib import Path
 
@@ -362,3 +364,72 @@ def test_host_lost_does_not_hangup_dead_host():
 
     assert room.count == 0
     assert client.commands == [], f"команды мёртвому хосту: {client.commands}"
+
+
+# --- статистика моста: что доезжает наружу -----------------------------------
+
+
+class _BridgeClient:
+    """Клиент хоста для аудио-моста: помнит pcm.out, умеет подписку."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+        self.subscribers: list = []
+
+    def on_event(self, cb) -> None:
+        self.subscribers.append(cb)
+
+    def unsubscribe_event(self, cb) -> None:
+        if cb in self.subscribers:
+            self.subscribers.remove(cb)
+
+    def pcm_out(self, token: str, data: bytes) -> bool:
+        self.sent.append((token, data))
+        return True
+
+
+def _tone(rate: int, seconds: float = 0.02, amp: int = 8000) -> bytes:
+    import struct
+
+    n = int(rate * seconds)
+    step = 2.0 * math.pi * 800.0 / rate
+    return b"".join(struct.pack("<h", int(amp * math.sin(i * step))) for i in range(n))
+
+
+def test_audio_stats_exposes_active_speaker():
+    """speaker_pid обязан доезжать наружу через audio_stats().
+
+    Мост считает докладчика (BridgeStats.speaker_pid), а смотрят наружу именно
+    в audio_stats(): стенд трёх хостов и диагностика панели. Без проекции это
+    было бы ещё одно поле, которое пишется и никем не читается, — ровно то
+    расхождение контракта, из-за которого панель показывала «не говорит».
+    """
+    from mcuclient.h323_audio_bridge import H323AudioBridge
+
+    _, ep, _ = _make_endpoint()
+    # Как _start_audio_bridge(): мост поднимается И подписывается на события
+    # клиента — без start() enabled остался бы False, и проверка статистики
+    # меряла бы не то состояние, которое бывает в бою.
+    bridge = H323AudioBridge(_BridgeClient(), ep)
+    assert bridge.start() is True
+    ep._audio = bridge
+
+    p = ep.register_incoming(H323CallInfo(remote_uri="h323:a", call_token="t1"))
+    assert p is not None
+    ep._audio.on_event(H323dEvent("call.media", {"token": "t1", "kind": "audio",
+                                                 "rate": 16000}))
+    assert ep.audio_stats()["speaker_pid"] is None, "пока никто не говорил — доклада нет"
+
+    ep._audio.on_event(H323dEvent("pcm.in", {
+        "token": "t1", "rate": 16000,
+        "data": base64.b64encode(_tone(16000)).decode("ascii")}))
+
+    st = ep.audio_stats()
+    assert st["speaker_pid"] == p.id, f"докладчик не доехал наружу: {st}"
+    assert st["enabled"] is True and st["channels"] == 1
+
+
+def test_audio_stats_without_bridge_has_no_speaker_key_crash():
+    """Моста нет (микширование выключено) — stats обязан отвечать, а не падать."""
+    _, ep, _ = _make_endpoint()
+    assert ep.audio_stats() == {"enabled": False}
