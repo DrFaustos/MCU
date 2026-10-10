@@ -779,8 +779,9 @@ class WebSession:
             port._on_sip_audio = self.on_sip_audio  # noqa: SLF001
 
             def _take() -> bytes:
-                item = self.audio_mix.record_mix()
-                return item[1] if item is not None else b""
+                # Общий микс БЕЗ канала SIP: record_mix() отдаёт микс со всеми
+                # и терминал слышал бы собственный голос (эхо).
+                return self.web_mix_for_sip()
 
             port._take_web_pcm = _take  # noqa: SLF001
             self._sip_call_port = port
@@ -792,17 +793,31 @@ class WebSession:
         """Подключить нативный media-port SIP как приёмник веб-микса."""
         self.sip_bridge._sip_sink = sink  # noqa: SLF001 — осознанно: точка связи
 
-    def web_mix_for_sip(self) -> bytes:
-        """Веб-микс для SIP-терминала: все голоса, КРОМЕ самого SIP.
+    def web_mix_for_sip(self, publisher: Optional[str] = None) -> bytes:
+        """Веб-микс для ОДНОГО SIP-терминала: все голоса, КРОМЕ его канала.
 
-        Иначе терминал слышит собственный голос (эхо): SIP-звук публикуется в
-        шину под :attr:`SIP_PUBLISHER_ID` и попал бы обратно в вызов.
+        Вычитается канал именно ЭТОГО вызова (``sip-<слот>``), а не «весь SIP»:
+        при общем канале на двух терминалах вычитание глушило обоих — вызовы
+        слышали только браузеров, но не друг друга. Без вычитания терминал
+        слышал бы собственный голос (эхо).
         """
         try:
-            return self.audio_mix.mix_excluding(self.sip_bridge.SIP_PUBLISHER_ID)
+            return self.audio_mix.mix_excluding(
+                publisher or self.sip_bridge.SIP_PUBLISHER_ID)
         except Exception:  # noqa: BLE001 — нет микшера: тишина лучше падения
             log.debug("web_mix_for_sip: микс не собран", exc_info=True)
             return b""
+
+    def forget_sip_channel(self, publisher: str) -> None:
+        """Убрать канал SIP из шины (вызов завершился, порт закрыт).
+
+        Микшера у канала нет: ``AudioMixSession`` берёт публикаторов из шины,
+        а ``MediaBus`` держит последний кадр до ``drop``. Без этого завершённый
+        вызов навсегда остаётся в миксе всех браузеров.
+        """
+        forget = getattr(self.sip_bridge, "forget", None)
+        if callable(forget):
+            forget(publisher)
 
     def attach_sip_bridge(self, service) -> None:
         """Запомнить сервис нативного моста SIP (для статуса панели).
@@ -816,9 +831,15 @@ class WebSession:
         """Поднятый сервис нативного моста или None."""
         return self._sip_bridge_service
 
-    def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1) -> None:
-        """Точка входа для media-port движка: SIP-звук -> в общий микс веба."""
-        self.sip_bridge.on_sip_audio(pcm, rate, channels)
+    def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1,
+                     publisher: Optional[str] = None) -> None:
+        """Точка входа для media-port движка: SIP-звук -> в общий микс веба.
+
+        ``publisher`` — канал ЭТОГО вызова (``sip-<слот>``). Он обязателен для
+        нативного моста: при общем канале на всех вызовах их PCM затирали друг
+        друга, а вычитание эха глушило сразу все терминалы.
+        """
+        self.sip_bridge.on_sip_audio(pcm, rate, channels, publisher)
 
     def sip_bridge_stats(self) -> Dict[str, Any]:
         return self.sip_bridge.stats()

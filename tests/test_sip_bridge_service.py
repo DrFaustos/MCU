@@ -314,6 +314,149 @@ def test_empty_frame_is_ignored():
     assert ses.sip_audio == []
 
 
+# --- канал на слот ----------------------------------------------------------
+
+
+class _ChannelSession:
+    """Сессия, которая ПРИНИМАЕТ канал вызова — как боевая `WebSession`."""
+
+    class _Bridge:
+        SIP_PUBLISHER_ID = "sip"
+
+    def __init__(self) -> None:
+        self.sip_bridge = self._Bridge()
+        self.sip_audio: list = []
+        self.sfu_audio: list = []
+        self.mix_requests: list = []
+        self.forgotten: list = []
+        self.web_mix = _pcm(100)
+
+    def on_sip_audio(self, pcm, rate=0, channels=1, publisher=None):
+        self.sip_audio.append((pcm, rate, channels, publisher))
+
+    def push_sip_pcm_to_sfu(self, pcm):
+        self.sfu_audio.append(pcm)
+
+    def web_mix_for_sip(self, publisher=None):
+        self.mix_requests.append(publisher)
+        return self.web_mix
+
+    def forget_sip_channel(self, publisher):
+        self.forgotten.append(publisher)
+
+
+def _two_call_service():
+    """Мост на двух вызовах: два порта, канал на каждый слот."""
+    ses = _ChannelSession()
+    eng = _Engine([_Call(), _Call()])
+    ports: list = []
+
+    def make_port(on_frame, take_web, clock_rate=16000):
+        port = _Port(on_frame, take_web, clock_rate)
+        ports.append(port)
+        return port
+
+    svc = SipBridgeService(ses, eng, make_port=make_port,
+                           get_calls=eng.active_audio_calls)
+    assert svc.start() is True
+    # Порты поднимаются сверкой с вызовами (так же, как в бою: поллером или
+    # событием), а не самим start().
+    assert svc.ensure_ports() == 2
+    assert len(ports) == 2, ports
+    return svc, eng, ses, ports
+
+
+def test_each_slot_publishes_into_its_own_channel():
+    """Два вызова обязаны приходить в РАЗНЫЕ каналы.
+
+    Это смысл per-slot каналов: раньше все порты лились в общий id `sip`,
+    PCM второго терминала затирал первый в шине, а вычитание эха глушило
+    обоих. Проверка на связке «порт -> сессия»: канал обязан доехать до
+    приёмника, а не остаться внутри моста.
+    """
+    svc, _eng, ses, ports = _two_call_service()
+    try:
+        ports[0].on_frame(_pcm(1000), 16000, 1)
+        ports[1].on_frame(_pcm(2000), 16000, 1)
+
+        assert [c[3] for c in ses.sip_audio] == ["sip-0", "sip-1"], ses.sip_audio
+    finally:
+        svc.stop()
+
+
+def test_take_web_asks_mix_for_its_own_channel():
+    """Веб-микс для слота вычитается по каналу ЭТОГО вызова, а не «весь SIP»."""
+    svc, _eng, ses, ports = _two_call_service()
+    try:
+        ports[0].take_web()
+        ports[1].take_web()
+
+        assert ses.mix_requests == ["sip-0", "sip-1"], ses.mix_requests
+    finally:
+        svc.stop()
+
+
+def test_stop_forgets_channel_of_every_slot():
+    """После остановки ни один канал не должен остаться в миксе.
+
+    `MediaBus` держит последний кадр до `drop`: незакрытый канал означает,
+    что браузеры продолжают слушать застывший голос завершённого терминала.
+    """
+    svc, _eng, ses, _ports = _two_call_service()
+
+    svc.stop()
+
+    assert ses.forgotten == ["sip-0", "sip-1"], ses.forgotten
+
+
+def test_legacy_session_without_publisher_still_gets_audio():
+    """Сессия, не принимающая канал, обязана получать звук как раньше.
+
+    Колбэки приходят извне (моки, сессии старого образца, свои обёртки).
+    Передать канал наугад нельзя: `TypeError` проглотится `except` рядом, и
+    звук потеряется МОЛЧА — ровно тот класс отказа, который считается
+    дефектом. Мост обязан решить сигнатуру и не доносить канал, если его не
+    ждут.
+    """
+    ses = _Session()  # on_sip_audio(pcm, rate, channels) — без publisher
+    eng = _Engine([_Call()])
+    ports: list = []
+
+    def make_port(on_frame, take_web, clock_rate=16000):
+        port = _Port(on_frame, take_web, clock_rate)
+        ports.append(port)
+        return port
+
+    svc = SipBridgeService(ses, eng, make_port=make_port,
+                           get_calls=eng.active_audio_calls)
+    assert svc.start() is True
+    assert svc.ensure_ports() == 1
+    try:
+        ports[0].on_frame(_pcm(4000), 48000, 1)
+
+        assert ses.sip_audio, "звук потерян молча"
+        assert ses.sip_audio[0][1] == 48000
+        assert svc.stats()["sip_frames"] == 1
+    finally:
+        svc.stop()
+
+
+def test_removed_call_channel_is_forgotten():
+    """Слот, освобождённый при уменьшении числа вызовов, обязан быть убран.
+
+    Порт закрыт, а канал в шине остался — микшер берёт состав из шины и
+    раздаёт браузерам застывший кадр завершённого терминала.
+    """
+    svc, eng, ses, _ports = _two_call_service()
+    try:
+        eng.calls = [_Call()]
+        assert svc.ensure_ports() >= 0
+
+        assert "sip-1" in ses.forgotten, ses.forgotten
+    finally:
+        svc.stop()
+
+
 def test_session_errors_do_not_break_pjsua2():
     """Колбэки веба вызываются из нативного потока — падать нельзя."""
     class Boom(_Session):

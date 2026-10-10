@@ -26,10 +26,12 @@ pjsua2 держит медиаграф завершённого вызова ж�
 
 from __future__ import annotations
 
+import inspect
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .log import get_logger
+from .sip_web_bridge import SipWebAudioBridge
 
 log = get_logger("sip-bridge")
 
@@ -85,6 +87,8 @@ class SipBridgeService:
         self._tx = 0
         self._sip_frames = 0
         self._web_frames = 0
+        #: имя метода сессии -> принимает ли он канал вызова (см. _wants_channel)
+        self._arity: Dict[str, bool] = {}
 
     # -- жизненный цикл ---------------------------------------------------
     @property
@@ -121,6 +125,10 @@ class SipBridgeService:
         for slot, port in enumerate(ports):
             _detach_call(attached.get(slot), port)
             _close_port(port)
+            # Завершённый вызов обязан исчезнуть из шины: микшер собирает
+            # состав публикаторов из неё, а MediaBus держит последний кадр до
+            # самого drop — иначе браузеры слышат фантом.
+            self._forget_channel(slot)
         self._enabled = False
 
     # -- события движка ----------------------------------------------------
@@ -157,7 +165,9 @@ class SipBridgeService:
                 self._attached = {i: c for i, c in self._attached.items() if i < need}
             created = 0
             for _ in range(need - current):
-                port = self._create_port()
+                # Слот = индекс порта: канал шины привязан к слоту, а не к
+                # вызову, поэтому при переезде слота канал не «уезжает».
+                port = self._create_port(len(self._ports))
                 if port is None:
                     break
                 self._ports.append(port)
@@ -166,6 +176,7 @@ class SipBridgeService:
         for offset, port in enumerate(extra):
             _detach_call(extra_attached.get(offset), port)
             _close_port(port)
+            self._forget_channel(need + offset)
         if created:
             log.info("Аудио-мост SIP: портов %d (активных вызовов %d)", total, need)
         if extra:
@@ -191,12 +202,18 @@ class SipBridgeService:
         except Exception:  # noqa: BLE001 — без регистрации порт не создастся
             log.debug("Регистрация потока аудио-моста в pjlib не удалась", exc_info=True)
 
-    def _create_port(self) -> Any:
-        """Создать и активировать один порт (None — если pjsua2 недоступен)."""
+    def _create_port(self, slot: int) -> Any:
+        """Создать и активировать порт слота (None — если pjsua2 недоступен).
+
+        Колбэки порта привязываются к слоту замыканием: pjsua2 зовёт
+        ``onFrameReceived``/``onFrameRequested`` без контекста вызова.
+        """
+        on_frame = self._make_on_frame(slot)
+        take_web = self._make_take_web(slot)
         try:
-            port = (self._make_port(self._on_frame, self._take_web, self._rate)
+            port = (self._make_port(on_frame, take_web, self._rate)
                     if self._make_port is not None
-                    else _default_port(self._on_frame, self._take_web, self._rate))
+                    else _default_port(on_frame, take_web, self._rate))
         except Exception:  # noqa: BLE001 — нет стека: мост просто не поднимается
             log.debug("Порт аудио-моста не создан", exc_info=True)
             return None
@@ -230,6 +247,10 @@ class SipBridgeService:
                 # Слот переезжает на другой вызов: старую связь закрываем,
                 # иначе в медиаграфе останется маршрут на завершённый вызов.
                 _detach_call(previous, ports[idx])
+                # И его канал чистим: в sip-<slot> остался последний кадр
+                # прежнего вызова, а новый вызов ещё ничего не прислал —
+                # микшер взял бы чужой голос.
+                self._forget_channel(idx)
             if not _attach_call(call, ports[idx]):
                 continue
             with self._lock:
@@ -238,15 +259,86 @@ class SipBridgeService:
             log.info("Аудио-мост SIP подключён к вызову (слот %d)", idx)
 
     # -- медиа -------------------------------------------------------------
-    def _on_frame(self, pcm: bytes, rate: int = 0, channels: int = 1) -> None:
-        """PCM из SIP-вызова -> общий микс панели + (опционально) mediasoup."""
+    def _make_on_frame(self, slot: int) -> Callable[..., None]:
+        """Колбэк приёма для порта СЛОТА: PCM вызова -> в свой канал шины.
+
+        pjsua2 зовёт ``onFrameReceived`` без контекста вызова — ни id участника,
+        ни id вызова в колбэке нет. Поэтому канал (``sip-<slot>``) зашивается в
+        замыкание при создании порта. Слот стабилен: ``active_audio_calls``
+        сортирует вызовы по id участника, а ``_reattach`` переподключает слот,
+        не меняя его номера.
+        """
+        channel = SipWebAudioBridge.channel_of(slot)
+
+        def on_frame(pcm: bytes, rate: int = 0, channels: int = 1) -> None:
+            self._on_frame(pcm, rate, channels, channel)
+
+        return on_frame
+
+    def _make_take_web(self, slot: int) -> Callable[[], bytes]:
+        """Колбэк отдачи для порта СЛОТА: веб-микс без голоса ЭТОГО вызова."""
+        channel = SipWebAudioBridge.channel_of(slot)
+
+        def take_web() -> bytes:
+            return self._take_web(channel)
+
+        return take_web
+
+    def _forget_channel(self, slot: int) -> None:
+        """Убрать канал слота из шины (порт закрыт — вызов завершился).
+
+        Микшер собирает состав публикаторов из шины, а ``MediaBus`` держит
+        последний кадр до ``drop``: без уборки завершённый вызов остаётся в
+        миксе всех браузеров застывшим последним кадром.
+        """
+        forget = getattr(self._session, "forget_sip_channel", None)
+        if not callable(forget):
+            return
+        try:
+            forget(SipWebAudioBridge.channel_of(slot))
+        except Exception:  # noqa: BLE001 — уборка не имеет права ронять мост
+            log.debug("Уборка SIP-канала слота %d упала", slot, exc_info=True)
+
+    def _with_channel(self, name: str, fn: Any, args: tuple,
+                      channel: Optional[str]) -> tuple:
+        """Приложить канал вызова к аргументам, ТОЛЬКО если колбэк его ждёт.
+
+        Колбэки сессии приходят извне (моки, сессии старого образца, свои
+        обёртки). Передать канал наугад нельзя: TypeError проглотится `except`
+        ниже, и звук потеряется МОЛЧА — ровно тот класс отказа, который этот
+        проект считает дефектом. Поэтому сигнатура решается один раз на метод
+        и кэшируется в :attr:`_arity`.
+        """
+        if channel is None:
+            return args
+        decided = self._arity.get(name)
+        if decided is None:
+            decided = _accepts_extra_arg(fn, len(args))
+            self._arity[name] = decided
+            if not decided:
+                log.debug("Сессия не принимает канал вызова (%s): мост отдаёт "
+                          "общий микс — на двух вызовах возможно эхо", name)
+        return args + (channel,) if decided else args
+
+    def _on_frame(self, pcm: bytes, rate: int = 0, channels: int = 1,
+                  publisher: Optional[str] = None) -> None:
+        """PCM из SIP-вызова -> в канал вызова + (опционально) mediasoup.
+
+        ``publisher`` — канал этого вызова; без него приёмник опубликует звук в
+        общий канал (так делали все порты раньше, и два терминала затирали
+        друг друга).
+        """
         if not pcm:
             return
         self._sip_frames += 1
         sink = getattr(self._session, "on_sip_audio", None)
         if callable(sink):
+            args = self._with_channel(
+                "on_sip_audio", sink,
+                (pcm, int(rate or self._rate),
+                 int(channels or self.SIP_CHANNELS)), publisher)
             try:
-                sink(pcm, int(rate or self._rate), int(channels or self.SIP_CHANNELS))
+                sink(*args)
             except Exception:  # noqa: BLE001 — мост не имеет права ронять pjsua2
                 log.debug("on_sip_audio упал", exc_info=True)
         push = getattr(self._session, "push_sip_pcm_to_sfu", None)
@@ -256,12 +348,13 @@ class SipBridgeService:
             except Exception:  # noqa: BLE001
                 log.debug("push_sip_pcm_to_sfu упал", exc_info=True)
 
-    def _take_web(self) -> bytes:
-        """Веб-микс для отправки в SIP (без голоса самого SIP)."""
+    def _take_web(self, publisher: Optional[str] = None) -> bytes:
+        """Веб-микс для вызова: все голоса, кроме канала ЭТОГО вызова."""
         take = getattr(self._session, "web_mix_for_sip", None)
         if callable(take):
+            args = self._with_channel("web_mix_for_sip", take, (), publisher)
             try:
-                pcm = take() or b""
+                pcm = take(*args) or b""
             except Exception:  # noqa: BLE001
                 log.debug("web_mix_for_sip упал", exc_info=True)
                 return b""
@@ -347,6 +440,27 @@ class SipBridgeService:
             "sip_frames": self._sip_frames,
             "web_frames": self._web_frames,
         }
+
+
+def _accepts_extra_arg(fn: Any, positional: int) -> bool:
+    """Принимает ли ``fn`` ещё один позиционный аргумент (или **kwargs).
+
+    Без сигнатуры (C-функция, functools.partial без __wrapped__) считаем,
+    что НЕ принимает: молча потерять звук хуже, чем не донести канал — при
+    общем канале мост работает как раньше, а не глохнет совсем.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL
+           or p.kind is inspect.Parameter.VAR_KEYWORD
+           for p in params.values()):
+        return True
+    take = sum(1 for p in params.values()
+               if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                             inspect.Parameter.POSITIONAL_OR_KEYWORD))
+    return take > positional
 
 
 def _detach_call(call: Any, port: Any) -> None:
