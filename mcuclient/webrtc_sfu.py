@@ -342,9 +342,17 @@ class AudioMixSession:
             self._stop.wait(max(0.005, interval))
 
     # -- публичный API -----------------------------------------------------
-    def tick(self) -> int:
-        """Один цикл микширования. Возвращает номер версии микса."""
+    def tick(self, now: Optional[float] = None) -> int:
+        """Один цикл микширования. Возвращает номер версии микса.
+
+        ``now`` — снимок времени тика (по умолчанию ``time.monotonic()``).
+        Время берётся ОДИН раз на тик и передаётся всем, кто считает живость:
+        у подсветки и у микса не может быть двух независимых часов. Параметр
+        наружу нужен, чтобы затухание мёртвого канала проверялось детерми-
+        нированно, без ``time.sleep`` на величину порога.
+        """
         publishers = list(self._bus.publishers())
+        moment = time.monotonic() if now is None else float(now)
         # «Свежий» = версия аудио выросла с прошлого тика: только новый кадр
         # отмечает живость публикации. По последнему кадру шины гореть нельзя —
         # MediaBus держит его до самого drop(), т.е. до выхода из конференции.
@@ -357,27 +365,52 @@ class AudioMixSession:
             ver = self._bus.audio_version(pid)
             fresh[pid] = self._last_audio_ver.get(pid) != ver
             self._last_audio_ver[pid] = ver
+            if not fresh[pid]:
+                # Нового кадра нет. Буфер не перечитываем и сразу не глушим:
+                # публикация и тик идут одним шагом (20 мс) и законно
+                # разъезжаются по фазе — живой поток обязан переживать тик
+                # без нового кадра (инвариант
+                # `test_living_stream_does_not_blink_between_ticks`).
+                continue
+            # Живость отмечается ДО уборки: у подсветки и у микса один штамп
+            # на один тик. Своего второго счётчика времени у микшера нет
+            # именно поэтому — иначе «говорит» и слышимый голос разъезжаются.
+            self._indicator.mark(pid, moment)
             pcm, rate, channels = item
             mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
             self._mixer.set_buffer(pid, mono)
-        # Убрать из микшера тех, кто больше не публикует. Имя переменной
-        # отличается от цикла выше: participant_ids микшера — ParticipantId
-        # (Union[int, str]), publishers — List[str], и mypy отвергал
-        # повторное присваивание pid другого типа.
+        # Убрать из микшера тех, кто больше не публикует, и тех, чей поток
+        # встал. Имя переменной отличается от цикла выше: participant_ids
+        # микшера — ParticipantId (Union[int, str]), publishers — List[str],
+        # и mypy отвергал повторное присваивание pid другого типа.
+        #
+        # Затухание обязано жить здесь, а не в MediaBus: у мёртвого источника
+        # события «поток иссяк» не бывает в природе (терминал положил трубку —
+        # UDP молчит, RTP-мост никто не останавливает), а шина держит послед-
+        # ний кадр до самого drop(). Замерено пробой боевым путём ДО правки:
+        # индикатор гас по порогу, а общий микс спустя 1.5 с всё ещё давал
+        # амплитуду 3000 — залипший кадр суммировался в микс ВСЕХ участников
+        # бессрочно. Порог тот же, что гасит подсветку (LEVEL_STALE_MS).
         for buffered in list(self._mixer.participant_ids):
             if buffered not in publishers:
                 self._mixer.remove(buffered)
+                self._indicator.forget(buffered)
+            elif self._indicator.is_stale(buffered, moment):
+                self._mixer.remove(buffered)
+                self._indicator.forget(buffered)
         for pid in list(self._last_audio_ver):
             if pid not in publishers:
                 del self._last_audio_ver[pid]
         # Индикатор обновляется ПОСЛЕ очистки микшера: removed-публикатор
-        # обязан получить явный ноль, а не последний RMS.
+        # обязан получить явный ноль, а не последний RMS. forget() выше этому
+        # только помогает: затухнувший канал уходит из _last_mark, и update
+        # считает ему 0, а не громкость последнего кадра.
         conference = self._conference
         # Право быть докладчиком — только у тех, у кого есть тайл. Служебный
         # канал SIP (суммарный PCM терминалов) в миксе остаётся и считается,
         # но светиться вместо браузера не имеет права.
         self._indicator.update(
-            self._mixer, fresh,
+            self._mixer, fresh, now=moment,
             eligible=None if conference is None else conference.participant_ids())
         if conference is not None:
             conference.update_levels(self._indicator.levels,

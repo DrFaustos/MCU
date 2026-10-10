@@ -11,6 +11,13 @@ def _pcm(value: int, samples: int = 960) -> bytes:
     return struct.pack("<" + "h" * samples, *([value] * samples))
 
 
+def _amp(pcm: bytes) -> int:
+    """Амплитуда первого сэмпла: метка «чей голос в миксе» (0 = тишина)."""
+    if not pcm:
+        return 0
+    return abs(struct.unpack_from("<h", pcm, 0)[0])
+
+
 def test_tick_does_nothing_without_publishers():
     bus = MediaBus()
     mix = AudioMixSession(bus, recipients=lambda: ["web-1"])
@@ -268,3 +275,65 @@ def test_participant_ids_is_the_eligible_set():
     assert set(ids) == {a.id, b.id}
     conf.leave(b.id)
     assert conf.participant_ids() == [a.id]
+
+
+# --- мёртвый канал обязан гаснуть в МИКСЕ, а не только в подсветке -----------
+
+
+def test_stale_channel_fades_out_of_the_mix_not_only_the_spotlight():
+    """Канал без новых кадров обязан исчезнуть из микса, а не только с панели.
+
+    Замерено пробой живьём ДО правки: канал `sip`, который `_on_sfu_audio`
+    наливал в шину без парного `drop()`. Поток иссяк сам, никто ничего не
+    останавливал, а `MediaBus` держит последний кадр до `drop()`. Индикатор
+    «говорит» гас по порогу — именно поэтому дефект был молчаливым, — но
+    общий микс спустя 1.5 с по-прежнему давал амплитуду 3000: залипший кадр
+    суммировался в микс ВСЕХ участников бессрочно.
+
+    Регрессия намеренно на уровне микшера, а не конкретного продюсера:
+    дыра в том, что `tick()` кладёт в микшер ВСЕх публикаторов шины, поэтому
+    её открывает ЛЮБОЙ канал без парного `drop` (обрыв RTP, смерть процесса
+    терминала, закрытая без `close_session` вкладка).
+    """
+    bus = MediaBus()
+    mix = AudioMixSession(bus, recipients=lambda: ["web-2"])
+    bus.publish_audio("dead", _pcm(3000), 48000, 1)
+    mix.tick(now=0.0)
+    assert "dead" in mix.active_publishers()
+
+    # Кадров больше нет, версия шины не растёт. 50 мс — живой поток с
+    # джиттером: глушить его право не имеем (тот же инвариант, что у
+    # `test_living_stream_does_not_blink_between_ticks`).
+    mix.tick(now=0.05)
+    assert "dead" in mix.active_publishers(), (
+        "затухание сработало раньше порога — живой поток с джиттером глохнет")
+
+    mix.tick(now=0.5)                      # 500 мс > LEVEL_STALE_MS_DEFAULT
+    assert "dead" not in mix.active_publishers(), (
+        "мёртвый канал остался в миксе: браузеры бессрочно слышат того, кто "
+        "положил трубку")
+    item = mix.mixed_for("web-2")
+    assert item is not None and _amp(item[1]) == 0, (
+        "залипший PCM по-прежнему суммируется в микс участника")
+
+
+def test_channel_revives_when_its_stream_resumes():
+    """Затухание не имеет права превращаться в глушение: ожил — снова слышен.
+
+    Иначе правка «в одну сторону» тихо ломала бы вызовы, в которых звук
+    пропадал на минуту: канал убран из микшера и обратно не возвращается.
+    """
+    bus = MediaBus()
+    mix = AudioMixSession(bus, recipients=lambda: ["web-2"])
+    bus.publish_audio("live", _pcm(2000), 48000, 1)
+    mix.tick(now=0.0)
+    mix.tick(now=0.5)
+    assert "live" not in mix.active_publishers()
+
+    bus.publish_audio("live", _pcm(2500), 48000, 1)   # поток возобновился
+    mix.tick(now=0.6)
+    assert "live" in mix.active_publishers(), (
+        "возобновлённый канал не вернулся в микс")
+    item = mix.mixed_for("web-2")
+    assert item is not None and _amp(item[1]) == 2500, (
+        f"вернувшийся голос не дошёл до микса: {_amp(item[1]) if item else None}")

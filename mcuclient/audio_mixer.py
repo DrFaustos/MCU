@@ -196,6 +196,20 @@ class LevelsIndicator:
         """Забыть канал целиком (он больше не участвует в миксе)."""
         self._last_mark.pop(channel_id, None)
 
+    def is_stale(self, channel_id: ParticipantId,
+                 now: Optional[float] = None) -> bool:
+        """Нет нового кадра дольше :attr:`stale_ms` (или штампа нет вовсе).
+
+        Метод публичный нарочно: по этому же штампу продюсер обязан погасить
+        канал не только в подсветке, но и в МИКШЕ. Своего второго счётчика
+        времени у микшера быть не должно — иначе «говорит» и слышимый голос
+        разъезжаются, и мёртвый канал остаётся суммироваться в микс всех
+        участников (шиной ``MediaBus`` он не убирается до самого ``drop``).
+        """
+        moment = time.monotonic() if now is None else now
+        stamp = self._last_mark.get(channel_id)
+        return stamp is None or (moment - stamp) * 1000.0 > self.stale_ms
+
     def update(self, mixer: "AudioMixer",
                fresh: Optional[Dict[ParticipantId, bool]] = None,
                now: Optional[float] = None,
