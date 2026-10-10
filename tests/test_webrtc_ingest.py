@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 
 from mcuclient.webrtc_ingest import (
     WEBRTC_AVAILABLE,
@@ -10,6 +11,7 @@ from mcuclient.webrtc_ingest import (
     WebRTCManager,
     make_frame_hub_sink,
 )
+from mcuclient.webrtc_sfu import AudioMixSession, MediaBus
 
 
 # --- фейковый aiortc --------------------------------------------------------
@@ -213,3 +215,101 @@ def test_make_frame_hub_sink_forwards_video():
     sink.on_audio_pcm(b"\x00" * 10, 48000, 1)
     assert hub.frames == ["rgb"]
     assert sink.audio_frames == 1 and sink.audio_bytes == 10
+
+
+# --- уборка канала шины при закрытии сессии --------------------------------
+#
+# MediaBus держит последний кадр до drop(), а AudioMixSession.tick() берёт
+# состав публикаторов именно из шины. Без уборки браузер, закрывший вкладку,
+# оставался в миксе всех остальных бессрочно (замерено пробой: амплитуда 3000
+# до закрытия и 3000 после при нуле живых сессий).
+
+def _loud(samples: int = 480) -> bytes:
+    return struct.pack("<" + "h" * samples, *([3000] * samples))
+
+
+def _amp(pcm: bytes) -> int:
+    return abs(struct.unpack_from("<h", pcm, 0)[0])
+
+
+def _publish(manager: WebRTCManager, fake: "_FakeAiortc", pc_index: int) -> None:
+    """Эмулировать приход аудио-трека: ретранслятор начинает лить в шину."""
+    pc = fake.pcs[pc_index]
+
+    async def _feed():
+        pc.emit("track", _FakeTrack("audio", [_FakeAudioFrame()]))
+        await asyncio.sleep(0.05)
+
+    manager._run(_feed())
+
+
+def test_close_session_drops_the_bus_channel():
+    fake = _FakeAiortc()
+    bus = MediaBus()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    sid = m.handle_offer("v=0", participant="web-1")["session"]
+    _publish(m, fake, 0)
+    assert bus.latest_audio("web-1") is not None, "публикация не дошла до шины"
+
+    assert m.close_session(sid) is True
+    assert bus.publishers() == [], "канал закрытой сессии остался в шине"
+    assert bus.latest_audio("web-1") is None
+
+
+def test_closed_session_stops_occupying_the_mix():
+    fake = _FakeAiortc()
+    bus = MediaBus()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    sid = m.handle_offer("v=0", participant="web-1")["session"]
+    _publish(m, fake, 0)
+    # Голос участника в его канале (тот же id, что публикация выше).
+    bus.publish_audio("web-1", _loud(), 48000, 1)
+
+    mix = AudioMixSession(bus, recipients=lambda: ["web-9"])
+    mix.tick()
+    before = mix.mixed_for("web-9")
+    assert before is not None and _amp(before[1]) > 0, (
+        "участник не слышен ещё до закрытия")
+
+    m.close_session(sid)
+    mix.tick()
+    after = mix.mixed_for("web-9")
+    assert after is not None and _amp(after[1]) == 0, (
+        "закрытый браузер остался в миксе")
+
+
+def test_viewer_close_does_not_silence_the_live_publisher():
+    """Канал принадлежит УЧАСТНИКУ, а не сессии: под одним id две сессии."""
+    fake = _FakeAiortc()
+    bus = MediaBus()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    pub = m.handle_offer("v=0", role="publish",
+                         participant="web-1")["session"]
+    _publish(m, fake, 0)
+    view = m.handle_offer("v=0", role="viewer",
+                          participant="web-1")["session"]
+
+    assert m.close_session(view) is True
+    assert bus.latest_audio("web-1") is not None, (
+        "зритель, закрыв своё окно, оглушил живого публикатора того же id")
+
+    assert m.close_session(pub) is True
+    assert bus.publishers() == [], "канал убран только когда публикатор закрылся"
+
+
+def test_close_session_keeps_other_participants_channels():
+    fake = _FakeAiortc()
+    bus = MediaBus()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    m.handle_offer("v=0", participant="web-1")["session"]
+    second = m.handle_offer("v=0", participant="web-2")["session"]
+    _publish(m, fake, 0)
+    _publish(m, fake, 1)
+    assert bus.publishers() == ["web-1", "web-2"]
+
+    m.close_session(second)
+    assert bus.publishers() == ["web-1"], (
+        "закрытие одной сессии тронуло канал другого участника")
+
+    m.close_all()
+    assert bus.publishers() == [], "close_all обязан убрать каналы всех сессий"
