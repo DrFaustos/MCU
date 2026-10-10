@@ -101,7 +101,7 @@ GET:
 
 | Путь | Ответ |
 |------|-------|
-| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports`, `mediasoup_rtp` (`txPackets`, `sendErrors`, `lastSendError`) |
+| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` (`rx_frames`, `tx_frames`, `frame_failures`, `frame_errors`), `mediasoup_rtp` (`txPackets`, `sendErrors`, `lastSendError`; если мост **не поднялся** — `started: false` и `reason` с причиной и что исправить) |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
 | `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`) |

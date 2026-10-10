@@ -115,3 +115,55 @@ def test_bridge_started_once():
         assert s.mediasoup_rtp_stats()["started"] is True
     finally:
         s.close()
+
+
+class _CfgOn:
+    available_layouts = ["speaker"]
+    features = {"web": {"mediasoup": {"enabled": True}}}
+    recording_path = "/tmp/mcu-test-rec"
+    web = {"mediasoup": {"enabled": True, "host": "0.0.0.0", "port": 4443}}
+
+
+class _WildcardClient:
+    """Сайдкар, отвечающий на «куда слать RTP» адресом прослушивания."""
+
+    base_url = "http://0.0.0.0:4443"
+
+    def create_plain_transport(self, room_id, rtcp_mux=True):
+        return {"ok": True, "transportId": "pt-x", "ip": "0.0.0.0", "port": 4443}
+
+
+class _StubSignaling:
+    _client = _WildcardClient()
+
+    def ensure_room(self):
+        return "room-stub"
+
+
+def test_refused_bridge_is_distinguishable_from_disabled():
+    # 4725cae научил мост ОТКАЗЫВАТЬ, но web_server сводил отказ к None —
+    # неотличимому от «mediasoup выключен» (замерено зондом: оба случая
+    # давали mediasoup_rtp=None). Отказ обязан доехать до GET /api/status.
+    s = WebSession(_FakeEngine(), _CfgOn())
+    s._ms_signaling = _StubSignaling()  # type: ignore[assignment]
+    try:
+        assert s.mediasoup_rtp_bridge() is None
+        st = s.status()["mediasoup_rtp"]
+        assert st is not None, "отказ моста не должен выглядеть выключенным"
+        assert st["started"] is False
+        assert "listen_ip" in st.get("reason", ""), st
+        assert "listen_ip" in s.mediasoup_rtp_stats().get("reason", "")
+    finally:
+        s.close()
+
+
+def test_disabled_bridge_stays_none_in_status():
+    # Граница: без первого кейса правка стала бы тривиальной. «Выключено»
+    # обязано остаться None (и stats == {started: False}) — иначе отказ и
+    # выключенный режим снова схлопнулись бы в одно значение.
+    s = WebSession(_FakeEngine(), _CfgOff())
+    try:
+        assert s.status()["mediasoup_rtp"] is None
+        assert s.mediasoup_rtp_stats() == {"started": False}
+    finally:
+        s.close()

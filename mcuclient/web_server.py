@@ -334,6 +334,10 @@ class WebSession:
         self._ms_signaling: Optional[Union[Literal[False], "MediasoupSignaling"]] = None
         # RTP-мост SIP/H.323 <-> mediasoup (опционально).
         self._ms_rtp: Optional[Union[Literal[False], "MediasoupRtpBridge"]] = None
+        # Причина отказа моста ("" — отказа не было). Хранится отдельно от
+        # _ms_rtp, чтобы «включён, но мост честно отказал» не схлопывался в
+        # тот же None, что и «mediasoup выключен».
+        self._ms_rtp_error: str = ""
         # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
         self._sip_bridge_service: Optional["SipBridgeService"] = None
 
@@ -427,7 +431,7 @@ class WebSession:
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
             "conference_participants": self.conference.participants(),
-            "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
+            "mediasoup_rtp": self._ms_rtp_display(),
             "sip_bridge": self.sip_bridge_stats(),
             "registration": _registration_dict(eng),
             "address": _address_dict(eng),
@@ -946,7 +950,11 @@ class WebSession:
             bridge = MediasoupRtpBridge(
                 sig._client, room_id, on_sip_pcm=self._on_sfu_audio)  # noqa: SLF001
             if not bridge.start():
+                # Честный отказ моста (например, сайдкар ответил адресом
+                # прослушивания) не должен тонуть в None, неотличимом от
+                # «mediasoup выключен»: сохраняем причину для панели.
                 self._ms_rtp = False
+                self._ms_rtp_error = bridge.start_error() or "мост не поднят"
                 return None
             self._ms_rtp = bridge
         except Exception:  # noqa: BLE001
@@ -970,7 +978,25 @@ class WebSession:
 
     def mediasoup_rtp_stats(self) -> Dict[str, Any]:
         bridge = self.mediasoup_rtp_bridge()
-        return bridge.stats() if bridge is not None else {"started": False}
+        if bridge is not None:
+            return bridge.stats()
+        out: Dict[str, Any] = {"started": False}
+        if self._ms_rtp_error:
+            out["reason"] = self._ms_rtp_error
+        return out
+
+    def _ms_rtp_display(self) -> Optional[Dict[str, Any]]:
+        """mediasoup_rtp для GET /api/status: поднятый мост, отказ либо None.
+
+        Сводить отказ к None нельзя: «выключено» и «включено, но сайдкар
+        вернул адрес прослушивания» давали один и тот же None, и оператор с
+        тишиной в обоих каналах не видел причины — она жила только в журнале.
+        """
+        if self._ms_rtp:
+            return self._ms_rtp.stats()
+        if self._ms_rtp_error:
+            return {"started": False, "reason": self._ms_rtp_error}
+        return None
 
     # -- mediasoup-сигналинг (опциональный SFU) ----------------------------
     def mediasoup_signaling(self):

@@ -92,6 +92,10 @@ class MediasoupRtpBridge:
         self._transport_id: Optional[str] = None
         self._producer_id: Optional[str] = None
         self._started = False
+        # Причина последнего отказа start(); "" — мост поднят либо не
+        # запускался. Без неё вызывающий код сводит отказ к None, и панель
+        # не отличает «включён, но слать RTP некуда» от «выключено».
+        self._start_error = ""
 
     # -- свойства ----------------------------------------------------------
     @property
@@ -149,17 +153,29 @@ class MediasoupRtpBridge:
             reported, base)
         return None
 
+    def start_error(self) -> str:
+        """Причина последнего отказа :meth:`start`; "" — мост поднят или не запускался.
+
+        web_server обязан показать её оператору: отказ «некуда слать RTP»
+        неотличим в GET /api/status от «mediasoup выключен», если причина
+        осталась только в журнале.
+        """
+        return self._start_error
+
     # -- жизненный цикл ----------------------------------------------------
     def start(self) -> bool:
         """Создать PlainTransport, завести RTP-эндпоинт и produce.
 
         Возвращает False, если control API недоступен (мост не поднят).
+        Причина отказа при этом сохраняется в :meth:`start_error`.
         """
         if self._started:
             return True
+        self._start_error = ""
         try:
             tr = self._client.create_plain_transport(self._room_id, rtcp_mux=True)
         except Exception as exc:  # noqa: BLE001
+            self._start_error = "PlainTransport не создан: %s" % exc
             log.error("RTP-мост: PlainTransport не создан: %s", exc)
             return False
         self._transport_id = str(tr.get("transportId"))
@@ -170,6 +186,10 @@ class MediasoupRtpBridge:
             # «мост, который молча глушит звук» — значит оставить
             # оператора с started: true и тишиной в обоих каналах.
             self._transport_id = None
+            self._start_error = ("sidecar вернул адрес прослушивания — "
+                                 "достижимый адрес взять негде; задайте "
+                                 "features.web.mediasoup.listen_ip или "
+                                 "announced_ip")
             return False
         if self._endpoint is None:
             self._endpoint = RtpUdpEndpoint(local_port=0, payload_type=PT_PCMU,
@@ -179,6 +199,8 @@ class MediasoupRtpBridge:
             # started: true — значит оставить оператора с тишиной в обоих
             # каналах и с «всё хорошо» в /api/status. RtpUdpEndpoint уже
             # назвал причину в журнале и в last_send_error.
+            self._start_error = "%s:%s: %s" % (
+                ms_ip, ms_port, self._endpoint.last_send_error)
             log.error("RTP-мост: мост не поднят — %s:%d: %s",
                       ms_ip, ms_port, self._endpoint.last_send_error)
             self.stop()
@@ -190,10 +212,12 @@ class MediasoupRtpBridge:
                 app_data={"participant": "sip"})
             self._producer_id = str(prod.get("producerId"))
         except Exception as exc:  # noqa: BLE001
+            self._start_error = "produce_plain не удался: %s" % exc
             log.error("RTP-мост: produce_plain не удался: %s", exc)
             self.stop()
             return False
         self._started = True
+        self._start_error = ""
         log.info("RTP-мост поднят: transport=%s producer=%s -> mediasoup %s:%s",
                  self._transport_id, self._producer_id, ms_ip, ms_port)
         return True

@@ -448,3 +448,45 @@ def test_start_refuses_when_transport_address_does_not_resolve():
         br.stop()
         c.close()
         _unwatch(handler, logger, old)
+
+
+def test_start_error_names_every_refusal_reason():
+    # start() отказывает четырьмя путями, и причина пишется в каждом. Без
+    # start_error() вызывающий код (web_server) сводит отказ к None, и
+    # панель не отличает «включено, но слать RTP некуда» от «выключено».
+    # Any для клиента и эндпоинта: стабы — утки, а не подклассы
+    # MediasoupClient / RtpUdpEndpoint (набор членов заведомо меньше).
+    cases: list[tuple[str, Any, Any, str]] = []
+
+    c = _FakeClient(fail_transport=True)
+    cases.append(("PlainTransport", c, _RecordingEndpoint(), "sidecar down"))
+    c_wild = _FakeClient()
+    c_wild.ip = "0.0.0.0"
+    c_wild.base_url = "http://0.0.0.0:4443"
+    cases.append(("адрес прослушивания", c_wild, _RecordingEndpoint(), "listen_ip"))
+    c_name = _FakeClient()
+    cases.append(("неразрешённый адрес", c_name, _RefusingEndpoint(), "gaierror"))
+    c_prod = _FakeClient(fail_produce=True)
+    cases.append(("produce_plain", c_prod, _RecordingEndpoint(), "produce failed"))
+
+    for label, client, ep, needle in cases:
+        br = MediasoupRtpBridge(client, "room-1", endpoint=ep)
+        try:
+            assert br.start() is False, label
+            reason = br.start_error()
+            assert reason, "%s: отказ без причины — панель молчит" % label
+            assert needle in reason, "%s: %r без %r" % (label, reason, needle)
+        finally:
+            br.stop()
+            client.close()
+
+    # Поднятый мост не имеет права тащить причину прошлого отказа: панель
+    # показала бы отказ там, где звук идёт.
+    ok = _FakeClient()
+    br = MediasoupRtpBridge(ok, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.start() is True
+        assert br.start_error() == "", "успешный старт обязан снять причину"
+    finally:
+        br.stop()
+        ok.close()
