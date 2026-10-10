@@ -8,11 +8,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from .log import get_logger
 
 log = get_logger('codec')
+
+#: Clock rate приходит из разбора SDP (всегда строка) и из настроек (int), а
+#: вызывающий код может передать и None. Единый тип параметра семейств.
+#: Стоит ПОСЛЕ импортов намеренно: определение между `import` — это E402.
+RateLike = Optional[Union[int, str]]
 
 
 @dataclass
@@ -87,6 +92,13 @@ def parse_sdp_codecs(sdp_lines):
     """
     by_pt: Dict[int, CodecInfo] = {}
     order: List[int] = []
+    # Описание, приехавшее ДО a=rtpmap. RFC 4566 порядка атрибутов не требует,
+    # и терминалы (в т.ч. Polycom/Sony-шлюзы) пишут a=fmtp первым. прежний
+    # разбор требовал «rtpmap уже виден» и молча выбрасывал такое fmtp: H.264
+    # High приезжал без profile-level-id, и вместо честного «H.264 High profile
+    # не поддержан» журнал писал «нет в нашем списке кодеков» — оператор правил
+    # не тот параметр. Копим и применяем, когда кодек объявится.
+    pending_fmtp: Dict[int, Dict[str, str]] = {}
     for raw in sdp_lines or []:
         line = (raw or '').strip()
         if line.startswith('a=rtpmap:'):
@@ -96,7 +108,14 @@ def parse_sdp_codecs(sdp_lines):
             pt, name, clock, ch = parsed
             if pt not in by_pt:
                 order.append(pt)
-            by_pt[pt] = CodecInfo(payload_type=pt, name=name, clock_rate=clock, channels=ch)
+            # Дубль a=rtpmap на тот же PT (реализации, дублирующие секции) не
+            # имеет права стирать уже применённое описание: у PT ровно одно
+            # fmtp, и напечатано оно до или после rtpmap — не важно.
+            fmtp = pending_fmtp.pop(pt, None)
+            if fmtp is None and pt in by_pt:
+                fmtp = by_pt[pt].fmtp
+            by_pt[pt] = CodecInfo(payload_type=pt, name=name, clock_rate=clock,
+                                  channels=ch, fmtp=fmtp or {})
         elif line.startswith('a=fmtp:'):
             body = line[len('a=fmtp:'):]
             parts = body.split(None, 1)
@@ -108,6 +127,8 @@ def parse_sdp_codecs(sdp_lines):
                 continue
             if pt in by_pt:
                 by_pt[pt].fmtp = parse_fmtp(parts[1])
+            else:
+                pending_fmtp[pt] = parse_fmtp(parts[1])
     return [by_pt[k] for k in order]
 
 
@@ -144,6 +165,100 @@ def h264_level(profile_level_id):
     return '%d.%d' % (level_idc // 10, level_idc % 10)
 
 
+# --- G.722.1 / G.722.1C: имя и проверка fmtp bitrate -------------------------
+#
+# Терминалы Polycom/Sony объявляют семейство одним именем `G7221` в a=rtpmap, а
+# различаются оно clock rate'ом: 16 и 32 кГц — сам G.722.1 (RFC 5577), 48 кГц —
+# Annex C, который в таблицах совместимости терминалов напечатан как
+# **G.722.1C**. Журнал обязан называть кодек тем же словом, что оператор видит
+# в настройках терминала, иначе «G7221/48000 отклонён» ни о чём не говорит.
+#
+# Битрейт в этом семействе НЕ выводится из потока: он обязан прийти в
+# a=fmtp bitrate= (RFC 5577 §6, RFC 6134 §6), иначе декодер не знает, сколько
+# бит в кадре. Стандартные значения и рекомендованный диапазон — здесь;
+# кратность 400 — MUST обоих RFC (иначе кадр не ложится в октет).
+G7221_RATES: Dict[int, Tuple[Tuple[int, ...], Tuple[int, int]]] = {
+    # clock rate -> (стандартные битрейты, рекомендованный диапазон)
+    16000: ((24000, 32000), (16000, 32000)),
+    32000: ((24000, 32000, 48000), (16000, 48000)),
+    48000: ((48000, 56000, 64000), (48000, 64000)),
+}
+
+
+def _g7221_clock(clock_rate: RateLike) -> Optional[int]:
+    """Clock rate семейства G.722.1 (16000/32000/48000) — иначе None.
+
+    Приведение живёт в ОДНОМ месте: значение приезжает то строкой из SDP, то
+    числом из настроек, а `bool` — подкласс int, и `True` как «clock rate» не
+    должен притвораться валидным.
+    """
+    if isinstance(clock_rate, bool) or not isinstance(clock_rate, (int, str)):
+        return None
+    try:
+        rate = int(clock_rate)
+    except ValueError:
+        return None
+    return rate if rate in G7221_RATES else None
+
+
+def g7221_variant(clock_rate: RateLike) -> Optional[str]:
+    """Имя варианта семейства G.722.1 по clock rate — или None вне семейства."""
+    rate = _g7221_clock(clock_rate)
+    if rate is None:
+        return None
+    return 'G.722.1C' if rate == 48000 else 'G.722.1'
+
+
+def g7221_bitrate_issue(clock_rate: RateLike,
+                       fmtp: Optional[Dict[str, str]]) -> Optional[str]:
+    """Почему присланный `bitrate` непригоден; None — если претензий нет.
+
+    Отсутствие `bitrate` здесь НЕ дефект: это упущение терминала, но
+    «терминал не прислал fmtp» и «терминал прислал невозможный fmtp» — разные
+    diagnosis, и смешивать их значит начать чинить не тот терминал.
+    """
+    rate = _g7221_clock(clock_rate)
+    if rate is None:
+        return None
+    variant = 'G.722.1C' if rate == 48000 else 'G.722.1'
+    raw = (fmtp or {}).get('bitrate')
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    try:
+        bitrate = int(text)
+    except ValueError:
+        return '%s: fmtp bitrate=%s не число — декодер не знает размер кадра' % (variant, text)
+    standard, (low, high) = G7221_RATES[rate]
+    if bitrate in standard:
+        return None
+    if bitrate % 400:
+        return '%s: битрейт %d не кратен 400 (кадр не ложится в октет)' % (variant, bitrate)
+    if not low <= bitrate <= high:
+        return ('%s: битрейт %d вне допустимого для %d Гц '
+                '(нужно %d..%d, кратно 400)' % (variant, bitrate, rate, low, high))
+    return None
+
+
+def _fmtp_issue(ci: CodecInfo) -> Optional[str]:
+    """Дефект в самом `fmtp` предложенного кодека, независимо от нашего списка.
+
+    Согласовывать кодек по совпадению `name/clock`, не глядя в fmtp, — значит
+    получить ровно тот симптом, против которого написан этот этап: «терминал
+    соединился, а звука/картинки нет».
+    """
+    name = ci.name.upper()
+    if name == 'G7221':
+        return g7221_bitrate_issue(ci.clock_rate, ci.fmtp)
+    if name == 'H264':
+        pid = ci.fmtp.get('profile-level-id')
+        prof = h264_profile(pid)
+        if prof and prof.startswith('unknown'):
+            return ('H.264: неизвестный profile-level-id=%s (%s) — '
+                    'раскодировать нечем' % (pid, prof))
+    return None
+
+
 @dataclass
 class NegotiationResult:
     # Negotiation outcome with a per-codec diagnostic.
@@ -171,7 +286,7 @@ def negotiate(remote, supported, want='audio'):
     # Returns the chosen codec plus a reason for each rejected one, so the log
     # explains a mismatch instead of staying silent.
     supported_set = {_normalize_supported(c): c for c in supported}
-    rejected = []
+    rejected: List[Tuple[str, str]] = []
 
     for ci in remote:
         if want == 'video' and not _is_video(ci.name):
@@ -179,22 +294,45 @@ def negotiate(remote, supported, want='audio'):
         if want == 'audio' and _is_video(ci.name):
             continue
         key = '%s/%d' % (ci.name.upper(), ci.clock_rate)
-        if key in supported_set:
+        # Проверка fmtp стоит ДО объявления «согласовано», а не после: ключ
+        # `name/clock` не отличает G.722.1 с bitrate=8000 от того же кодека с
+        # bitrate=32000, и прежний код на совпадении ключа возвращал успех.
+        # Симптом у оператора ровно один: «соединение есть, звука нет».
+        issue = _fmtp_issue(ci)
+        if key in supported_set and issue is None:
             log.info('Согласован %s-кодек: %s (pt=%d)', want, key, ci.payload_type)
             return NegotiationResult(chosen=ci, rejected=rejected)
-        reason = _reject_reason(ci, supported_set)
+        reason = issue if issue is not None else _reject_reason(ci, supported_set)
         rejected.append((key, reason))
         log.info('Кодек %s отклонён: %s', key, reason)
 
     return NegotiationResult(chosen=None, rejected=rejected)
 
 
-def _reject_reason(ci, supported_set):
-    base = '%s/%d' % (ci.name.upper(), ci.clock_rate)
+def _our_clock_rates(name: str, supported_set: Dict[str, str]) -> List[int]:
+    # Наши clock rate для кодека `name` (пусто — если в списке токен без rate).
+    rates = []
     for key in supported_set:
-        name = key.split('/', 1)[0]
-        if name == ci.name.upper():
-            return 'не тот clock rate (у нас %s, у терминала %s)' % (key, base)
+        head, sep, rest = key.partition('/')
+        if head != name or not sep:
+            continue
+        try:
+            rates.append(int(rest))
+        except ValueError:
+            continue
+    return sorted(set(rates))
+
+
+def _reject_reason(ci: CodecInfo, supported_set: Dict[str, str]) -> str:
+    name = ci.name.upper()
+    base = '%s/%d' % (name, ci.clock_rate)
+    ours = _our_clock_rates(name, supported_set)
+    if ours:
+        # Перечисляем ВСЕ наши варианты, а не первый попавшийся: при предложении
+        # G7221/24000 сообщение «у нас G7221/16000» утверждает, что 32k/48k у нас
+        # нет (профиль max_compat их тянет), и оператор правит не тот параметр.
+        return 'не тот clock rate (у нас %s, у терминала %s)' % (
+            ', '.join('%s/%d' % (name, rate) for rate in ours), base)
     if ci.name.upper() == 'H264':
         prof = h264_profile(ci.fmtp.get('profile-level-id'))
         if prof:
