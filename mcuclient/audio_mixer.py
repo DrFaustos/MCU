@@ -198,8 +198,22 @@ class LevelsIndicator:
 
     def update(self, mixer: "AudioMixer",
                fresh: Optional[Dict[ParticipantId, bool]] = None,
-               now: Optional[float] = None) -> Dict[ParticipantId, int]:
-        """Пересчитать уровни по снимку микшера. Возвращает :attr:`levels`."""
+               now: Optional[float] = None,
+               eligible: Optional[Iterable[ParticipantId]] = None
+               ) -> Dict[ParticipantId, int]:
+        """Пересчитать уровни по снимку микшера. Возвращает :attr:`levels`.
+
+        ``eligible`` — каналы, которым разрешено быть докладчиком. Канал в
+        микшере и канал, у которого есть тайл, — РАЗНЫЕ вещи: веб-микшер
+        принимает суммарный PCM терминалов под служебным id
+        (``SipWebAudioBridge.SIP_PUBLISHER_ID``), участника с таким id ни в
+        одном реестре нет. Без ограничения такой канал перебивает браузеров
+        громкостью: ``speaker`` становится служебным id, потребитель не
+        находит его среди участников — и подсветка гаснет У ВСЕХ, хотя кто-то
+        из них реально говорит. Уровни при этом считаются честно для всех
+        каналов: гасить служебный канал нельзя, браузеры обязаны слышать
+        терминал.
+        """
         moment = time.monotonic() if now is None else now
         if fresh is not None:
             # «Свежий кадр» и есть отметка живости: время одно, и считать
@@ -218,7 +232,19 @@ class LevelsIndicator:
             stamp = marks.get(channel_id)
             if stamp is None or (moment - stamp) * 1000.0 > self.stale_ms:
                 rms[channel_id] = 0.0
-        self.speaker = mixer.active_speaker(rms)
+        # Докладчик выбирается по ОТДЕЛЬНОМУ снимку: не-eligible каналы в нём
+        # обнулены, поэтому не пройдут порог `silence_rms` в mixer. Сам `rms`
+        # не трогается — уровни наружу обязаны остаться настоящими для всех
+        # каналов, иначе браузеры потеряли бы и подсветку, и громкость
+        # терминала в миксе.
+        if eligible is None:
+            self.speaker = mixer.active_speaker(rms)
+        else:
+            allowed = set(eligible)
+            self.speaker = mixer.active_speaker({
+                channel_id: (value if channel_id in allowed else 0.0)
+                for channel_id, value in rms.items()
+            })
         self.levels = {channel_id: rms_percent(value)
                        for channel_id, value in rms.items()}
         return self.levels

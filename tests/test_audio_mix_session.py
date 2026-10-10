@@ -191,3 +191,80 @@ def test_levels_without_conference_still_counted():
     assert mix.levels()[a.id] == 100
     assert mix.active_speaker() == a.id
     assert conf.participants()[0]["volume_level"] == 0   # раздавать было некому
+
+
+# --- служебный канал SIP не имеет права перехватывать подсветку --------------
+
+
+def _sip_bridge():
+    from mcuclient.sip_web_bridge import SipWebAudioBridge
+    return SipWebAudioBridge
+
+
+def test_sip_service_channel_cannot_steal_the_spotlight():
+    """Громкий SIP-мост не обязан гасить «говорит» у всех браузеров.
+
+    Боевая связка как в ``WebSession``: шина + конференция + микшер, повёрнутый
+    на конференцию + мост SIP<->веб. Мост публикует суммарный PCM ВСЕХ
+    терминалов под служебным id ``sip`` — участника с таким id в конференции
+    нет. Пока докладчик выбирался по всем публикаторам шины, громкий терминал
+    забирал себе ``speaker``, а ``update_levels`` не находил, кому его отдать:
+    подсветка гасла у реально поющего браузера.
+    """
+    bridge_cls = _sip_bridge()
+    conf = Conference()
+    anna = conf.join("Анна")     # браузер поёт (тише терминала)
+    ivan = conf.join("Иван")     # браузер молчит
+    mix = AudioMixSession(conf.bus,
+                          recipients=lambda: [p["id"] for p in conf.participants()],
+                          conference=conf)
+    bridge = bridge_cls(conf.bus, sample_rate=16000)
+
+    bridge.on_sip_audio(_pcm(3000, 160), 16000, 1)
+    conf.bus.publish_audio(anna.id, _pcm(1200), 48000, 1)
+    conf.bus.publish_audio(ivan.id, _pcm(0), 48000, 1)
+    mix.tick()
+
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[anna.id]["speaking"] is True, (
+        f"служебный канал 'sip' перехватил докладчика: {mix.active_speaker()!r}, "
+        f"тайлы={rows}")
+    assert rows[ivan.id]["speaking"] is False
+    assert rows[anna.id]["volume_level"] == 30
+    # Служебный канал по-прежнему в миксе и его уровень считается: браузеры
+    # обязаны слышать терминал, а не быть от него заглушены.
+    assert mix.levels()["sip"] == 75
+    assert "sip" in mix.active_publishers()
+
+
+def test_sip_channel_alone_leaves_nobody_highlighted():
+    """Терминал орёт, браузеры молчат — подсвечен быть некому, и это честно."""
+    bridge_cls = _sip_bridge()
+    conf = Conference()
+    anna = conf.join("Анна")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [anna.id], conference=conf)
+    bridge = bridge_cls(conf.bus, sample_rate=16000)
+
+    bridge.on_sip_audio(_pcm(3000, 160), 16000, 1)
+    conf.bus.publish_audio(anna.id, _pcm(0), 48000, 1)
+    mix.tick()
+
+    assert mix.active_speaker() is None
+    assert conf.participants()[0]["speaking"] is False
+    assert mix.levels()["sip"] == 75, "уровень терминала обязан считаться"
+
+
+def test_participant_ids_is_the_eligible_set():
+    """Реестр обязан отдавать id участников — этим множеством он и ограничен.
+
+    Микшер не должен лезть в приватное поле реестра, чтобы узнать, у кого есть
+    тайл: без этого контракта «кто имеет право быть докладчиком» пришлось бы
+    выдумывать на стороне вызывающего.
+    """
+    conf = Conference()
+    a = conf.join("Аня")
+    b = conf.join("Боря")
+    ids = conf.participant_ids()
+    assert set(ids) == {a.id, b.id}
+    conf.leave(b.id)
+    assert conf.participant_ids() == [a.id]

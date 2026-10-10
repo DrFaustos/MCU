@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from .audio_mixer import (LEVEL_STALE_MS_DEFAULT, AudioMixer, LevelsIndicator,
-                             MixerConfig, MixStrategy)
+                          MixerConfig, MixStrategy, ParticipantId)
 from .log import get_logger
 
 try:  # numpy есть в зависимостях; при отсутствии — деградация.
@@ -348,7 +348,7 @@ class AudioMixSession:
         # «Свежий» = версия аудио выросла с прошлого тика: только новый кадр
         # отмечает живость публикации. По последнему кадру шины гореть нельзя —
         # MediaBus держит его до самого drop(), т.е. до выхода из конференции.
-        fresh: Dict[str, bool] = {}
+        fresh: Dict[ParticipantId, bool] = {}
         for pid in publishers:
             item = self._bus.latest_audio(pid)
             if item is None:
@@ -372,8 +372,13 @@ class AudioMixSession:
                 del self._last_audio_ver[pid]
         # Индикатор обновляется ПОСЛЕ очистки микшера: removed-публикатор
         # обязан получить явный ноль, а не последний RMS.
-        self._indicator.update(self._mixer, fresh)
         conference = self._conference
+        # Право быть докладчиком — только у тех, у кого есть тайл. Служебный
+        # канал SIP (суммарный PCM терминалов) в миксе остаётся и считается,
+        # но светиться вместо браузера не имеет права.
+        self._indicator.update(
+            self._mixer, fresh,
+            eligible=None if conference is None else conference.participant_ids())
         if conference is not None:
             conference.update_levels(self._indicator.levels,
                                      self._indicator.speaker)
@@ -473,6 +478,17 @@ class Conference:
     def get(self, pid: str) -> Optional[ConferenceParticipant]:
         with self._lock:
             return self._participants.get(pid)
+
+    def participant_ids(self) -> List[str]:
+        """Id участников реестра — тех, у кого есть тайл.
+
+        Микшер отдаёт это в ``LevelsIndicator.update(eligible=...)``. Канал
+        шины и участник конференции — РАЗНЫЕ вещи: мост SIP<->веб льёт
+        суммарный PCM терминалов под служебным id, тайла у которого нет. Без
+        ограничения такой канал перехватывал подсветку у всех браузеров.
+        """
+        with self._lock:
+            return list(self._participants)
 
     def leave(self, pid: str) -> bool:
         with self._lock:

@@ -429,3 +429,54 @@ def test_indicator_forget_drops_the_stamp():
     ind.forget(1)
     ind.update(mx)
     assert ind.levels[1] == 0, "забытый канал не должен гореть по старым штампам"
+
+
+# --- eligible: канал в миксе != канал, имеющий право быть докладчиком --------
+
+
+def test_indicator_eligible_limits_who_can_be_the_speaker():
+    """Служебный канал обязан Mixing'оваться, но не иметь права светиться.
+
+    Мост SIP<->веб льёт суммарный PCM всех терминалов в шину под одним
+    служебным id. У него нет тайла, а значит и докладчиком он быть не может:
+    без ограничения он перебивает браузеров громкостью и гасит подсветку У
+    ВСЕХ, потому что id служебного канала consumers не знают.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))     # терминал громче всех
+    mx.set_buffer("web-1", _pcm([1200] * 8))   # браузер, который реально поёт
+    ind.update(mx, {"sip": True, "web-1": True}, eligible={"web-1"})
+
+    assert ind.speaker == "web-1", f"служебный канал перехватил докладчика: {ind.speaker}"
+    assert ind.levels["sip"] == 75, "уровень служебного канала обязан считаться как обычно"
+    assert ind.levels["web-1"] == 30
+
+
+def test_indicator_eligible_without_any_loud_member_gives_none():
+    """Если среди имеющих право никого громче порога — докладчика нет.
+
+    «Докладчик = служебный канал» здесь был бы хуже тишины: панель показывала
+    бы подсветку на участнике, который молчит.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))
+    mx.set_buffer("web-1", _pcm([0] * 8))
+    ind.update(mx, {"sip": True, "web-1": True}, eligible={"web-1"})
+    assert ind.speaker is None
+    assert ind.levels["sip"] == 75
+
+
+def test_indicator_eligible_none_keeps_the_old_choice():
+    """Без `eligible` поведение не меняется: выбирается любой громкий канал.
+
+    У H.323-моста каждый канал — это участник комнаты, ограничивать нечего, и
+    второй продюсер не обязан выдумывать множество, которого у него нет.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))
+    mx.set_buffer("web-1", _pcm([1200] * 8))
+    ind.update(mx, {"sip": True, "web-1": True})
+    assert ind.speaker == "sip"
