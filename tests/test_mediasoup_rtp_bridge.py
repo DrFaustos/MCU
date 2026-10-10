@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import pathlib
 import struct
 import sys
+from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Каталог tests/ — ради общего AST-сканера: tests/_runner.py кладёт в
@@ -39,6 +41,9 @@ class _FakeClient:
         self.fail_transport = fail_transport
         self.fail_produce = fail_produce
         self.ip = "127.0.0.1"
+        # Реальный MediasoupClient несёт base_url; мост читает его, когда
+        # sidecar ответил адресом прослушивания.
+        self.base_url = "http://127.0.0.1:4443"
         # Реальный UDP-сокет как «mediasoup»: будем проверять, что RTP доходит.
         import socket
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -191,6 +196,10 @@ class _FailingEndpoint:
 
     def set_remote(self, host, port):
         self.remote = (host, port)
+        # Реальный RtpUdpEndpoint с 2026-10-10 возвращает True, когда адрес
+        # разрешился. Мост обязан это честно отрапортовать — иначе стаб
+        # «принимает» адрес, который настоящий сокет отверг бы.
+        return True
 
     def start(self):
         pass
@@ -245,3 +254,197 @@ def test_rtp_bridge_has_no_silent_except_handlers():
     assert not silent, (
         "mcuclient/mediasoup_rtp_bridge.py: except без сообщения об "
         "отказе — назовите причину, строки: " + str(silent))
+
+
+# --- адрес прослушивания != адрес назначения ---------------------------
+
+
+class _RecordingEndpoint:
+    """Внедряемый эндпоинт: пишет, какой адрес ему поставили.
+
+    Проверяем выбор адреса через публичный контракт (``set_remote``), а не
+    через приватные поля моста.
+    """
+
+    def __init__(self):
+        self.local_port = 40001
+        self.rx_packets = 0
+        self.tx_packets = 0
+        self.send_errors = 0
+        self.last_send_error = ""
+        self.remote = None
+        self.started = False
+
+    def set_remote(self, host, port):
+        self.remote = (host, port)
+        # Реальный RtpUdpEndpoint с 2026-10-10 возвращает True, когда адрес
+        # разрешился. Мост смотрит на ответ, поэтому стаб обязан его отдавать.
+        return True
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def send_pcm(self, pcm):
+        self.tx_packets += 1
+        return True
+
+
+class _LogCapture(logging.Handler):
+    """Своими руками: у стаба pytest в мини-раннере фикстур нет."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records = []
+
+    def emit(self, record) -> None:
+        self.records.append((record.levelname, record.getMessage()))
+
+
+def _watch(logger_name):
+    logger = logging.getLogger(logger_name)
+    handler = _LogCapture()
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    return handler, logger, old_level
+
+
+def _unwatch(handler, logger, old_level):
+    logger.removeHandler(handler)
+    logger.setLevel(old_level)
+
+
+def test_wildcard_from_sidecar_becomes_control_host():
+    # 0.0.0.0 = «слушаем везде»: на внешний сайдкар туда слать нельзя.
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    c.ip = "0.0.0.0"
+    c.base_url = "http://192.168.0.42:4443"
+    ep = _RecordingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is True
+        assert ep.remote == ("192.168.0.42", c.port), ep.remote
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert len(warns) == 1 and "прослушивания" in warns[0], warns
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+def test_concrete_ip_from_sidecar_untouched():
+    # Ложная тревога вредна не меньше молчания: точный адрес не трогаем.
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    ep = _RecordingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is True
+        assert ep.remote == ("127.0.0.1", c.port), ep.remote
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert not warns, warns
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+def test_start_refuses_without_a_reachable_address():
+    # Ни sidecar, ни control API не дают достижимого адреса: мост обязан
+    # отказать явно, а не встать в «started: true» с тишиной в каналах.
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    c.ip = "0.0.0.0"
+    c.base_url = "http://0.0.0.0:4443"
+    ep = _RecordingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is False
+        assert br.started is False
+        assert br.transport_id is None, "отказавший мост не обязан выглядеть поднятым"
+        assert ep.remote is None, "недостижимый адрес нельзя ставить в сокет"
+        assert not ep.started
+        errors = [m for lvl, m in handler.records if lvl == "ERROR"]
+        assert errors and "announce" in errors[0], errors
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+def test_ipv6_wildcard_is_also_not_a_destination():
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    c.ip = "::"
+    c.base_url = "http://mcu-sidecar.lan:4443"
+    ep = _RecordingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is True
+        assert ep.remote == ("mcu-sidecar.lan", c.port), ep.remote
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+class _RefusingEndpoint:
+    """Внедряемый эндпоинт: set_remote отказывает, как реальный сокет.
+
+    Повторяет случай, когда мост честно пропустил адрес, который сам
+    sidecar назвал конкретным, — но он не разрешился. Контракт stable'а
+    повторяет реальный RtpUdpEndpoint: неразрешённый адрес НЕ сохраняется
+    и возвращается False.
+    """
+
+    def __init__(self):
+        self.local_port = 40002
+        self.rx_packets = 0
+        self.tx_packets = 0
+        self.send_errors = 0
+        self.last_send_error = ""
+        self.remote = None
+        self.started = False
+
+    def set_remote(self, host, port):
+        self.last_send_error = "gaierror: [Errno -2] Name or service not known"
+        return False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def send_pcm(self, pcm):
+        return True
+
+
+def test_start_refuses_when_transport_address_does_not_resolve():
+    # Адрес конкретный (не wildcard) — мост его пропустил, но не разрешился.
+    # started: true здесь означало бы тишину в обоих каналах при txPackets=0
+    # и пустом журнале: отказ обязан быть назван и откачен.
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    c.ip = "sidecar-broken.invalid"
+    # Any: стаб — утка, а не подкласс RtpUdpEndpoint (набор членов у
+    # внедряемого эндпоинта заведомо меньше, чем у сокета).
+    ep: Any = _RefusingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is False
+        assert br.started is False
+        assert br.transport_id is None, "отказавший мост не обязан выглядеть поднятым"
+        assert not ep.started, "отказавший мост не обязан поднимать эндпоинт"
+        assert ep.remote is None
+        errors = [m for lvl, m in handler.records if lvl == "ERROR"]
+        assert errors and "не поднят" in errors[-1], errors
+        assert "sidecar-broken.invalid" in errors[-1], "причина обязана называть адрес"
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)

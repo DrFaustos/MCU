@@ -331,6 +331,16 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
   бинарники давали «Node не найден» при проверке и молчаливый провал старта).
   `timeout` — таймаут HTTP control API, сек; `max_rooms` — комнат на worker
   (0 = 200 по умолчанию у сайдкара).
+* **Адрес, куда мост слать RTP.** На вопрос «куда слать RTP» сайдкар отвечает
+  адресом **прослушивания** (`ip` из `POST /transports/plain`, по умолчанию
+  `0.0.0.0`) — таким адресом можно только слушать, отправлять на него нельзя.
+  Мост SIP↔mediasoup (`mcuclient/mediasoup_rtp_bridge.py`) подменяет
+  прослушивающий адрес хостом control API, которым уже достучался до сайдкара
+  (с `WARNING` в журнале), а если достижимого адреса взять негде — **отказывает**
+  и пишет причину: поднятый мост с тишиной в обоих каналах неотличим от
+  «всё в порядке» (в `GET /api/status` было бы `started: true`, `sendErrors: 0`).
+  Для внешнего сайдкара задайте `listen_ip` (конкретный интерфейс) или
+  `announced_ip` — тогда сайдкар отвечает адресом, годным и для отправки.
 * Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
 * **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
   cp .env.example .env && docker compose up -d --build` — см.

@@ -23,7 +23,9 @@ mediasoup-комнате и наоборот. mediasoup принимает не-
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 
 from .log import get_logger
 from .rtp_audio import PT_PCMU, RtpUdpEndpoint
@@ -50,6 +52,23 @@ PLAIN_RTP_PARAMETERS: Dict[str, Any] = {
     "encodings": [{"ssrc": 0x4D435501}],
     "rtcp": {},
 }
+
+
+def _is_unspecified(host: str) -> bool:
+    """True, если host — «любой интерфейс», а не адрес назначения.
+
+    ``0.0.0.0``/``::`` говорят, где СЛУШАТЬ. Отвечать ими на вопрос «куда
+    слать RTP» sidecar не вправе: см. :meth:`MediasoupRtpBridge._rtp_host`.
+    Не распознанный адрес — НЕ wildcard: «не понял» не имеет права
+    означать «прощаю».
+    """
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        # Форма адреса не распознана — НЕ wildcard, но и молчать незачем:
+        # «не понял» неотличимо от «проверил, всё в порядке».
+        log.debug("RTP-мост: адрес %r не разобран как IP — считаю конкретным", host)
+        return False
 
 
 class MediasoupRtpBridge:
@@ -103,6 +122,33 @@ class MediasoupRtpBridge:
                 "rxPackets": rx, "txPackets": tx, "sendErrors": errs,
                 "lastSendError": last}
 
+    def _rtp_host(self, reported: str) -> Optional[str]:
+        """Адрес, на который этому сайдкару реально слать RTP. ``None`` — отказа.
+
+        Sidecar отвечает ``ip=transport.tuple.localIp`` — адресом
+        ПРОСЛУШИВАНИЯ, по умолчанию ``0.0.0.0``
+        (``mediasoup-sidecar/src/config.js``). Локально ядро маршрутизирует
+        ``0.0.0.0`` в localhost, поэтому мост выглядит рабочим; с внешним
+        сайдкаром кадр не доходит (замерено: на внешний адрес — НЕ доходит,
+        на тот же адрес на той же машине — доходит). Берём хост control API:
+        тот, которым мы уже достучались до этого сайдкара.
+        """
+        if not _is_unspecified(reported):
+            return reported
+        base = str(getattr(self._client, "base_url", "") or "")
+        host = urlparse(base).hostname or ""
+        if host and not _is_unspecified(host):
+            log.warning(
+                "RTP-мост: sidecar вернул адрес прослушивания %s — подставляю "
+                "%s из control API (иначе RTP уходит в никуда)", reported, host)
+            return host
+        log.error(
+            "RTP-мост: sidecar вернул %s, достижимый адрес взять негде "
+            "(control API: %r). Задайте features.web.mediasoup.listen_ip "
+            "или announced_ip — иначе звук из SIP никуда не уходит",
+            reported, base)
+        return None
+
     # -- жизненный цикл ----------------------------------------------------
     def start(self) -> bool:
         """Создать PlainTransport, завести RTP-эндпоинт и produce.
@@ -117,12 +163,26 @@ class MediasoupRtpBridge:
             log.error("RTP-мост: PlainTransport не создан: %s", exc)
             return False
         self._transport_id = str(tr.get("transportId"))
-        ms_ip = tr.get("ip") or "127.0.0.1"
         ms_port = int(tr.get("port") or 0)
+        ms_ip = self._rtp_host(str(tr.get("ip") or "127.0.0.1"))
+        if ms_ip is None:
+            # Транспорт на sidecar создан, но слать ему некуда. Поднять
+            # «мост, который молча глушит звук» — значит оставить
+            # оператора с started: true и тишиной в обоих каналах.
+            self._transport_id = None
+            return False
         if self._endpoint is None:
             self._endpoint = RtpUdpEndpoint(local_port=0, payload_type=PT_PCMU,
                                             on_pcm=self._on_sip_pcm)
-        self._endpoint.set_remote(ms_ip, ms_port)
+        if not self._endpoint.set_remote(ms_ip, ms_port):
+            # Адрес не разрешился: получателя нет. Поднимать мост с
+            # started: true — значит оставить оператора с тишиной в обоих
+            # каналах и с «всё хорошо» в /api/status. RtpUdpEndpoint уже
+            # назвал причину в журнале и в last_send_error.
+            log.error("RTP-мост: мост не поднят — %s:%d: %s",
+                      ms_ip, ms_port, self._endpoint.last_send_error)
+            self.stop()
+            return False
         self._endpoint.start()
         try:
             prod = self._client.produce_plain(
