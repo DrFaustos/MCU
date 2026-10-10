@@ -19,28 +19,78 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sys
 import traceback
 
 # === ВАЖНО (Windows --windowed) ===
-# В GUI-сборке без консоли sys.stdout/sys.stderr могут быть None, а C-уровневые
-# дескрипторы 1/2 невалидны. Нативные библиотеки (pjsua2, Qt, FFmpeg) пишут
-# именно в fd 1/2 из своих потоков — запись в невалидный дескриптор даёт
-# access violation. Перенаправляем И Python-объекты, И сами fd на os.devnull.
-if sys.stdout is None or sys.stderr is None:
-    _devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-    if sys.stdout is None:
-        sys.stdout = _devnull
-    if sys.stderr is None:
-        sys.stderr = _devnull
+# В GUI-сборке без консоли sys.stdout/sys.stderr могут быть None, а
+# C-уровневые дескрипторы 1/2 невалидны. Нативные библиотеки (pjsua2,
+# Qt, FFmpeg) пишут именно в fd 1/2 из своих потоков - запись в
+# невалидный дескриптор даёт access violation. Перенаправляем И
+# Python-объекты, И сами fd на os.devnull.
+
+#: Заметки о запуске, собранные ДО настройки логирования. Пишущих сюда
+#: веток две, и обе - про «приложение появилось и исчезло»: заметка
+#: ждёт, пока main() настроит логгер, и перельётся в mcu-client.log
+#: (тот же приём, что _startup_notice в mcuclient/log.py).
+_EARLY_NOTICES: list[str] = []
+
+
+def _report_after_logging_dead(text: str) -> None:
+    """Последний канал, когда логгер уже закрыт.
+
+    Пишем в fd 2 напрямую: sys.stderr мог быть подменён на devnull в
+    _redirect_native_stdio(). Если не записало и туда, факт теряется
+    сознательно - это единственное подавление в файле, и описано оно
+    здесь, а не спрятано: писать в уже закрытый логгер значит получить
+    то же исключение, а менять код выхода нельзя (стенды
+    scripts/testbed/* сверяют коды возврата).
+    """
+    with contextlib.suppress(OSError):
+        payload = "[MCU] " + text + chr(10)
+        os.write(2, payload.encode("utf-8", "replace"))
+
+
+def _redirect_native_stdio() -> None:
+    """Подменить отсутствующие stdout/stderr на devnull - и на уровне fd.
+
+    Молчать при отказе нельзя: именно эта защита не даёт нативным
+    библиотекам писать в невалидный fd 1/2, а её отказ кончается
+    access violation - тот самый симптом «появилось в диспетчере
+    задач на 10 секунд и исчезло», который иначе выглядит как
+    «приложение даже не стартовало».
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
     try:
-        _null_fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(_null_fd, 1)
-        os.dup2(_null_fd, 2)
-    except Exception:  # noqa: BLE001 — не критично, если не удалось
-        pass
+        devnull = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+        if sys.stdout is None:
+            sys.stdout = devnull
+        if sys.stderr is None:
+            sys.stderr = devnull
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null_fd, 1)
+        os.dup2(null_fd, 2)
+    except Exception as exc:  # noqa: BLE001
+        _EARLY_NOTICES.append(
+            f"stdout/stderr не перенаправлены в {os.devnull}: {exc} - "
+            f"нативные библиотеки могут писать в невалидный "
+            f"дескриптор (access violation)")
+
+
+def _flush_early_notices(log) -> None:
+    """Перелить в лог заметки, собранные до его появления.
+
+    Повторный вызов безопасен: список читается до пустого.
+    """
+    while _EARLY_NOTICES:
+        log.warning("%s", _EARLY_NOTICES.pop(0))
+
+
+_redirect_native_stdio()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +187,10 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("main")
+    # Заметки, собранные до логгера (_redirect_native_stdio): без
+    # этого шага они остались бы в памяти процесса - ровно то
+    # молчание, из-за которого их и собирали.
+    _flush_early_notices(log)
     log.info("=" * 64)
     log.info("MCU Client: старт. Лог-файл: %s", log_file_path())
     log.info("Аргументы: %s", argv if argv is not None else sys.argv[1:])
@@ -418,7 +472,12 @@ def main(argv: list[str] | None = None) -> int:
                 h323.stop()
                 engine.stop()
             except Exception:  # noqa: BLE001
-                pass
+                # Вызов завершился, а ресурсы не отпущены: дальше
+                # интерпретатор разрушает pjsua2/Qt, и это кончается
+                # abort без внятной причины (см. _run_cli). Факт
+                # обязан остаться в логе, а не в молчании.
+                log.warning("Остановка после вызова не завершилась",
+                            exc_info=True)
             return 0
         log.info("Headless-режим. Нажмите Ctrl+C для выхода.")
         try:
@@ -456,7 +515,11 @@ def main(argv: list[str] | None = None) -> int:
             h323.stop()
             engine.stop()
         except Exception:  # noqa: BLE001
-            pass
+            # Тот же случай: GUI уже упал, и неотпущенный движок
+            # перекроет причину вторым падением - на этот раз
+            # нативным, без трассировки.
+            log.warning("Остановка после сбоя GUI не завершилась",
+                        exc_info=True)
         return 2
     finally:
         _stop_mediasoup(mediasoup, log)
@@ -588,8 +651,12 @@ if __name__ == "__main__":
     # flush + shutdown ПОСЛЕ возврата из main, но ДО выхода из интерпретатора.
     try:
         logging.shutdown()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Хвост журнала мог не дописаться. В логгер писать уже
+        # нельзя (он и не закрылся), остаётся fd 2 - см.
+        # _report_after_logging_dead.
+        _report_after_logging_dead(
+            "logging.shutdown не завершён: " + repr(exc))
     # os._exit завершает процесс без разрушения нативных модулей (pjsua2/Qt),
     # которое и давало Fatal Python error: Aborted на Linux.
     sys.stdout.flush() if sys.stdout is not None else None
