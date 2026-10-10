@@ -304,7 +304,16 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 принадлежит УЧАСТНИКУ, а не сессии: под одним `publish_id` могут стоять
 публикация и просмотр одного человека, поэтому `drop` происходит только когда под
 этим id не публикует больше никто живой. Регрессия —
-`tests/test_webrtc_ingest.py` (15).
+`tests/test_webrtc_ingest.py` (16).
+
+Третья половина того же контракта — УБРАТЬСЯ самой сессией, когда браузер ничего
+не прислал. `pc.on("connectionstatechange")`
+(`mcuclient/webrtc_ingest.py::WebRTCManager`)
+закрывает сессию при `failed`/`closed`/`disconnected`; покрытия у этого не было
+никогда, и из-за этого «утечка» без явного `POST /api/webrtc/close` выглядела
+бессрочной: на деле сессия освобождалась не сразу, а через ICE-таймаут (десятки
+секунд). Немедленное освобождение — на панели (`mcuclient/webui/index.html`,
+регрессия `tests/test_webrtc_panel_close.py`), автозакрытие на обрыве — здесь.
 
 ### 3.8. ICE-серверы: строки И словари (исправлено, `ceb38fe`)
 `Config.web_ice_servers` отдаёт список словарей `{urls, username, credential}`

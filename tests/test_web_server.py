@@ -16,6 +16,7 @@ from mcuclient.web_server import (
     _jsonable,
     _participant_to_dict,
 )
+from mcuclient.webrtc_ingest import WebRTCManager
 
 
 class _State:
@@ -667,3 +668,79 @@ def test_stop_returns_quickly():
     t0 = time.monotonic()
     srv.stop()
     assert time.monotonic() - t0 < 0.45
+
+
+# --- закрытие WebRTC-сессии «как sendBeacon» ---------------------------------
+
+class _CountingRTC(WebRTCManager):
+    """Заменяет WebRTCManager и пишет, какие id реально закрыли.
+
+    Подкласс, а не сторонний утиный объект: `WebSession.webrtc` объявлен как
+    WebRTCManager, и на подмене из-за этого mypy/Pyright законно ругаются.
+    aiortc в боевом интерпретаторе отсутствует, поэтому настоящий менеджер
+    отклоняет любой offer (`available` = False) и эффект закрытия сессии
+    проверить было бы не на чём. Здесь фиксируется ровно то, что зависит от
+    HTTP-слоя: дошёл ли запрос сквозь авторизацию и не потерялся ли id.
+    """
+
+    def __init__(self) -> None:
+        # aiortc_module — заглушка: `available` переопределён, offer мы не зовём.
+        super().__init__(aiortc_module=object())
+        self.closed: list[str] = []
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def close_session(self, sid: str) -> bool:
+        self.closed.append(sid)
+        return True
+
+
+def test_webrtc_close_over_beacon_shape_request():
+    """POST /api/webrtc/close обязан проходить с токеном в query.
+
+    Контракт, а не регрессия: код сервера это умеет всегда (`_authorized`
+    читает `parse_qs`), но НИ ОДИН тест не проверял это направление — только
+    GET `/api/status?token=`. Панель закрывает сессию через `sendBeacon`,
+    который не даёт задать заголовок `Authorization`, поэтому «токен в query»
+    для ЭТОГО маршрута — единственная работающая форма авторизации. Потеря
+    её = закрытая вкладка снова оставляет серверные сессии висеть, и прогон
+    это не заметит.
+    """
+    srv = _start_server(token="secret")
+    try:
+        fake = _CountingRTC()
+        srv.session.webrtc = fake
+
+        # Форма запроса повторяет sendBeacon: JSON-тело, никакого заголовка
+        # Authorization, токен — в query.
+        code, data = _http(srv, "POST", "/api/webrtc/close?token=secret",
+                           {"session": "abc123"})
+        assert code == 200, data
+        assert data["ok"] is True
+        assert fake.closed == ["abc123"], "id сессии до менеджера не дошёл"
+
+        # Без токена — отказ (иначе любой бы закрывал чужие сессии).
+        code, _ = _http(srv, "POST", "/api/webrtc/close", {"session": "zzz"})
+        assert code == 401
+        assert fake.closed == ["abc123"], "неавторизованный запрос закрыл сессию"
+    finally:
+        srv.stop()
+
+
+def test_webrtc_close_without_session_id_is_bad_request():
+    """Пустой `session` — 400, а не «молча закрыли не знаю что».
+
+    Панель не шлёт пустой id (хелпер `rtcCloseSession` выходит по `if (!sid)`),
+    но проверка на сервере остаётся единственной защитой от ручного вызова.
+    """
+    srv = _start_server()
+    try:
+        fake = _CountingRTC()
+        srv.session.webrtc = fake
+        code, data = _http(srv, "POST", "/api/webrtc/close", {})
+        assert code == 400, data
+        assert fake.closed == []
+    finally:
+        srv.stop()

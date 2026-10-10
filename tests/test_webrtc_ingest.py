@@ -256,6 +256,41 @@ def test_close_session_drops_the_bus_channel():
     assert bus.latest_audio("web-1") is None
 
 
+def test_connection_state_failure_closes_the_session():
+    """Обрыв соединения обязан убрать сессию и её канал без вызова извне.
+
+    Покрытия не было, и оно же — причина, по которой утечка без явного
+    POST /api/webrtc/close выглядела «бессрочной»: на деле `_on_state`
+    закрывал сессию сам, но только когда aiortc замечал обрыв (ICE-таймаут —
+    десятки секунд). Правка панели даёт немедленное освобождение, этот кейс
+    держит вторую половину контракта: даже если браузер не прислал ничего,
+    мёртвая сессия не должна остаться в шине и в миксе.
+    """
+    fake = _FakeAiortc()
+    bus = MediaBus()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    sid = m.handle_offer("v=0", participant="web-1")["session"]
+    _publish(m, fake, 0)
+    assert bus.publishers() == ["web-1"], "публикация не дошла до шины"
+
+    async def _drop():
+        # Событие обязан уходить из цикла менеджера: _on_state реагирует
+        # ensure_future'ом, а тот встаёт в очередь своего цикла.
+        pc = fake.pcs[0]
+        pc.connectionState = "failed"
+        pc.emit("connectionstatechange")
+        await asyncio.sleep(0.05)
+
+    m._run(_drop())
+    assert m.sessions() == [], "обрыв не убрал сессию из менеджера"
+    # Id обязан уйти ИЗ ДИКТА: иначе close_session(sid) ещё раз вернул бы True
+    # и «закрытая» сессия осталась бы адресуемой (повторный drop канала, повтор
+    # pc.close() — ровно тот класс, что даёт фантом в миксе).
+    assert m.close_session(sid) is False, "мёртвая сессия всё ещё в менеджере"
+    assert fake.pcs[0].closed is True, "RTCPeerConnection не закрыт"
+    assert bus.publishers() == [], "канал мёртвой сессии остался в миксе"
+
+
 def test_closed_session_stops_occupying_the_mix():
     fake = _FakeAiortc()
     bus = MediaBus()

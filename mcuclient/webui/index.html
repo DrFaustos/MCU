@@ -240,6 +240,9 @@ $('btnLeave').onclick = leaveConference;
 // --- Публикация своей камеры/микрофона в MCU -------------------------------
 let _pc = null;
 let _localStream = null;
+// id СЕРВЕРНОЙ сессии публикации (answer от POST /api/webrtc/offer). Без него
+// закрывать вторую сторону нечем: pc.close() гасит только браузерную.
+let _pubSession = null;
 
 async function rtcPublish() {
   if (!window.RTCPeerConnection) return;
@@ -260,10 +263,46 @@ async function rtcPublish() {
     participant: me ? me.id : null
   });
   await _pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
+  _pubSession = resp.session;
   hint.textContent = 'Публикация идёт (сессия ' + resp.session + ')';
   $('btnPublish').disabled = true;
   $('btnUnpublish').disabled = false;
 }
+
+// --- Освобождение СЕРВЕРНОЙ WebRTC-сессии ----------------------------------
+//
+// pc.close() в браузере гасит только местную сторону. RTCPeerConnection на
+// сервере (aiortc), реле́й и канал шины медиа живут, пока их не закроет
+// приложение — для этого есть POST /api/webrtc/close. Без него «Остановить
+// публикацию», «Выйти из конференции» и закрытая вкладка оставляли сессию
+// висеть в WebRTCManager до остановки панели.
+//
+// viaBeacon=true — путь для pagehide: fetch при выгрузке не доживает, а
+// sendBeacon не даёт задать заголовок Authorization, поэтому токен обязан
+// уезжать в query (qs): сервер читает его и там (web_server._authorized
+// через parse_qs). Тот же приём, что в ms-conference.js::msLeave.
+function rtcCloseSession(sid, viaBeacon) {
+  if (!sid) return;
+  if (viaBeacon) {
+    try {
+      navigator.sendBeacon('/api/webrtc/close' + qs,
+        new Blob([JSON.stringify({ session: sid })], { type: 'application/json' }));
+    } catch (e) { /* браузер уже уходит, сделать больше нельзя */ }
+    return;
+  }
+  api('/webrtc/close', 'POST', { session: sid }).catch(() => {});
+}
+
+// Закрытая вкладка/обновление страницы — единственный уход, при котором к
+// серверу не уходит НИ ОДНОГО вызова: без этого слушателя RTCPeerConnection
+// (aiortc), реле́й и канал шины медиа остаются жить до остановки панели.
+// Перебор viewerPCs обязателен: fan-out заводит отдельную серверную сессию на
+// каждого публикуемого, значит одна вкладка оставляет N сессий.
+window.addEventListener('pagehide', () => {
+  if (!_pubSession && !Object.keys(viewerPCs).length) return;
+  rtcCloseSession(_pubSession, true);
+  Object.keys(viewerPCs).forEach(k => rtcCloseSession(viewerPCs[k].session, true));
+});
 
 async function rtcUnpublish() {
   try {
@@ -272,6 +311,8 @@ async function rtcUnpublish() {
     $('localVideo').srcObject = null;
     $('rtcHint').textContent = 'Публикация остановлена';
   } catch (e) { /* ignore */ }
+  rtcCloseSession(_pubSession);
+  _pubSession = null;
   $('btnPublish').disabled = false;
   $('btnUnpublish').disabled = true;
 }
@@ -312,6 +353,9 @@ async function subscribeTo(peer) {
       role: 'viewer', subscribe: [peer.id],
       participant: me ? me.id : null
     });
+    // Fan-out: на каждого публикуемого — СВОЯ серверная сессия со своими
+    // треками. Без id отписка оставляла её жить на сервере навсегда.
+    entry.session = resp.session;
     await pc.setRemoteDescription({ sdp: resp.sdp, type: resp.type });
   } catch (e) { /* подписка не удалась — тайл будет без видео */ }
 }
@@ -320,6 +364,8 @@ function stopViewer(peerId) {
   const entry = viewerPCs[peerId];
   if (!entry) return;
   try { entry.pc.close(); } catch (e) { /* ignore */ }
+  rtcCloseSession(entry.session);
+  entry.session = null;
   const a = document.querySelector(`audio[data-peer="${CSS.escape(peerId)}"]`);
   if (a) a.remove();
   delete viewerPCs[peerId];

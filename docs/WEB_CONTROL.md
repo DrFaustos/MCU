@@ -158,7 +158,7 @@ POST (тело — JSON):
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
 | `/api/web_port` | `{port}` | порт web-панели |
 | `/api/webrtc/offer` | `{sdp, type?, role?, subscribe?, participant?}` | SDP-offer браузера: `role=publish` (по умолчанию) — ingest своих треков, `role=viewer` — подписка на чужие (`subscribe` — список id). `participant` — id участника из `/api/conference/join`: без него публикация идёт в собственный канал `webrtc-<N>` |
-| `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели |
+| `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели; панель зовёт его при остановке публикации, отписке от участника и при закрытии вкладки — `sendBeacon`, токен в `?token=` |
 | `/api/web_recording` | `{enabled?}` | запись веб-конференции вкл/выкл/toggle (`WebRecorder`: кадры + аудио-микс) |
 | `/api/conference/join` | `{name, role?}` | войти в конференцию из браузера (`role`: participant/presenter) |
 | `/api/conference/leave` | `{id}` | выйти из конференции |
