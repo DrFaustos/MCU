@@ -738,6 +738,107 @@ if QT_AVAILABLE:
             qlayout.addWidget(self.bandwidth_label, 3, 2)
             right.addWidget(quality)
 
+            addr_box = QtWidgets.QGroupBox("Адрес МСУ (как нас набирают)")
+            alayout = QtWidgets.QGridLayout(addr_box)
+
+            alayout.addWidget(QtWidgets.QLabel("Домен / адрес"), 0, 0)
+            self.addr_domain = QtWidgets.QLineEdit()
+            self.addr_domain.setPlaceholderText(
+                "пусто = вызов по IP, напр. vcu.corp или 10.0.0.5")
+            self.addr_domain.setToolTip(
+                "Домен или IP, который набирают терминалы. Пусто — МСУ доступен\n"
+                "по своему IP (закрытый контур без DNS). Меняется на лету:\n"
+                "аккаунт перестраивается через account.modify, активные вызовы\n"
+                "не рвутся."
+            )
+            self.addr_domain.setText(str(self.config.sip_domain or ""))
+            self.addr_domain.returnPressed.connect(self._on_apply_address)
+            alayout.addWidget(self.addr_domain, 0, 1)
+
+            alayout.addWidget(QtWidgets.QLabel("Имя / номер"), 1, 0)
+            self.addr_user = QtWidgets.QLineEdit()
+            self.addr_user.setPlaceholderText("пусто = имя комнаты")
+            self.addr_user.setToolTip(
+                "SIP-user (номер зала в плане нумерации). Пусто — производим от\n"
+                "имени комнаты."
+            )
+            self.addr_user.setText(str(self.config.sip_user or ""))
+            self.addr_user.returnPressed.connect(self._on_apply_address)
+            alayout.addWidget(self.addr_user, 1, 1)
+
+            alayout.addWidget(QtWidgets.QLabel("Отображаемое имя"), 2, 0)
+            self.addr_display = QtWidgets.QLineEdit()
+            self.addr_display.setPlaceholderText("напр. Переговорная 3")
+            self.addr_display.setToolTip(
+                "Human-Readable Name в From/To — его видно на терминале и в\n"
+                "CUCM. На набор номера не влияет."
+            )
+            self.addr_display.setText(str(self.config.sip_display_name or ""))
+            self.addr_display.returnPressed.connect(self._on_apply_address)
+            alayout.addWidget(self.addr_display, 2, 1)
+
+            self.addr_apply = QtWidgets.QPushButton("Применить адрес")
+            self.addr_apply.setToolTip(
+                "Применить без перезапуска: новый адрес в Contact и в конфиге\n"
+                "на диске."
+            )
+            self.addr_apply.clicked.connect(self._on_apply_address)
+            alayout.addWidget(self.addr_apply, 3, 0, 1, 2)
+
+            self.addr_label = QtWidgets.QLabel("")
+            self.addr_label.setStyleSheet("color:#7a8592; font-size:11px;")
+            self.addr_label.setWordWrap(True)
+            alayout.addWidget(self.addr_label, 4, 0, 1, 2)
+            right.addWidget(addr_box)
+
+            sec_box = QtWidgets.QGroupBox(
+                "Шифрование и кодеки (по умолчанию — совместимость)")
+            slayout = QtWidgets.QGridLayout(sec_box)
+
+            slayout.addWidget(QtWidgets.QLabel("Шифрование медиа (SRTP)"), 0, 0)
+            self.srtp_combo = QtWidgets.QComboBox()
+            for _value, _text in (
+                ("off", "выключено — RTP (закрытый контур)"),
+                ("optional", "по запросу терминала (универсально)"),
+                ("mandatory", "обязательно — только SRTP"),
+            ):
+                self.srtp_combo.addItem(_text, _value)
+            self.srtp_combo.setToolTip(
+                "По умолчанию выключено: в закрытом контуре шифрование не нужно,\n"
+                "а «обязательно» ломает звонки со старыми шлюзами. «По запросу»\n"
+                "— единственный режим, где и Polycom с SRTP, и терминал без SRTP\n"
+                "остаются в звонке."
+            )
+            _idx = self.srtp_combo.findData(str(self.config.srtp or "off"))
+            self.srtp_combo.setCurrentIndex(max(0, _idx))
+            self.srtp_combo.currentIndexChanged.connect(self._on_srtp_changed)
+            slayout.addWidget(self.srtp_combo, 0, 1)
+
+            slayout.addWidget(QtWidgets.QLabel("Набор кодеков"), 1, 0)
+            self.codec_combo = QtWidgets.QComboBox()
+            for _value, _text in (
+                ("max_compat", "максимум совместимости (рекомендуется)"),
+                ("wideband", "только широкий звук (G.722/opus + H.264)"),
+                ("g711_only", "аварийный: только G.711 + H.264"),
+            ):
+                self.codec_combo.addItem(_text, _value)
+            self.codec_combo.setToolTip(
+                "«Максимум совместимости» предлагает терминалу все кодеки,\n"
+                "которые собраны в PJSIP, — пересечься с редким парком проще.\n"
+                "Унифицированный профиль (только G.711) оставляем для старых\n"
+                "шлюзов, которые падают на длинном списке."
+            )
+            _cidx = self.codec_combo.findData(str(self.config.codec_profile))
+            self.codec_combo.setCurrentIndex(max(0, _cidx))
+            self.codec_combo.currentIndexChanged.connect(self._on_codec_profile_changed)
+            slayout.addWidget(self.codec_combo, 1, 1)
+
+            self.codec_label = QtWidgets.QLabel("")
+            self.codec_label.setStyleSheet("color:#7a8592; font-size:11px;")
+            self.codec_label.setWordWrap(True)
+            slayout.addWidget(self.codec_label, 2, 0, 1, 2)
+            right.addWidget(sec_box)
+
             web_box = QtWidgets.QGroupBox("Web-панель управления")
             wlayout = QtWidgets.QGridLayout(web_box)
             self.web_enable = QtWidgets.QCheckBox("Включить web-панель")
@@ -755,7 +856,7 @@ if QT_AVAILABLE:
                 "HTTP без предупреждений браузера. При включении генерируется "
                 "самоподписанный сертификат (браузер покажет предупреждение)."
             )
-            self.web_tls.setChecked(bool(self.config.web.get("tls", False)))
+            self.web_tls.setChecked(self.config.web_tls_mode != "off")
             self.web_tls.toggled.connect(self._on_web_tls_toggle)
             wlayout.addWidget(self.web_tls, 1, 0, 1, 2)
 
@@ -1582,7 +1683,18 @@ if QT_AVAILABLE:
                     self.statusBar().showMessage(f"Уровень микрофона: {payload.get('level', 0):.3f}", 5000)
                 elif event == "engine.started":
                     mode = "PJSIP" if payload.get("pjsip") else "заглушка (нет pjsua2)"
-                    enc = "[Шифрование выкл]" if not self.config.require_encryption else "[Шифрование вкл]"
+                    # Показываем режим SRTP, а не вкл/выкл: 'optional'
+                    # (шифруем, если терминал предложил) оператор должен
+                    # видеть именно так, иначе "выкл" вводит в заблуждение.
+                    srtp_label = {
+                        "mandatory": "SRTP обязателен",
+                        "optional": "SRTP по запросу",
+                    }.get(self.config.srtp, "SRTP выкл")
+                    enc = f"[{srtp_label}]"
+                    try:
+                        self._refresh_address_label()
+                    except Exception:  # noqa: BLE001 — не повод ронять GUI
+                        log.debug("Не удалось обновить подпись адреса", exc_info=True)
                     self.statusBar().showMessage(
                         f"Слушаем {payload.get('listen')} · комната '{payload.get('room')}' · {mode} {enc}"
                     )
@@ -1638,14 +1750,40 @@ if QT_AVAILABLE:
             self._update_buttons()
 
         def closeEvent(self, event) -> None:  # noqa: N802
+            """Закрытие окна: гасим поллеры, web-панель, H.323 и движок.
+
+            Порядок: сначала свои таймеры (они дёргают движок), затем
+            подсистемы. Хвост этого метода 2026-09-26 (b0392a9) был отрезан
+            вставкой блока web-панели В СЕРЕДИНУ метода и уехал в конец
+            класса: закрытие окна перестало останавливать движок, H.323 и
+            web-сервер, а `super().closeEvent(event)` в чужом методе падало
+            NameError. Каждый stop — под своим guard'ом и с журналом: отказ
+            подсистемы не имеет права оставлять окно висеть, но и молчать не
+            имеет права. Регрессия — tests/test_ui_close_event.py.
+            """
             try:
                 self._video_poll.stop()
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("Не удалось остановить опрос видео")
             try:
                 self._event_poll.stop()
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("Не удалось остановить опрос событий")
+            try:
+                if self._web_server is not None:
+                    self._web_server.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки web-панели при закрытии")
+            try:
+                self.h323.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки H.323 при закрытии")
+            try:
+                self.engine.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка остановки SIP-движка при закрытии")
+            super().closeEvent(event)
+
         # --- встроенная web-панель -------------------------------------
         def _on_web_toggle(self, checked: bool) -> None:
             """Галочка «Включить web-панель»: лениво поднять/остановить сервер."""
@@ -1656,15 +1794,116 @@ if QT_AVAILABLE:
             self._update_web_label()
 
         def _on_web_tls_toggle(self, checked: bool) -> None:
-            """Переключение HTTP/HTTPS. Если сервер запущен — перезапускаем."""
-            self.config.raw.setdefault("features", {}).setdefault("web", {})["tls"] = bool(checked)
+            """Переключение HTTP/HTTPS. Если сервер запущен — перезапускаем.
+
+            Отказ TLS не должен лишать оператора панели: если https не
+            поднялся, сервер остаётся (или возвращается) на http.
+            """
+            mode = "self_signed" if checked else "off"
+            try:
+                self.config.set_web_tls(mode)
+            except Exception as exc:  # noqa: BLE001
+                self.statusBar().showMessage(f"TLS: {exc}", 6000)
+                return
             if self._web_server is not None and self._web_server.running:
-                ok = self._web_server.restart(tls=bool(checked))
-                if not ok:
+                ok = self._web_server.restart(tls_mode=mode)
+                if mode != "off" and not ok:
                     self.statusBar().showMessage(
-                        "Не удалось перезапустить web-панель с TLS (см. лог)", 5000
-                    )
+                        "HTTPS недоступен — панель осталась на HTTP (см. лог)", 6000)
+                    self._web_server.restart(tls_mode="off")
+                    try:
+                        self.config.set_web_tls("off")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.web_tls.blockSignals(True)
+                    self.web_tls.setChecked(False)
+                    self.web_tls.blockSignals(False)
+            self._save_config_quietly()
             self._update_web_label()
+
+        # --- адрес МСУ / шифрование / кодеки ------------------------------
+        def _apply(self, **kwargs) -> None:
+            """Прогнать изменение через движок и показать результат в статусе.
+
+            Движок — единственная точка, которая умеет менять настройки на
+            лету (account.modify + транспорт + сохранение конфига); её же
+            зовёт web-панель, поэтому GUI и web не могут разойтись.
+            """
+            apply = getattr(self.engine, "apply_sip_settings", None)
+            if not callable(apply):
+                self.statusBar().showMessage(
+                    "Движок не поддерживает смену настроек", 5000)
+                return
+            try:
+                result = apply(**kwargs)
+            except Exception as exc:  # noqa: BLE001 — GUI не должен падать
+                log.exception("Не удалось применить настройки SIP")
+                self.statusBar().showMessage(f"Не применено: {exc}", 8000)
+                return
+            if isinstance(result, dict):
+                if result.get("error"):
+                    self.statusBar().showMessage(
+                        f"Не применено: {result['error']}", 8000)
+                elif result.get("warnings"):
+                    self.statusBar().showMessage(
+                        "Применено с замечаниями: "
+                        + "; ".join(result["warnings"][:2]), 8000)
+                else:
+                    self.statusBar().showMessage(
+                        "Применено: " + ", ".join(result.get("applied") or [])
+                        + " — " + str((result.get("address") or {}).get("uri", "")), 8000)
+            self._refresh_address_label()
+
+        def _on_apply_address(self) -> None:
+            self._apply(domain=self.addr_domain.text(),
+                        user=self.addr_user.text(),
+                        display_name=self.addr_display.text())
+            self.addr_domain.setText(str(self.config.sip_domain or ""))
+            self.addr_user.setText(str(self.config.sip_user or ""))
+
+        def _on_srtp_changed(self, _index: int) -> None:
+            mode = self.srtp_combo.currentData()
+            if mode:
+                self._apply(srtp=str(mode))
+
+        def _on_codec_profile_changed(self, _index: int) -> None:
+            profile = self.codec_combo.currentData()
+            if profile:
+                self._apply(codec_profile=str(profile))
+
+        def _refresh_address_label(self) -> None:
+            """Показать, как нас реально набирают (IP это или домен)."""
+            getter = getattr(self.engine, "current_address", None)
+            data = {}
+            if callable(getter):
+                try:
+                    data = getter() or {}
+                except Exception:  # noqa: BLE001
+                    data = {}
+            uri = str(data.get("uri") or "")
+            alt = [t for t in (data.get("dial_targets") or [])[1:]]
+            text = "Звоните на: " + (uri or "—")
+            if alt:
+                text += "  (или " + ", ".join(alt) + ")"
+            warns = list(data.get("warnings") or [])
+            if warns:
+                text += "\n" + "\n".join("• " + str(w) for w in warns[:2])
+            self.addr_label.setText(text)
+            codecs = getattr(self.engine, "codec_report", None)
+            if isinstance(codecs, dict) and codecs:
+                self.codec_label.setText(
+                    "Профиль " + str(codecs.get("profile", "?")) + ": в PJSIP включено "
+                    + str(len(codecs.get("audio_enabled") or [])) + " аудио / "
+                    + str(len(codecs.get("video_enabled") or [])) + " видео кодеков")
+
+        def _save_config_quietly(self) -> None:
+            """Сохранить конфиг, если он загружен из файла (ошибки — в лог)."""
+            if not getattr(self.config, "path", None):
+                return
+            try:
+                self.config.save()
+            except Exception:  # noqa: BLE001
+                log.warning("Не удалось сохранить конфиг", exc_info=True)
 
         def _start_web_server(self) -> None:
             if self._web_server is not None and self._web_server.running:
@@ -1674,8 +1913,10 @@ if QT_AVAILABLE:
                 if self._web_server is None:
                     self._web_server = make_web_server(self.config, self.engine, self.h323)
                 # TLS берём из галочки (она источник истины в GUI).
-                self._web_server.tls = bool(self.web_tls.isChecked())
+                self._web_server.tls = ("self_signed" if self.web_tls.isChecked()
+                                         else "off")
                 if self._web_server.start():
+                    self._refresh_address_label()
                     self.statusBar().showMessage(f"Web-панель: {self._web_server.url}", 5000)
                 else:
                     self.statusBar().showMessage("Web-панель не запустилась (порт занят?)", 5000)
@@ -1693,22 +1934,27 @@ if QT_AVAILABLE:
             self.statusBar().showMessage("Web-панель остановлена", 3000)
 
         def _update_web_label(self) -> None:
+            """Подпись адреса web-панели — ТОЛЬКО подпись.
+
+            С 2026-09-26 (b0392a9) к этому методу физически прилип хвост
+            `closeEvent`: новый блок вставили ВНУТРЬ closeEvent, не закрыв
+            его, и `web_server.stop()` / `engine.stop()` / `h323.stop()` /
+            `super().closeEvent(event)` оказались последними строками класса.
+            Следствия, замеренные живьём: клик по галке «web-панель» или «TLS»
+            останавливал web-сервер, SIP-движок и H.323 (т.е. рвал активные
+            вызовы), а последняя строка падала `NameError: name 'event' is not
+            defined`. Регрессия — tests/test_ui_close_event.py.
+            """
             if self._web_server is not None and self._web_server.running:
-                self.web_url_label.setText(
-                    f"Адрес: {self._web_server.url}"
-                    + ("  (TLS, самоподписанный — браузер предупредит)" if self._web_server.tls else "")
-                )
+                text = f"Адрес: {self._web_server.url}"
+                if getattr(self._web_server, "tls", False):
+                    text += "  (TLS, самоподписанный — браузер предупредит)"
+                warning = getattr(self._web_server, "tls_warning", "")
+                if warning:
+                    text += chr(10) + warning
+                self.web_url_label.setText(text)
             else:
                 self.web_url_label.setText("выключена")
-
-            try:
-                if self._web_server is not None:
-                    self._web_server.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self.engine.stop()
-            self.h323.stop()
-            super().closeEvent(event)
 
 
 else:  # pragma: no cover

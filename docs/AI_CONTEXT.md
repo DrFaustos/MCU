@@ -4,7 +4,7 @@
 какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
 до того, как трогать код. Обновлять при значимых изменениях.
 
-Дата последнего обновления: **2026-09-27 (сессия 3)**, версия проекта **0.2.33**.
+Дата последнего обновления: **2026-10-07 (сессия 5)**, версия проекта **0.2.33**.
 
 ---
 
@@ -16,6 +16,7 @@
 | Архитектура и слои | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Декомпозиция SipEngine на сервисы | [ARCHITECTURE.md](ARCHITECTURE.md), §11 |
 | Выбор протокола звонка | [CALL_PROTOCOL.md](CALL_PROTOCOL.md) |
+| SIP-interop (100rel, Session Timers, hold, rtcp-mux) | [SIP_INTEROP.md](SIP_INTEROP.md) |
 | H.323 (нативный хост) | [H323_STATUS.md](H323_STATUS.md), [ADR-0002](ADR-0002-h323plus-unified-media.md) |
 | Web-панель / конференция из браузера | [WEB_CONTROL.md](WEB_CONTROL.md) |
 | Web-клиент (что можно/нельзя) | [ADR-0001](ADR-0001-web-client.md) |
@@ -108,7 +109,8 @@
 `mcuclient/webui/index.html`. Браузер подключается к ПК/серверу и управляет
 сессией (участники, вызовы, муты, раскладка, запись, чат, устройства).
 
-* REST: `/api/status`, `/api/participants`, `/api/chat`, `/api/devices/*`,
+* REST: `/api/status`, `/api/participants`, `/api/chat`, `/api/dtmf`,
+  `/api/devices/*`,
   `/api/layouts`; команды — POST (`/api/call`, `/api/hangup`, `/api/mute`,
   `/api/layout`, `/api/recording`, `/api/chat`, `/api/camera`, ...).
 * SSE: `/api/events` — события шины движка.
@@ -154,8 +156,10 @@
 * **TURN/STUN**: `docker/turn/` (coturn + compose) для интернета/NAT.
 * **Мост SIP↔WebRTC (аудио)**: `SipWebAudioBridge` (`sip_web_bridge.py`) +
   `SipAudioPort` (`sip_audio_port.py`, `pjsua2.AudioMediaPort`);
-  `WebSession.attach_sip_call_port` связывает их. TODO: create/startTransmit
-  из `sip_engine` на медиа вызова (нужен SIP-терминал для e2e).
+  `WebSession.attach_sip_call_port` связывает их. Поднимается **сам** из
+  рантайма: `SipBridgeService` (`sip_bridge_service.py`) реагирует на
+  `call.confirmed`/`call.closed` и живёт вместе с web-панелью (`WebServer`).
+  Осталось: подтвердить звук ушами на реальном SIP-терминале.
 Подробности: [WEB_CONTROL.md](WEB_CONTROL.md).
 
 
@@ -165,6 +169,15 @@
 аудио-трек** (голоса всех, кроме себя) вместо N треков. Использует
 `AudioMixer`. Тесты: `test_audio_mix_session`, `test_audio_mix_wiring`,
 `test_mixed_audio_track`.
+
+Затухание канала без новых кадров живёт здесь же, а не в продюсерах: `tick()`
+берёт время ОДИН раз на тик, им же отмечает живость (`mark`) и гасит канал
+(`LevelsIndicator.is_stale`, порог `LEVEL_STALE_MS`). Причина не в удобстве:
+`MediaBus` держит последний кадр до `drop()`, а у мёртвого источника (обрыв RTP,
+смерть процесса) события «поток иссяк» не бывает — если подсветка и микс будут
+считаться от разных часов, замолчавший канал останется звучать всем бессрочно,
+молча (так и было). Возобновившийся поток обязан вернуться в микс: затухание —
+не глушение. `now` у `tick()` — параметр ради детерминизма без `sleep`.
 
 ### 2.9. Запись web-конференции и TLS/ICE
 
@@ -180,13 +193,30 @@
 - `SipWebAudioBridge` (`sip_web_bridge.py`) — логика; `SipAudioPort`
   (`sip_audio_port.py`, `pjsua2.AudioMediaPort`) — нативный порт;
   `WebSession.attach_sip_call_port` связывает их.
+- `SipBridgeService` (`sip_bridge_service.py`) — **рантайм-обвязка**: поднимает
+  порты ровно по числу живых вызовов, подключает их к `call.getAudioMedia(-1)`
+  в обе стороны и льёт PCM в общий микс панели и в RTP-мост mediasoup.
+  Поднимает/гасит `WebServer` вместе с панелью (`_start_sip_bridge`), поэтому
+  тракт работает сам, а не только в тестах. Без pjsua2 — тихий no-op.
+  Микс для терминала — `WebSession.web_mix_for_sip(channel)`: все, КРОМЕ его
+  собственного канала `sip-<слот>` (иначе терминал слышит собственный голос).
+  Каждый вызов публикует PCM в шину в СВОЙ канал (`SipWebAudioBridge.channel_of`),
+  а не в общий `sip`: иначе на двух терминалах кадры затирали бы друг друга и
+  вычитание `sip` глушило бы оба. `forget()` убирает канал по окончании вызова
+  (`MediaBus` держит последний кадр до `drop` — без чистки браузеры слушают
+  застывший голос завершённого терминала).
 - `rtp_audio.py` — G.711 (PCMU/PCMA), RTP (RFC 3550), `RtpUdpEndpoint`.
 - `mediasoup_rtp_bridge.py` — `MediasoupRtpBridge`: PlainTransport +
   produce_plain, SIP-звук -> mediasoup и обратно.
 - `WebSession.mediasoup_rtp_bridge()`/`push_sip_pcm_to_sfu()`/`_on_sfu_audio`.
+  Направление у этих двух точек РАЗНОЕ и читать его надо из docstring моста:
+  `push_sip_pcm_to_sfu` — голос терминала в SFU (наш `produce_plain`), а
+  `_on_sfu_audio` — приём `on_pcm`, т.е. голоса браузеров **для** терминала:
+  он обязан уйти в `sip_bridge.push_web_mix` (в `sip_sink`), а НЕ в `MediaBus`.
+  Публикация его в шину под `SIP_PUBLISHER_ID` возвращала браузерам их же
+  голоса контуром «шина -> on_mix -> терминал -> SFU -> тот же колбэк» и
+  не имела парного `drop` — `tests/test_mediasoup_rtp_wiring.py` (11).
 - `sip_mock.py` — `MockSipAudioSource`: тестовый тон без терминала.
-  **TODO:** нативный hook-up `push_sip_pcm` к audio-port pjsua2 активного
-  вызова (нужен SIP-терминал/sipp для проверки).
 
 ### 2.11. SFU mediasoup: сигналинг, браузер, стек одной командой
 
@@ -196,6 +226,40 @@
   `webui/ms-conference.js`; чекбокс «SFU mediasoup» на странице.
 - Супервизор: `mediasoup_supervisor.py` (запуск сайдкара, `run.py`).
 - Стек одной командой: `docker/sfu/` (mediasoup + coturn), см. README.
+- **Отказ сайдкара — не «выключено».** `False` в `_ms_signaling`/`_ms_rtp`
+  означает ТОЛЬКО «оператор выключил». Ошибка связи кэш в `False` не пишет:
+  поле остаётся `None`, причина ложится в `_ms_signaling_error` /
+  `_ms_rtp_error`, повтор разрешён не чаще `MS_RETRY_INTERVAL` (10 с).
+  Троттл обязателен: `push_sip_pcm_to_sfu()` дёргает обе ленивые фабрики на
+  каждый кадр, и наивный ретрай превращается в шторм обращений к control API.
+  Панель обязана различать два состояния (`mediasoup_rtp.reason`,
+  `_ms_unavailable()` для 503) — иначе `enabled: true` с упавшим сайдкаром
+  враньём выглядит как «mediasoup не включён».
+- **Транспорт обязан освобождаться.** Каждый отказ моста от уже созданного
+  `PlainTransport` зовёт `close_transport` (`POST /transports/close`), иначе
+  транспорт держит UDP-порт из `rtc_min..rtc_max`, пока не закрыта комната.
+  Забыть `_transport_id` — НЕ закрытие.
+- **Маршруты control API — одно множество в трёх местах**: `self.call()` в
+  `mediasoup_client.py`, развилка `method === ... && path === ...` в
+  `mediasoup-sidecar/src/server.js`, таблица `mediasoup-sidecar/README.md`.
+  Сверяется `tests/test_sidecar_api_paths.py`: новое имя маршрута без правки
+  сайдкара больше не даст тихого 404, а маршрут без строки в README краснеет.
+- **Выход браузера обязан освобождать сайдкар.** Убрать участника из
+  `_participants` в `leave()` — недостаточно: `WebRtcTransport` остаётся в
+  mediasoup и держит пару UDP+TCP портов из `rtc_min..rtc_max`, пока не закрыта
+  комната (а комната — до смерти процесса сайдкара). Закрытие идёт через
+  `close_transport`; `MediasoupSignaling.close()` (из `WebSession.close()`) закрывает
+  комнату, при отказе — её транспорты по id. Панель зовёт `/api/mediasoup/leave`:
+  явный выход — `api()`, `pagehide` — `sendBeacon` (токен в query `qs`, потому
+  что `sendBeacon` не даёт заголовок `Authorization`, а асинхронный `api()` при
+  выгрузке страницы не доживает до `fetch`). Маршрут без вызова из веба —
+  мёртвый код: ровно так `/api/mediasoup/leave` и жил до 2026-10-10.
+- **reused-ответ `join()` несёт полный ICE/DTLS.** Собранный
+  `webui/mediasoup-client.js` бросает `TypeError: missing iceParameters` в
+  `createTransport` (`iceCandidates` — массив, `iceParameters`/`dtlsParameters` —
+  объекты), а `msReconnect()` полагается на повторный `join`: с одним `id`
+  переподключение умирало внутри `catch`. Регрессия:
+  `tests/test_mediasoup_signaling.py::test_reused_join_returns_full_transport_params`.
 
 ## 3. Грабли и известные проблемы (важно!)
 
@@ -226,11 +290,30 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 Ряд тестов ходит в приватные поля сервисов (`engine._recording._audio_recorder`
 и т.п.). При переименовании полей ищите использования в `tests/`.
 
-### 3.7. fan-out требует публикации в шину (исправлено, `f0a05df`)
+### 3.7. fan-out требует публикации в шину — и уборки канала (исправлено, `f0a05df`)
 `_MediaRelay` сначала отдавал принятые WebRTC-кадры только в локальный sink
 (FrameHub), а в `MediaBus` не публиковал — зрители (fan-out) получали пустые
 треки. Теперь `_emit_video`/`_emit_audio` публикуют в шину под `publish_id`
 (id участника конференции). Регрессия — `tests/test_webrtc_publish_bus.py`.
+
+Обратная половина того же контракта: закрытие сессии обязано убрать свой канал
+(`WebRTCManager._forget_bus_channel` → `bus.drop(publish_id)`). `MediaBus` держит
+последний кадр до `drop()`, а `AudioMixSession.tick()` берёт состав публикаторов
+из шины, поэтому закрывший вкладку браузер оставался в миксе всех остальных
+бессрочно — тот же класс, что в SIP-канале (`SipWebAudioBridge.forget`). Канал
+принадлежит УЧАСТНИКУ, а не сессии: под одним `publish_id` могут стоять
+публикация и просмотр одного человека, поэтому `drop` происходит только когда под
+этим id не публикует больше никто живой. Регрессия —
+`tests/test_webrtc_ingest.py` (16).
+
+Третья половина того же контракта — УБРАТЬСЯ самой сессией, когда браузер ничего
+не прислал. `pc.on("connectionstatechange")`
+(`mcuclient/webrtc_ingest.py::WebRTCManager`)
+закрывает сессию при `failed`/`closed`/`disconnected`; покрытия у этого не было
+никогда, и из-за этого «утечка» без явного `POST /api/webrtc/close` выглядела
+бессрочной: на деле сессия освобождалась не сразу, а через ICE-таймаут (десятки
+секунд). Немедленное освобождение — на панели (`mcuclient/webui/index.html`,
+регрессия `tests/test_webrtc_panel_close.py`), автозакрытие на обрыве — здесь.
 
 ### 3.8. ICE-серверы: строки И словари (исправлено, `ceb38fe`)
 `Config.web_ice_servers` отдаёт список словарей `{urls, username, credential}`
@@ -243,6 +326,85 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 pure-Python fallback (моно + линейный ресемпл); регрессия —
 `test_resample_fallback.py`.
 
+### 3.9. Порядок SDP-кодеков = приоритет терминала (исправлено, `0cb69f2`)
+`parse_sdp_codecs` возвращал кодеки, отсортированными по payload type. В SDP
+порядок `a=rtpmap` повторяет порядок PT в `m=`-строке, то есть ЕСТЬ приоритет
+терминала. Сортировка молча меняла его и согласовывала другой (часто худший)
+кодекс: Polycom c `104/103/102` уезжал на PT 102. Теперь порядок сохраняется,
+позицию PT фиксирует первое вхождение. Регрессии — `test_parse_sdp_*order*`.
+
+### 3.10. Детект H.323-плагинов по дампу реестра (исправлено, `0cb69f2`)
+`h323_plugins_available()` звал `gst-inspect-1.0` БЕЗ аргументов и искал
+подстроку `h323` в выводе — это полный дамп реестра (~80 КБ), где подстрока
+встречается в произвольном тексте. Ложное «H.323 готов» хуже честного
+«недоступен»: `start()` поднимает заведомо падающий пайплайн. Теперь
+спрашиваем элементы по именам (`gst-inspect-1.0 h323src` и т.п., RC==0).
+
+### 3.11. `WebServer.restart()` терял ICE-серверы (исправлено, `0cb69f2`)
+`restart()` пересоздавал `WebSession`, не передав `ice_servers`: после
+включения HTTPS браузер оставался без STUN/TURN. Симптом коварный — в одной
+подсети всё работало, через NAT WebRTC не поднимался. Список лежит на сервере
+(`WebServer._ice_servers`) и передаётся в каждую новую сессию.
+
+### 3.12. onCallMediaState: двойной разбор медиа (исправлено, `57861b5`)
+Колбэк `SipEngine._on_call_media_state` содержал ДВА блока «apply_media_state +
+привязка камеры» (след интерактивной правки): второй `apply_media_state(ci)`
+шёл БЕЗ объекта вызова, участник по нему не находился, видеоокно подключалось и
+сразу сбрасывалось, в шину уходили два противоположных `call.video`, а
+`_bind_capture_to_calls` проходил по всем живым вызовам дважды за событие
+(vidSetStream → лишний re-INVITE). **Не путать с видеогардом**: ранний
+`if not self._video_supported: return` оставили — на сборках PJSIP без видео
+обращение к `mi.videoWindow` роняет процесс нативным access violation, которое
+Python не перехватывает. Аудит согласованных кодеков (`_log_negotiated_codecs`)
+теперь читается ДО гарда: `mi.codecName` безопасен всегда, и диагностика
+«терминал соединился, но звука нет» (Sony/Polycom, Windows-wheel) возвращается.
+Регрессии — `tests/test_sip_engine_media_state.py` (11).
+
+### 3.13. Раннер обязан разбираться в том же API, что и тесты (исправлено)
+Раньше `tests/_runner.py` умел передавать только `tmp_path`, и тесты, принимавшие
+pytest-фикстуру `monkeypatch` или маркер `parametrize`, падали под ним с
+`TypeError: missing 1 required positional argument` там, где pytest был зелёный.
+Из-за этого в модулях плодились собственные хелперы `_patched(obj, name, value)`
+— стоимость без какой-либо выгоды.
+
+Сейчас раннер понимает `tmp_path`, `monkeypatch` (setattr/delattr/setenv/delenv/
+chdir с полным откатом), `parametrize` (одно- и многоаргументную), маркеры
+`skipif`/`skip`, а также `pytest.skip()` и `pytest.importorskip()`. **Новые
+фикстуры не заводим** — остальное по-прежнему `SimpleNamespace`/фейки; но писать
+тест «в обход» pytest-API больше не нужно.
+
+Отдельная грабля: `pytest.skip()` бросает `Skipped` — наследник `BaseException`,
+а не `Exception`, и в pytest 9.1 у него `__module__ == 'builtins'`. Распознавать
+пропуск надо по имени класса в `type(exc).__mro__`; проверка по модулю не работает,
+а `except Exception` такой пропуск не видит вовсе.
+
+Покрытие сверяется: `python3 tests/_runner.py --collect-only` обязан назвать
+столько же кейсов, сколько собирает pytest. Без этого раннер способен молчать
+про часть набора (так и было: 733 кейса вместо 987). Регрессия semantics —
+`tests/test_test_runner.py` (14 тестов, проходит и pytest'ом, и самим раннером).
+
+### 3.14. GUI: код `MainWindow` в тестах мёртв, а `closeEvent` был разорван (исправлено)
+PySide6 в CI нет, поэтому в `mcuclient/ui.py` исполняется ветка `else` и весь
+`MainWindow` с его слотами в тестовом процессе НЕ СОЗДАЁТСЯ. Единственный
+рабочий способ что-то проверить — вынуть метод из БОЕВОГО исходника (`ast` +
+`ast.unparse`) и исполнить на заглушках; по исходнику же сверяются слоты в
+`tests/test_ui_web_slots.py`.
+
+`b0392a9` (2026-09-26) вставил блок web-панели **внутрь** `closeEvent`, не закрыв
+его: закрытие окна перестало останавливать web-сервер, движок и H.323, а хвост
+(`engine.stop()`, `h323.stop()`, `super().closeEvent(event)`) уехал в
+`_update_web_label` и падал `NameError: name 'event' is not defined` — т.е.
+галка «web-панель» рвала активные вызовы. Ruff видел `F821`, но lint-шаг CI не
+блокирует (`|| true`), и дефект прожил две недели при зелёных тестах.
+
+Отсюда два правила. (1) Проверять после вставки методов не только наличие имени,
+но и **объём** метода (`node.end_lineno - node.lineno`): имена были на месте,
+структура — сломана. (2) Имя, которое компилятор читает как `GLOBAL_LOAD` вне
+своего объёма, — это `NameError` в рантайме; мера заперта в тесте, а не в линте
+(`symtable`-зонд для этого класса непригоден: мишень помечается `global`, а не
+`free`, и ловится `__class__` от `super()`). Регрессии —
+`tests/test_ui_close_event.py` (7), включая контроль работающего стража.
+
 ### 3.7. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные
 расходы только при DEBUG.
@@ -251,9 +413,32 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 
 ## 4. Как проверять (обязательный минимум)
 
- 
+**Боевой интерпретатор — `/usr/bin/python3`** (3.12: в нём есть и `pytest`, и
+`pjsua2`-`.egg`). В `PATH` разработчика или ИИ-агента первым может стоять другой
+`python3` — например 3.14 из окружения агента, где `pytest` отсутствует. Прогон
+`python3 tests/_runner.py` таким интерпретатором даёт **ложные** падения, не
+связанные с кодом: `ERROR import … ModuleNotFoundError: No module named 'pytest'`
+(файлы, которые реально есть и проходят) и `RuntimeError: There is no current
+event loop` в `test_mixed_audio_track.py` (в 3.14 `asyncio.get_event_loop()`
+луп не создаёт). На 2026-10-08 такой прогон показал «10 failed» при зелёном
+боевом наборе. Сверяйте результат только с боевым интерпретатором.
 
-**Перед коммитом:** `python3 tests/_runner.py` → `N passed, 0 failed`;
+**Ссылки вида `<файл>.py::<имя>` обязаны вести на живой символ** — и в
+документах, и в комментариях кода. Их сверяет
+`tests/test_doc_values.py::test_doc_pointers_to_code_symbols_are_alive`.
+Усечённое имя (`::test_router_...`) читатель разыскать не может, а сверка
+чисел кейсов на нём молчит: она смотрит на ФАЙЛ, а не на ИМЯ. Живая цель
+берётся из AST, потому что `pytest -q --collect-only` в 9.x печатает
+`файл: N`, а не `::`-строки, — по выводу pytest все ссылки на тесты выглядят
+мёртвыми.
+
+**Не удваивать `-q`:** в `pyproject.toml` стоит `addopts = "-q"`, поэтому
+явный `-q` превращается в `-qq`, а при `-qq` pytest НЕ печатает строку
+`N passed`. Прогон с `exit=0` и без итога неотличим от оборванного. Снимать
+меру: `-o addopts='' -q`.
+
+**Перед коммитом:** `/usr/bin/python3 tests/_runner.py` → `N passed, 0 failed`
+(он же и `python3 -m pytest tests/` — тем же интерпретатором);
 `git status -sb` — чисто; не оставлять одноразовые `scripts/_*.py`.
 
 ---
@@ -263,8 +448,10 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 - **Язык:** код, логи, комментарии, докстринги — **по-русски** (кроме технических
   идентификаторов).
 - **DI:** сервисы принимают зависимости явно (колбэки), не тянут pjsua2/Qt.
-- **Тесты:** `tests/test_*.py`, раннер `tests/_runner.py` (не pytest — своих
-  фикстур нет; использовать `SimpleNamespace`/фейки).
+- **Тесты:** `tests/test_*.py`, проверять и `pytest`, и раннером `tests/_runner.py`
+ (он понимает `tmp_path`, `monkeypatch`, `parametrize`, `skipif`/`skip`,
+ `pytest.skip`/`importorskip` — см. 3.13). Новых фикстур не заводим: остальное
+ через `SimpleNamespace`/фейки.
 - **Одноразовые патч-скрипты:** создавать в `scripts/_*.py`, после применения
   **удалять** и коммитить отдельно.
 - **Не рефакторить несвязанное**; маленькие сфокусированные правки.
@@ -284,14 +471,22 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 - **Windows-сборка:** при падении на старте появляется MessageBox с путём к
   `mcu-client.log` (рядом с `.exe`); причина видна без консоли.
 - **WebRTC/SFU:** есть ingest, fan-out видео, **микширование аудио**,
-  **запись web**, TURN/STUN. Нет: **нативной обвязки SIP↔WebRTC-моста**
-  (media-port), **симулкаста**, джиттер-буферов. Симулкаст требует замены
-  SFU (mediasoup/Janus) — параллельно начат `mediasoup-sidecar/`.
+  **запись web**, TURN/STUN, **нативная обвязка SIP↔WebRTC-моста**
+  (`sip_bridge_service.py`, поднимается сама). Нет: **симулкаста**,
+  джиттер-буферов, прогона SIP↔веб живым терминалом (пока только фейки).
+  Симулкаст требует замены SFU (mediasoup/Janus) — параллельно начат
+  `mediasoup-sidecar/`.
 - **Видео в GUI:** известны жалобы — тайл «Своя камера» не всегда
   масштабируется под сетку, при смене устройства изображение может остаться
   старым, при муте видео показывает последний кадр. См. `VIDEO_STATUS.md`.
-- **H.323:** нативный приём только через `mcu_h323d` (см. H323_STATUS); E2E с
-  реальным терминалом не прогонялся.
+- **H.323:** нативный хост `mcu_h323d` **принимает и инициирует** вызовы,
+  медиа-аудио работает: `OpenAudioChannel` переопределён на PCM-канал
+  (`pcm.in` / `pcm.out`), `mcuclient/h323_audio_bridge.py` сводит вызовы в общий
+  микс — два терминала слышат друг друга через MCU, эха нет, мьют работает.
+  Проверено стендами: `h323_native_two_hosts.py` (два хоста) и
+  `h323_native_mcu_three_hosts.py` (MCU + два терминала), оба RC=0. Нет **видео**
+  через хост и нет **AEC**; E2E с реальным терминалом Sony/Polycom не прогонялся.
+  Этапы — в `docs/H323_STATUS.md`.
 
 ---
 
@@ -299,6 +494,10 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 
 | Коммит | Что |
 |--------|-----|
+| `5e47c47` | исходящий вызов: state в register_participant; стенды: pump вместо sleep |
+| `b4d22ee` | аудио-мост SIP<->веб поднимается сам (SipBridgeService) |
+| `57861b5` | onCallMediaState: один разбор медиа, аудит кодеков без видео |
+| `0cb69f2` | SDP-приоритет кодеков, детект H.323, ICE при restart панели |
 | `8a409f2` | диагностика падений: MessageBox + лог рядом с .exe |
 | `11941a1` | кэш кодирования кадров FrameHub + фикс MJPEG-цикла |
 | `058a398` | оптимизация SFU fan-out (latest-wins + общий кэш) |
@@ -327,6 +526,13 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 
 - Проект **pre-alpha**, стабильных релизов нет; цель — **MCU (сервер+клиент),
   ВКС**, интероп с аппаратными терминалами по SIP/H.323.
+- **PJSIP с `threadCnt = 0`**: без `libHandleEvents()` пакеты не разбираются.
+  В стендовых скриптах ждать события через `time.sleep` нельзя — только через
+  `scripts/testbed/lib/pump.py` (он же регистрирует поток в pjlib; без этого
+  вызов API из чужого потока = abort процесса, не исключение).
+- **Фейки в юнит-тестах обязаны совпадать с реальными сигнатурами.** Фейк
+  `register_participant(call, uri)` при живом `_register_participant(call,
+  uri, state)` давал зелёные тесты и `TypeError` в рантайме.
 - Были ложные «отчёты о готовности» без артефактов — **всегда проверять факты**:
   читать файлы, гонять тесты, смотреть `git log`/`diff`, а не верить тексту.
 - **Web-клиент** — только как второй клиент поверх headless-сервера, не вместо

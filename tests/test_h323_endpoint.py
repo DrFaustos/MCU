@@ -5,6 +5,8 @@
 обработка IPC-событий и graceful degradation.
 """
 
+import base64
+import math
 import sys
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from mcuclient.h323_endpoint import (  # noqa: E402
     H323Endpoint,
     alias_to_uri,
     call_info_from_event,
+    parse_auto_answer_flag,
     state_from_h323,
 )
 from mcuclient.h323d_client import H323dEvent  # noqa: E402
@@ -220,6 +223,26 @@ def test_on_event_media_sets_codecs():
     assert p.video_codec == "H.264"
 
 
+def test_on_event_media_blank_codec_keeps_agreed_value():
+    """Пустой `codec` от хоста не имеет права затирать согласованный.
+
+    Хост шлёт `call.media` не всегда с заполненным полем; прежняя запись
+    `p.audio_codec = codec` вешала пустую строку поверх G.722, и панель (REST
+    -проекция участника) читала «кодека нет» при активном звонке. Отсутствие
+    данных — не значение: то же правило, что введено для rx_bitrate_kbps.
+    """
+    _, ep, _ = _make_endpoint(auto_answer=False)
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))
+    p = ep.find_by_token("t1")
+    assert p is not None
+    ep.on_event(
+        H323dEvent("call.media", {"token": "t1", "kind": "audio", "codec": "G.722"})
+    )
+    ep.on_event(H323dEvent("call.media", {"token": "t1", "kind": "audio"}))
+
+    assert p.audio_codec == "G.722"
+
+
 def test_on_event_disconnected_removes():
     room, ep, _ = _make_endpoint()
     ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))
@@ -231,3 +254,202 @@ def test_on_event_unknown_is_ignored():
     _, ep, _ = _make_endpoint()
     ep.on_event(H323dEvent("pong", {}))  # не должно падать
     ep.on_event(H323dEvent("shutdown", {"reason": "signal"}))
+
+
+# --- режим ответа: источник правды — хост, а не Python-флаг ------------------
+
+
+def test_parse_auto_answer_flag_values():
+    assert parse_auto_answer_flag("0") is False
+    assert parse_auto_answer_flag("1") is True
+    assert parse_auto_answer_flag(False) is False
+    assert parse_auto_answer_flag(True) is True
+    assert parse_auto_answer_flag(0) is False
+    assert parse_auto_answer_flag(1) is True
+    assert parse_auto_answer_flag("no") is False
+    assert parse_auto_answer_flag("TRUE") is True
+
+
+def test_parse_auto_answer_flag_unknown_keeps_mode():
+    """Нет поля / мусор -> None: режим не меняем (старые сборки хоста)."""
+    assert parse_auto_answer_flag(None) is None
+    assert parse_auto_answer_flag("") is None
+    assert parse_auto_answer_flag("maybe") is None
+
+
+def test_ready_from_host_switches_to_manual_answer():
+    """Хост с --no-auto-answer сообщает auto_answer=0 — эндпоинт обязан подчиниться.
+
+    Иначе входящий вызов помечался CONFIRMED локально, хотя H323Plus держал
+    его на паузе Alerting: UI показывал «соединение», а accept из UI приезжал
+    уже после того, как терминал сбросил вызов.
+    """
+    _, ep, seen = _make_endpoint(auto_answer=True)  # у эндпоинта «авто»
+
+    ep.on_event(H323dEvent("ready", {"port": 1720, "auto_answer": "0"}))
+
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.INCOMING, "хост просил ручной ответ — не отвечаем сами"
+    assert not any(n == "call.state" for n, _ in seen)
+
+
+def test_ready_with_auto_answer_confirms_incoming():
+    _, ep, seen = _make_endpoint(auto_answer=False)
+
+    ep.on_event(H323dEvent("ready", {"port": 1720, "auto_answer": "1"}))
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.CONFIRMED
+    assert any(n == "call.state" for n, _ in seen)
+
+
+def test_ready_without_flag_keeps_endpoint_mode():
+    """Старый хост без поля auto_answer: поведение не меняется."""
+    _, ep, _ = _make_endpoint(auto_answer=True)
+
+    ep.on_event(H323dEvent("ready", {"port": 1720}))
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+
+    p = ep.find_by_token("t1")
+    assert p is not None
+    assert p.state is CallState.CONFIRMED
+
+
+def test_ready_updates_port():
+    _, ep, _ = _make_endpoint()
+    ep.on_event(H323dEvent("ready", {"port": 1721, "auto_answer": "0"}))
+    assert ep.port == 1721
+
+
+# --- потеря хоста: обрыв IPC без call.disconnected --------------------------
+# Хост mcu_h323d может упасть или быть убитым посреди разговора. Штатного
+# call.disconnected при этом не приходит НИКОГДА, и без зачистки участник
+# оставался в комнате в CONFIRMED навсегда: UI/web показывали живое соединение,
+# а hangup из панели уходил в мёртвый сокет.
+
+
+class _RecordingClient:
+    """Клиент хоста, который считает ушедшие команды (проверка «не слать в мёртвый сокет»)."""
+
+    def __init__(self) -> None:
+        self.commands: list = []
+        self.connected = True
+
+    def answer(self, token: str) -> bool:
+        self.commands.append(("answer", token))
+        return True
+
+    def hangup(self, token: str) -> bool:
+        self.commands.append(("hangup", token))
+        return True
+
+    def send_command(self, cmd: str, **fields) -> bool:
+        self.commands.append((cmd, fields.get("token", "")))
+        return True
+
+
+def test_host_lost_clears_phantom_participants():
+    room, ep, seen = _make_endpoint()
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+    assert room.count == 1
+
+    ep.on_event(H323dEvent("connection.closed", {"reason": "eof"}))
+
+    assert room.count == 0, "участник мёртвого хоста остался в комнате"
+    assert ep.find_by_token("t1") is None
+    assert any(n == "call.state" for n, _ in seen), "UI не уведомлён о завершении"
+
+
+def test_host_lost_with_no_calls_is_not_an_error():
+    """Хост умер в простое: зачищать нечего, падать не на чем."""
+    room, ep, _ = _make_endpoint()
+    ep.on_event(H323dEvent("connection.closed", {"reason": "error"}))
+    assert room.count == 0
+
+
+def test_host_lost_does_not_hangup_dead_host():
+    """call.hangup мёртвому хосту не отменяет вызов, но пачкает лог «не доставлен»."""
+    room = Room(name="r")
+    ep = H323Endpoint(room, EventBus())
+    client = _RecordingClient()
+    ep._client = client  # type: ignore[assignment]
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))
+    client.commands.clear()  # авто-ответ до обрыва — легитимная команда
+
+    ep.on_event(H323dEvent("connection.closed", {"reason": "error"}))
+
+    assert room.count == 0
+    assert client.commands == [], f"команды мёртвому хосту: {client.commands}"
+
+
+# --- статистика моста: что доезжает наружу -----------------------------------
+
+
+class _BridgeClient:
+    """Клиент хоста для аудио-моста: помнит pcm.out, умеет подписку."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+        self.subscribers: list = []
+
+    def on_event(self, cb) -> None:
+        self.subscribers.append(cb)
+
+    def unsubscribe_event(self, cb) -> None:
+        if cb in self.subscribers:
+            self.subscribers.remove(cb)
+
+    def pcm_out(self, token: str, data: bytes) -> bool:
+        self.sent.append((token, data))
+        return True
+
+
+def _tone(rate: int, seconds: float = 0.02, amp: int = 8000) -> bytes:
+    import struct
+
+    n = int(rate * seconds)
+    step = 2.0 * math.pi * 800.0 / rate
+    return b"".join(struct.pack("<h", int(amp * math.sin(i * step))) for i in range(n))
+
+
+def test_audio_stats_exposes_active_speaker():
+    """speaker_pid обязан доезжать наружу через audio_stats().
+
+    Мост считает докладчика (BridgeStats.speaker_pid), а смотрят наружу именно
+    в audio_stats(): стенд трёх хостов и диагностика панели. Без проекции это
+    было бы ещё одно поле, которое пишется и никем не читается, — ровно то
+    расхождение контракта, из-за которого панель показывала «не говорит».
+    """
+    from mcuclient.h323_audio_bridge import H323AudioBridge
+
+    _, ep, _ = _make_endpoint()
+    # Как _start_audio_bridge(): мост поднимается И подписывается на события
+    # клиента — без start() enabled остался бы False, и проверка статистики
+    # меряла бы не то состояние, которое бывает в бою.
+    bridge = H323AudioBridge(_BridgeClient(), ep)
+    assert bridge.start() is True
+    ep._audio = bridge
+
+    p = ep.register_incoming(H323CallInfo(remote_uri="h323:a", call_token="t1"))
+    assert p is not None
+    ep._audio.on_event(H323dEvent("call.media", {"token": "t1", "kind": "audio",
+                                                 "rate": 16000}))
+    assert ep.audio_stats()["speaker_pid"] is None, "пока никто не говорил — доклада нет"
+
+    ep._audio.on_event(H323dEvent("pcm.in", {
+        "token": "t1", "rate": 16000,
+        "data": base64.b64encode(_tone(16000)).decode("ascii")}))
+
+    st = ep.audio_stats()
+    assert st["speaker_pid"] == p.id, f"докладчик не доехал наружу: {st}"
+    assert st["enabled"] is True and st["channels"] == 1
+
+
+def test_audio_stats_without_bridge_has_no_speaker_key_crash():
+    """Моста нет (микширование выключено) — stats обязан отвечать, а не падать."""
+    _, ep, _ = _make_endpoint()
+    assert ep.audio_stats() == {"enabled": False}

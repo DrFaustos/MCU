@@ -45,7 +45,15 @@ class _FakeEngine:
     def toggle_recording(self): self._recording = not self._recording; return self._recording
     def recording_file(self): return None
     def send_message(self, pid, text): return True
+    @property
     def chat_history(self): return []
+
+    @property
+    def dtmf_history(self): return [{"digits": "12#", "direction": "in"}]
+
+    def send_dtmf(self, digits, pid=None, method="auto"):
+        self.calls.append(("dtmf", digits, pid, method))
+        return True
     def list_video_devices(self): return []
     def list_audio_devices(self): return []
     def set_video_device(self, dev): return True
@@ -127,6 +135,51 @@ def test_http_404_and_bad_json():
             assert exc.code == 404
         else:
             raise AssertionError("ожидали 404")
+    finally:
+        srv.stop()
+
+
+def test_api_chat_history_is_list():
+    """Регрессия: GET /api/chat отдавал 500.
+
+    `SipEngine.chat_history` — @property, а веб-слой вызывал его как метод
+    (`engine.chat_history()` -> TypeError: 'list' object is not callable).
+    Фейки в тестах объявляли метод, поэтому баг жил только в бою.
+    """
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        status, body = _get(base + "/api/chat")
+        assert status == 200
+        assert body["messages"] == []
+    finally:
+        srv.stop()
+
+
+def test_api_dtmf_send_and_history():
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        status, body = _post(base + "/api/dtmf", {"digits": "#1234"})
+        assert status == 200 and body["ok"] is True
+        assert ("dtmf", "#1234", None, "auto") in srv._engine.calls
+        status, body = _get(base + "/api/dtmf")
+        assert status == 200
+        assert body["events"] == [{"digits": "12#", "direction": "in"}]
+    finally:
+        srv.stop()
+
+
+def test_api_dtmf_requires_digits():
+    srv = _server()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        try:
+            _post(base + "/api/dtmf", {"digits": "  "})
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+        else:
+            raise AssertionError("ожидали 400 на пустые тоны")
     finally:
         srv.stop()
 

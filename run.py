@@ -52,10 +52,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--listen", help="адрес приёма вызовов, напр. 0.0.0.0:5060")
     p.add_argument("--display-name", help="имя комнаты/дисплея")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"], help="SIP-транспорт")
+    p.add_argument("--domain", metavar="ДОМЕН",
+                   help="домен/адрес МСУ, который набирают терминалы "
+                        "(по умолчанию — вызов по IP)")
+    p.add_argument("--sip-user", metavar="USER",
+                   help="SIP-user МСУ (номер зала); по умолчанию — имя комнаты")
+    p.add_argument("--srtp", choices=["off", "optional", "mandatory"],
+                   help="шифрование медиа; по умолчанию off (закрытый контур)")
+    p.add_argument("--codec-profile", choices=["max_compat", "wideband", "g711_only"],
+                   help="набор кодеков (max_compat = максимум совместимости)")
     p.add_argument(
         "--protocol", "--proto", choices=["auto", "sip", "h323", "h323_native"], default=None,
         help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
     )
+    p.add_argument("--register", metavar="URI",
+                   help="регистратор, напр. sip:voip.corp:5060 (без него MCU "
+                        "отвечает только на прямые вызовы по IP)")
+    p.add_argument("--reg-user", help="имя абонента/номер зала для регистрации")
+    p.add_argument("--reg-password",
+                   help="пароль абонента (надёжнее env MCU_REG_PASSWORD — в "
+                        "cmdline его видно через ps)")
+    p.add_argument("--reg-domain",
+                   help="домен для SIP-URI (по умолчанию хост регистратора)")
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--h323-socket", help="unix-сокет C++-хоста mcu_h323d (Вариант B, ADR-0002)")
@@ -209,10 +227,32 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["room"]["name"] = args.display_name
     if args.transport:
         config.raw["sip"]["transport"] = args.transport
+    # --- Адрес МСУ и совместимость: CLI важнее конфига ---------------------
+    if args.domain is not None or args.sip_user is not None:
+        config.set_sip_address(domain=args.domain, user=args.sip_user)
+    if args.srtp:
+        config.set_srtp(args.srtp)
+    if args.codec_profile:
+        config.set_codec_profile(args.codec_profile)
     if args.null_audio:
         config.raw["sip"]["null_audio"] = True
     if args.auto_answer is not None:
         config.raw["sip"]["auto_answer"] = bool(args.auto_answer)
+    # --- Регистрация на регистраторе: CLI важнее конфига -------------------
+    # Пароль можно взять из окружения: в shell-истории и в cmdline (его видно
+    # через ps) он светился бы всем, кто залогинен на сервере МСУ.
+    if args.register or args.reg_user or args.reg_password:
+        reg = config.raw["sip"].setdefault("registration", {})
+        if args.register:
+            reg["registrar"] = args.register
+        if args.reg_user:
+            reg["username"] = args.reg_user
+        password = args.reg_password or os.environ.get("MCU_REG_PASSWORD", "")
+        if password:
+            reg["password"] = password
+        if args.reg_domain:
+            reg["domain"] = args.reg_domain
+        reg["enabled"] = True
     if args.h323:
         config.raw["h323"]["enabled"] = True
     if args.h323_port:
@@ -251,10 +291,18 @@ def main(argv: list[str] | None = None) -> int:
         # Работает, только если собран H323Plus; иначе start() вернёт False
         # и приём H.323 останется выключенным (SIP продолжает работать).
         h323_socket = getattr(args, "h323_socket", None) or DEFAULT_SOCKET
+        # ВАЖНО: передаём РЕЕСТР движка, а не engine.room. Комната у движка
+        # появляется только в engine.start() (_create_room), а этот код
+        # выполняется раньше — room тут ещё None, и приём H.323 падал бы на
+        # первом входящем вызове. Реестр живёт с момента __init__ и отдаёт
+        # актуальную комнату, плюс в нём единый счётчик id на обе линии.
         h323_native = H323Endpoint(
-            engine.room, engine.events, config, port=config.h323_port,
-            socket_path=h323_socket,
+            None, engine.events, config, port=config.h323_port,
+            socket_path=h323_socket, registry=engine.registry,
         )
+        # Чтобы accept/reject/hangup из UI/web доезжали до H.323-хоста
+        # (у этих участников нет pjsua2-объекта, CallService их не видит).
+        engine.set_h323_native(h323_native)
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         report_fatal("Ошибка инициализации движка (SIP/медиа).")

@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 
 ASTERISK_URI = "sip:600@127.0.0.1:15080"
 TIMEOUT_S = 15
@@ -41,7 +41,9 @@ def main() -> int:
     events: list[tuple[str, dict]] = []
     engine.events.subscribe(lambda e, p: events.append((e, dict(p))))
     engine.start()
-    time.sleep(2)
+    # Все ожидания — только через pump: PJSIP поднят с threadCnt=0 и без
+    # libHandleEvents() не разбирает ни INVITE, ни ответы, ни медиа.
+    pump(engine, 2)
 
     call_id = engine.call(ASTERISK_URI)
     if call_id is None:
@@ -50,16 +52,17 @@ def main() -> int:
         return 1
     print(f"[i] исходящий вызов id={call_id} -> {ASTERISK_URI}")
 
-    confirmed = False
-    for _ in range(TIMEOUT_S):
-        time.sleep(1)
+    def _confirmed() -> bool:
         if any(e == "call.confirmed" for e, _ in events) or any(
             e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events
         ):
-            confirmed = True
-            break
-        if engine._get_participant(call_id) is None:
-            break
+            return True
+        return engine._get_participant(call_id) is None
+
+    pump(engine, TIMEOUT_S, lambda: _confirmed())
+    confirmed = any(e == "call.confirmed" for e, _ in events) or any(
+        e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events
+    )
 
     engine.stop()
 

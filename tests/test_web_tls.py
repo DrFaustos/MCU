@@ -52,6 +52,7 @@ class _FakeEngine:
     def recording_file(self):
         return None
 
+    @property
     def chat_history(self):
         return []
 

@@ -20,7 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .audio_mixer import AudioMixer, MixerConfig, MixStrategy
+from .audio_mixer import (LEVEL_STALE_MS_DEFAULT, AudioMixer, LevelsIndicator,
+                          MixerConfig, MixStrategy, ParticipantId)
 from .log import get_logger
 
 try:  # numpy есть в зависимостях; при отсутствии — деградация.
@@ -44,6 +45,12 @@ class ConferenceParticipant:
     video_frames: int = 0
     audio_frames: int = 0
     state: str = "connected"
+    #: Громкость в процентах (0..100) и признак «говорит». Выставляет их
+    #: :meth:`AudioMixSession.tick` — единственный, кто видит PCM браузеров.
+    #: До 2026-10-10 полей не было вовсе, и панель держала для браузеров
+    #: константу ``speaking: false``.
+    volume_level: int = 0
+    is_speaking: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +64,8 @@ class ConferenceParticipant:
             "audio_frames": self.audio_frames,
             "state": self.state,
             "kind": "web",
+            "volume_level": self.volume_level,
+            "speaking": self.is_speaking,
         }
 
 
@@ -179,8 +188,14 @@ class MediaBus:
             return sorted(set(self._video) | set(self._audio))
 
 
-def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> bytes:
-    """Привести PCM s16 к моно и целевой частоте (numpy). Без numpy — как есть."""
+def resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> bytes:
+    """Привести PCM s16 к моно и целевой частоте (numpy). Без numpy — как есть.
+
+    Функция публичная: её зовёт :mod:`mcuclient.h323_audio_bridge`, чтобы свести
+    в один микс каналы разной частоты (G.711 — 8 кГц, G.722 — 16 кГц). Вторую
+    копию реземплера держать нельзя: починка уехала бы только в одну из них
+    (см. tests/test_resample_fallback.py — пустой ответ без numpy чинили здесь).
+    """
     if not pcm:
         return b""
     if _np is None:
@@ -214,7 +229,12 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
             return out.tobytes()
         return arr.tobytes() if channels == 1 else arr.tobytes()
     try:
-        arr = _np.frombuffer(pcm, dtype=_np.int16)
+        # Нечётный хвост отрезается ровно как в pure-Python ветке выше: иначе
+        # один усечённый кадр превращался в МОЛЧАЛИВУЮ тишину только на машине
+        # с numpy — поведение двух веток расходилось (проверено 2026-10-10:
+        # resample_mono(3 байта, 8000->16000) давало b'').
+        arr = _np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)],
+                             dtype=_np.int16)
     except Exception:  # noqa: BLE001
         return b""
     if channels > 1 and len(arr) % channels == 0:
@@ -227,6 +247,10 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
         dst = _np.linspace(0.0, len(arr) - 1.0, n)
         arr = _np.interp(dst, src, arr.astype(_np.float64))
     return _np.clip(arr, -32768, 32767).astype(_np.int16).tobytes()
+
+
+#: Совместимость: тесты и внутренние вызовы обращаются по прежнему имени.
+_resample_mono = resample_mono
 
 
 def _fit_frame(pcm: bytes, frame_bytes: int) -> bytes:
@@ -252,7 +276,9 @@ class AudioMixSession:
 
     def __init__(self, bus: MediaBus, recipients=None, sample_rate: int = 48000,
                  frame_ms: int = 20, strategy: str = "average",
-                 mixer: Optional[AudioMixer] = None, on_mix=None) -> None:
+                 mixer: Optional[AudioMixer] = None, on_mix=None,
+                 conference: Optional[Conference] = None,
+                 level_stale_ms: float = LEVEL_STALE_MS_DEFAULT) -> None:
         self._bus = bus
         self._recipients = recipients  # callable -> list[str] | None
         self._rate = int(sample_rate)
@@ -273,6 +299,13 @@ class AudioMixSession:
         self._stop = threading.Event()
         # Колбэк общего микса: (pcm, rate, channels) — например, мост в SIP.
         self._on_mix = on_mix
+        # Индикатор «говорит»: реестр веб-участников, которому раздаются
+        # уровни (создаётся раньше микшера), и сам индикатор — тот же
+        # затухающий, что в H.323-мосту.
+        self._conference = conference
+        self._indicator = LevelsIndicator(level_stale_ms)
+        # pid -> версия последнего учтённого аудио-кадра шины.
+        self._last_audio_ver: Dict[str, int] = {}
 
     # -- параметры ---------------------------------------------------------
     @property
@@ -309,20 +342,79 @@ class AudioMixSession:
             self._stop.wait(max(0.005, interval))
 
     # -- публичный API -----------------------------------------------------
-    def tick(self) -> int:
-        """Один цикл микширования. Возвращает номер версии микса."""
+    def tick(self, now: Optional[float] = None) -> int:
+        """Один цикл микширования. Возвращает номер версии микса.
+
+        ``now`` — снимок времени тика (по умолчанию ``time.monotonic()``).
+        Время берётся ОДИН раз на тик и передаётся всем, кто считает живость:
+        у подсветки и у микса не может быть двух независимых часов. Параметр
+        наружу нужен, чтобы затухание мёртвого канала проверялось детерми-
+        нированно, без ``time.sleep`` на величину порога.
+        """
         publishers = list(self._bus.publishers())
+        moment = time.monotonic() if now is None else float(now)
+        # «Свежий» = версия аудио выросла с прошлого тика: только новый кадр
+        # отмечает живость публикации. По последнему кадру шины гореть нельзя —
+        # MediaBus держит его до самого drop(), т.е. до выхода из конференции.
+        fresh: Dict[ParticipantId, bool] = {}
         for pid in publishers:
             item = self._bus.latest_audio(pid)
             if item is None:
+                fresh[pid] = False
                 continue
+            ver = self._bus.audio_version(pid)
+            fresh[pid] = self._last_audio_ver.get(pid) != ver
+            self._last_audio_ver[pid] = ver
+            if not fresh[pid]:
+                # Нового кадра нет. Буфер не перечитываем и сразу не глушим:
+                # публикация и тик идут одним шагом (20 мс) и законно
+                # разъезжаются по фазе — живой поток обязан переживать тик
+                # без нового кадра (инвариант
+                # `test_living_stream_does_not_blink_between_ticks`).
+                continue
+            # Живость отмечается ДО уборки: у подсветки и у микса один штамп
+            # на один тик. Своего второго счётчика времени у микшера нет
+            # именно поэтому — иначе «говорит» и слышимый голос разъезжаются.
+            self._indicator.mark(pid, moment)
             pcm, rate, channels = item
             mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
             self._mixer.set_buffer(pid, mono)
-        # Убрать из микшера тех, кто больше не публикует.
-        for pid in list(self._mixer.participant_ids):
+        # Убрать из микшера тех, кто больше не публикует, и тех, чей поток
+        # встал. Имя переменной отличается от цикла выше: participant_ids
+        # микшера — ParticipantId (Union[int, str]), publishers — List[str],
+        # и mypy отвергал повторное присваивание pid другого типа.
+        #
+        # Затухание обязано жить здесь, а не в MediaBus: у мёртвого источника
+        # события «поток иссяк» не бывает в природе (терминал положил трубку —
+        # UDP молчит, RTP-мост никто не останавливает), а шина держит послед-
+        # ний кадр до самого drop(). Замерено пробой боевым путём ДО правки:
+        # индикатор гас по порогу, а общий микс спустя 1.5 с всё ещё давал
+        # амплитуду 3000 — залипший кадр суммировался в микс ВСЕХ участников
+        # бессрочно. Порог тот же, что гасит подсветку (LEVEL_STALE_MS).
+        for buffered in list(self._mixer.participant_ids):
+            if buffered not in publishers:
+                self._mixer.remove(buffered)
+                self._indicator.forget(buffered)
+            elif self._indicator.is_stale(buffered, moment):
+                self._mixer.remove(buffered)
+                self._indicator.forget(buffered)
+        for pid in list(self._last_audio_ver):
             if pid not in publishers:
-                self._mixer.remove(pid)
+                del self._last_audio_ver[pid]
+        # Индикатор обновляется ПОСЛЕ очистки микшера: removed-публикатор
+        # обязан получить явный ноль, а не последний RMS. forget() выше этому
+        # только помогает: затухнувший канал уходит из _last_mark, и update
+        # считает ему 0, а не громкость последнего кадра.
+        conference = self._conference
+        # Право быть докладчиком — только у тех, у кого есть тайл. Служебный
+        # канал SIP (суммарный PCM терминалов) в миксе остаётся и считается,
+        # но светиться вместо браузера не имеет права.
+        self._indicator.update(
+            self._mixer, fresh, now=moment,
+            eligible=None if conference is None else conference.participant_ids())
+        if conference is not None:
+            conference.update_levels(self._indicator.levels,
+                                     self._indicator.speaker)
 
         recipients = self._recipients
         if callable(recipients):
@@ -351,6 +443,19 @@ class AudioMixSession:
                 log.debug("on_mix упал", exc_info=True)
         return seq
 
+    # -- индикатор «говорит» -------------------------------------------------
+    def levels(self) -> Dict[str, int]:
+        """Уровни последнего тика в процентах (0..100) по id публикации.
+
+        Копия: внутренний словарь индикатора не должен раздаваться наружу —
+        вызывающий, изменив его, молча испортил бы следующий расчёт.
+        """
+        return dict(self._indicator.levels)
+
+    def active_speaker(self) -> Optional[str]:
+        """Публикатор, громчайший на последнем тике; None — тишина у всех."""
+        return self._indicator.speaker
+
     def record_mix(self):
         """Общий микс для записи: (seq, pcm) или None (все голоса)."""
         result = self._mixer.mix()
@@ -358,13 +463,26 @@ class AudioMixSession:
         with self._lock:
             return (self._seq, pcm)
 
+    def mix_excluding(self, publisher: str) -> bytes:
+        """Микс всех, КРОМЕ одного публикатора (20 мс, моно, sample_rate).
+
+        Нужно мосту в SIP: терминал не должен получать обратно собственный
+        голос. :meth:`record_mix` отдаёт микс со всеми, здесь — вычитаем
+        конкретного публикатора из шины (SIP идёт под фиксированным id).
+        """
+        result = self._mixer.mix_for(publisher)
+        return _fit_frame(result.pcm, self._frame_bytes)
+
     def mixed_for(self, recipient: str):
         """Последний микс для получателя: (seq, pcm) или None."""
         with self._lock:
             return self._mixed.get(recipient)
 
     def active_publishers(self) -> List[str]:
-        return list(self._mixer.participant_ids)
+        # В этом микшере живут только веб-публикаторы (str-id), но тип id у
+        # микшера шире: SIP/H.323-слой и mcu_core зовут его числами. Сужаем
+        # явно, а не кастом — чужой int-id сюда физически не попадает.
+        return [pid for pid in self._mixer.participant_ids if isinstance(pid, str)]
 
 
 class Conference:
@@ -393,6 +511,17 @@ class Conference:
     def get(self, pid: str) -> Optional[ConferenceParticipant]:
         with self._lock:
             return self._participants.get(pid)
+
+    def participant_ids(self) -> List[str]:
+        """Id участников реестра — тех, у кого есть тайл.
+
+        Микшер отдаёт это в ``LevelsIndicator.update(eligible=...)``. Канал
+        шины и участник конференции — РАЗНЫЕ вещи: мост SIP<->веб льёт
+        суммарный PCM терминалов под служебным id, тайла у которого нет. Без
+        ограничения такой канал перехватывал подсветку у всех браузеров.
+        """
+        with self._lock:
+            return list(self._participants)
 
     def leave(self, pid: str) -> bool:
         with self._lock:
@@ -436,6 +565,32 @@ class Conference:
                 p.video_frames += 1
             else:
                 p.audio_frames += 1
+
+    def update_levels(self, levels: Dict[str, int],
+                      speaker: Optional[str] = None) -> int:
+        """Выставить веб-участникам громкость и признак «говорит».
+
+        Продюсер — :meth:`AudioMixSession.tick` (он единственный видит PCM
+        браузеров), потребитель — веб-панель через :meth:`participants`.
+        Без этой связки тайл браузера подсвечивался бы «говорит» никогда.
+
+        ``on_change`` не зовётся: тик идёт каждые 20 мс, а панель опрашивает
+        статус сама — поднимать на уровни событие смены списка участников
+        значит заваливать подписчиков. Возвращает число изменённых участников.
+        """
+        changed = 0
+        with self._lock:
+            for pid, p in self._participants.items():
+                try:
+                    pct = int(levels.get(pid, 0) or 0)
+                except (TypeError, ValueError):
+                    pct = 0
+                speaking = speaker is not None and pid == speaker
+                if p.volume_level != pct or p.is_speaking != speaking:
+                    p.volume_level = pct
+                    p.is_speaking = speaking
+                    changed += 1
+        return changed
 
     def participants(self) -> List[Dict[str, Any]]:
         with self._lock:

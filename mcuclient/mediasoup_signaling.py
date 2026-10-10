@@ -95,31 +95,38 @@ class MediasoupSignaling:
         with self._lock:
             already = self._participants.get(pid)
         if already is not None:
+            # Отдаём ПОЛНЫЙ набор параметров, а не только id. Собранный
+            # mcuclient/webui/mediasoup-client.js в createTransport валидирует
+            # typeof iceParameters/iceCandidates/dtlsParameters === 'object' и
+            # бросает TypeError "missing iceParameters". msReconnect() гасит
+            # локальные транспорты и зовёт join повторно — на reused-ответе с
+            # одним id переподключение падало молча (вызов в catch).
+            transport = dict(already.get("transport")
+                             or {"id": already["transport_id"]})
             return {"roomId": room_id, "rtpCapabilities": self.rtp_capabilities(),
-                    "transport": {"id": already["transport_id"]}, "reused": True}
+                    "transport": transport, "reused": True}
         try:
             tr = self._client.create_webrtc_transport(room_id)
         except MediasoupError as exc:
             raise SignalingError(f"Не удалось создать транспорт: {exc}") from exc
         transport_id = str(tr.get("transportId"))
+        transport = {
+            "id": transport_id,
+            "iceParameters": tr.get("iceParameters"),
+            "iceCandidates": tr.get("iceCandidates"),
+            "dtlsParameters": tr.get("dtlsParameters"),
+            "sctpParameters": tr.get("sctpParameters"),
+        }
         with self._lock:
             self._participants[pid] = {
                 "transport_id": transport_id,
+                # Параметры нужны для reused-ответа (см. выше).
+                "transport": dict(transport),
                 "consumers": {},
                 "producing": {},
             }
-        return {
-            "roomId": room_id,
-            "rtpCapabilities": self.rtp_capabilities(),
-            "transport": {
-                "id": transport_id,
-                "iceParameters": tr.get("iceParameters"),
-                "iceCandidates": tr.get("iceCandidates"),
-                "dtlsParameters": tr.get("dtlsParameters"),
-                "sctpParameters": tr.get("sctpParameters"),
-            },
-            "reused": False,
-        }
+        return {"roomId": room_id, "rtpCapabilities": self.rtp_capabilities(),
+                "transport": transport, "reused": False}
 
     def leave(self, pid: str) -> bool:
         with self._lock:
@@ -128,7 +135,63 @@ class MediasoupSignaling:
                 return False
             for producer_id in list(data["producing"].keys()):
                 self._producers.pop(producer_id, None)
+        self._close_transport(self._room_id, data.get("transport_id"))
         return True
+
+    def close(self) -> None:
+        """Освободить на сайдкаре ВСЁ: транспорты участников и комнату.
+
+        Идемпотентен; вызывается из ``WebSession.close()``. Без него комната и
+        WebRtcTransport'ы переживают перезапуск панели: ``WebServer.restart()``
+        поднимает новую WebSession с новой комнатой, а старая живёт в том же
+        процессе сайдкара до его смерти.
+        """
+        with self._lock:
+            participants = list(self._participants.values())
+            room_id = self._room_id
+            self._participants.clear()
+            self._producers.clear()
+            self._room_id = None
+            self._rtp_capabilities = None
+        if room_id is None:
+            return
+        room_closed = False
+        close_room = getattr(self._client, "close_room", None)
+        if callable(close_room):
+            try:
+                close_room(room_id)
+                room_closed = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("mediasoup: комната %s не закрылась (%s), закрываю транспорты",
+                            room_id, exc)
+        if not room_closed:
+            # Комната не закрыта — её транспорты останутся держать UDP+TCP-порты
+            # из rtc_min..rtc_max. Точечное закрытие хуже комнаты, но лучше
+            # ничего; сам отказ логируем выше, а не глотаем молча.
+            for data in participants:
+                self._close_transport(room_id, data.get("transport_id"))
+
+    def _close_transport(self, room_id: Optional[str],
+                        transport_id: Optional[str]) -> None:
+        """Закрыть один WebRtcTransport на сайдкаре, не глотая отказ молча.
+
+        Без вызова «вышел» означало только «Python забыл»: для mediasoup
+        транспорт живёт дальше и держит пару UDP+TCP портов из
+        rtc_min..rtc_max, пока не закрыта комната. Замерено живьём (Node +
+        C++ worker, 6 циклов join()/leave() одной комнаты): transports 0 -> 6,
+        после leave не освобождён ни один. Исключение НЕ выпускаем наружу:
+        leave() дёргается из HTTP-обработчика, close() — из WebSession.close(),
+        и брошенное исключение потеряло бы остальную уборку.
+        """
+        if room_id is None or not transport_id:
+            return
+        close_transport = getattr(self._client, "close_transport", None)
+        if not callable(close_transport):
+            return
+        try:
+            close_transport(room_id, transport_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mediasoup: транспорт %s не закрылся (%s)", transport_id, exc)
 
     def _require(self, pid: str) -> Dict[str, Any]:
         with self._lock:

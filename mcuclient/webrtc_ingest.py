@@ -122,7 +122,26 @@ class _MediaRelay:
         # зрители (fan-out). publish_id — id участника конференции.
         self._bus = bus
         self._publish_id = publish_id or info.id
+        # Сколько кадров ушло в шину: по нему закрытие сессии решает, убирать
+        # ли канал. Зритель (viewer) в шину не льёт ничего — его «канал»
+        # трогать нельзя: под тем же id может публиковать живая сессия.
+        self._bus_frames = 0
         self._tasks: List[asyncio.Task] = []
+
+    @property
+    def publish_id(self) -> str:
+        """Канал шины, в который этот ретранслятор пишет свои кадры."""
+        return self._publish_id
+
+    @property
+    def role(self) -> str:
+        """Роль сессии-владельца канала: ``publish`` или ``viewer``."""
+        return getattr(self._info, "role", None) or "publish"
+
+    @property
+    def published_to_bus(self) -> bool:
+        """Ушёл ли в шину хотя бы один кадр (значит канал мог создаться)."""
+        return self._bus_frames > 0
 
     def attach(self, track: Any) -> None:
         kind = getattr(track, "kind", "") or ""
@@ -158,6 +177,7 @@ class _MediaRelay:
         # 2) шина медиа -> зрители (fan-out).
         if self._bus is not None:
             self._bus.publish_video(self._publish_id, rgb, width, height)
+            self._bus_frames += 1
 
     def _emit_audio(self, frame: Any) -> None:
         pcm, rate, channels = _audio_pcm(frame)
@@ -166,6 +186,7 @@ class _MediaRelay:
             sink.on_audio_pcm(pcm, rate, channels)
         if self._bus is not None:
             self._bus.publish_audio(self._publish_id, pcm, rate, channels)
+            self._bus_frames += 1
 
     async def close(self) -> None:
         for task in self._tasks:
@@ -278,7 +299,15 @@ class WebRTCManager:
                             participant: Optional[str] = None) -> Dict[str, Any]:
         mod = self._aiortc
         self._counter += 1
-        sid = f"web-{self._counter}"
+        # Id СЕССИИ живёт в ОТДЕЛЬНОМ пространстве имён от id УЧАСТНИКА
+        # конференции (`Conference.join` тоже `web-<N>`, но со своим
+        # счётчиком). Иначе анонимный offer — а `participant` в контракте
+        # POST /api/webrtc/offer (docs/WEB_CONTROL.md) не обязателен — делает
+        # сид каналом шины, и он же есть канал живого участника. Замерено
+        # пробой боевым путём: join() и handle_offer() вернули `web-1`, PCM
+        # анонима лёг в канал участника, а conference.leave() снёс канал
+        # живой сессии (publishers() стал пустым при живом анониме).
+        sid = f"webrtc-{self._counter}"
         info = SessionInfo(id=sid)
         info.role = role
         pc = mod.RTCPeerConnection(self._pc_config())
@@ -408,6 +437,7 @@ class WebRTCManager:
             self._viewer_tracks.pop(sid, None)
         if relay is not None:
             await relay.close()
+            self._forget_bus_channel(relay)
         if pc is not None:
             try:
                 await pc.close()
@@ -415,6 +445,38 @@ class WebRTCManager:
                 pass
         if info is not None:
             info.state = "closed"
+
+    def _forget_bus_channel(self, relay: _MediaRelay) -> None:
+        """Убрать канал шины, который наполняла закрытая сессия.
+
+        ``MediaBus`` держит последний кадр до ``drop()``, а
+        ``AudioMixSession.tick()`` берёт состав публикаторов именно из шины.
+        Без уборки браузер, закрывший вкладку, остаётся в миксе всех
+        остальных бессрочно: его застывший кадр суммируется в каждый
+        следующий микс (замерено пробой: амплитуда 3000 до закрытия и 3000
+        после; ``publishers()`` — ['web-1'] при нуле живых сессий).
+
+        Канал принадлежит не сессии, а участнику: ``publish_id`` = id
+        конференции, и под ним могут стоять две живые сессии (публикация и
+        просмотр, два браузера одного человека). Убираем только когда под этим
+        id не публикует больше никто живой, иначе зритель, закрывший своё
+        окно, оглушил бы активного публикуемого участника.
+        """
+        if self._bus is None or not relay.published_to_bus:
+            return
+        pid = relay.publish_id
+        with self._lock:
+            others = [o for o in self._relays.values() if o is not relay]
+        for other in others:
+            if other.publish_id != pid:
+                continue
+            # Живая публикация под тем же id — канал остаётся.
+            if other.published_to_bus or other.role == "publish":
+                return
+        try:
+            self._bus.drop(pid)
+        except Exception:  # noqa: BLE001 — закрытие сессии не должно падать
+            log.debug("Уборка канала шины %s упала", pid, exc_info=True)
 
     def close_all(self) -> None:
         for sid in list(self._sessions.keys()):

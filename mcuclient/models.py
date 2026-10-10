@@ -39,8 +39,13 @@ class Participant:
     is_video: bool = True
     audio_codec: Optional[str] = None
     video_codec: Optional[str] = None
-    rx_bitrate_kbps: int = 0
-    tx_bitrate_kbps: int = 0
+    # Битрейт: None — «не измерено», 0 — «измерено и получилось ноль». Разница
+    # принципиальная: ноль наружу читается как «медиа нет» при активном звонке.
+    # Медиа-битрейт SIP-вызова в текущей сборке pjsua2 мерить нечем —
+    # rtcp.rxStat/txStat.bytes считают RTCP-канал (замер живьём: 1.5 кбит/с при
+    # G.711, который обязан давать ~64), поэтому False-измерение хуже None.
+    rx_bitrate_kbps: Optional[int] = None
+    tx_bitrate_kbps: Optional[int] = None
     is_muted: bool = False
     is_video_muted: bool = False
     is_speaking: bool = False
@@ -102,6 +107,19 @@ class EventBus:
     def subscribe(self, cb: EventCallback) -> None:
         with self._lock:
             self._subs.append(cb)
+
+    def unsubscribe(self, cb: EventCallback) -> None:
+        """Отписаться. Нужно владельцам временных подписок (мосты, панели).
+
+        Без этого подписчик переживает остановку движка и вызывается на
+        уже нерабочих объектах; повторная подписка того же колбэка давала бы
+        двойную обработку события.
+        """
+        with self._lock:
+            try:
+                self._subs.remove(cb)
+            except ValueError:
+                pass
 
     def emit(self, event: str, **payload: Any) -> None:
         # Диагностика: фиксируем КАЖДОЕ событие шины. Error-события —

@@ -76,6 +76,65 @@ def test_ice_servers_split_stun_and_turn():
     assert turn and turn[0]["username"] == "u" and turn[0]["credential"] == "p"
 
 
+def test_sip_stun_shared_with_web_ice_servers():
+    """Если STUN прописан только для SIP, web берёт тот же.
+
+    Раньше `sip.stun.server` и `features.web.ice_servers` были не связаны:
+    SIP-терминал через internet собирал кандидаты, а браузер в той же
+    комнате — нет.
+    """
+    raw = _deep_merge(DEFAULT_CONFIG, {
+        "sip": {"stun": {"server": "stun:stun.l.google.com:19302"}},
+    })
+    validate_config(raw)
+    from mcuclient.config import Config
+    assert Config(raw=raw).web_ice_servers == [
+        {"urls": ["stun:stun.l.google.com:19302"]}
+    ]
+
+
+def test_sip_stun_not_duplicated_in_web_ice_servers():
+    raw = _deep_merge(DEFAULT_CONFIG, {
+        "sip": {"stun": {"server": "stun.l.google.com:19302"}},
+        "features": {"web": {"ice_servers": ["stun:stun.l.google.com:19302"]}},
+    })
+    validate_config(raw)
+    from mcuclient.config import Config
+    assert Config(raw=raw).web_ice_servers == [
+        {"urls": ["stun:stun.l.google.com:19302"]}
+    ]
+
+
+def test_stun_server_property_strips_scheme():
+    from mcuclient.config import Config
+    raw = _deep_merge(DEFAULT_CONFIG, {
+        "sip": {"stun": {"server": "stun:stun.example.org:3478"}},
+    })
+    # В нативные поля pjsua2 отдаём host:port без схемы.
+    assert Config(raw=raw).stun_server == "stun.example.org:3478"
+
+
+def test_stun_server_with_scheme_passes_validation():
+    # README и документация pjsua2 пишут STUN-URI; валидатор раньше
+    # требовал голый host:port и отбивал оба варианта.
+    raw = _deep_merge(DEFAULT_CONFIG, {
+        "sip": {"stun": {"server": "stun:stun.l.google.com:19302"}},
+    })
+    validate_config(raw)
+
+
+def test_stun_server_without_port_rejected():
+    raw = _deep_merge(DEFAULT_CONFIG, {
+        "sip": {"stun": {"server": "stun:stun.l.google.com"}},
+    })
+    try:
+        validate_config(raw)
+    except ConfigError as exc:
+        assert "stun.server" in str(exc)
+    else:
+        raise AssertionError("ожидали ConfigError без порта")
+
+
 def test_ice_bad_scheme_rejected():
     raw = _deep_merge(DEFAULT_CONFIG, {"features": {"web": {
         "ice_servers": ["http://example.com"]}}})

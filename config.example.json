@@ -9,10 +9,31 @@
     "transport": "udp",
     "allowed_peers": [],
     "require_encryption": false,
+    "srtp": "",
+    "max_calls": 16,
     "auto_answer": true,
     "stun": {
       "server": "",
       "enable_ice": true
+    },
+    "nat": {
+      "public_address": "",
+      "turn_server": "",
+      "turn_user": "",
+      "turn_password": "",
+      "turn_transport": "udp",
+      "keep_alive_sec": 15,
+      "rewrite_contact": true,
+      "ice_trickle": "off",
+      "report_nat_type_in_sdp": 1
+    },
+    "interop": {
+      "prack": "off",
+      "session_timer": "optional",
+      "session_expires_sec": 1800,
+      "min_session_expires_sec": 900,
+      "hold_type": "rfc3264",
+      "rtcp_mux": "off"
     },
     "codecs": {
       "audio": [
@@ -37,6 +58,16 @@
         "VP8/90000",
         "VP9/90000"
       ]
+    },
+    "registration": {
+      "enabled": false,
+      "registrar": "",
+      "domain": "",
+      "username": "",
+      "password": "",
+      "expires_sec": 3600,
+      "proxies": [],
+      "retry_interval_sec": 60
     }
   },
   "media": {

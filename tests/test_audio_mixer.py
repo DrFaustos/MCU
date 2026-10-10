@@ -10,10 +10,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcuclient.audio_mixer import (  # noqa: E402
+    LEVEL_FULL_RMS,
+    LevelsIndicator,
     AudioMixer,
     MixerConfig,
     MixStrategy,
     rms_level,
+    rms_percent,
 )
 
 
@@ -173,3 +176,307 @@ def test_participant_ids_lists_all():
     m.set_buffer(5, _pcm([1]))
     m.set_buffer(7, _pcm([1]))
     assert sorted(m.participant_ids) == [5, 7]
+
+
+# --- Buffers of DIFFERENT length (ptime mismatch) ---------------------------
+# Разделение по времени кадра — норма: SIP-терминал шлёт 20 мс, веб-микс
+# собирается из 10 мс, тишина приходит коротким кадром. Раньше numpy-ветка
+# делала прямое `acc + arr` и падала ValueError (broadcast) посреди разговора.
+
+
+def test_mix_average_handles_unequal_buffer_lengths():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, _pcm([10000] * 160))   # 20 мс @ 8 кГц
+    mx.set_buffer(2, _pcm([20000] * 40))    # 5 мс  @ 8 кГц
+    res = mx.mix()
+    # Длинный буфер задаёт длину микса, короткий дополняется нулями.
+    assert len(res.pcm) == 160 * 2
+    out = _unpack(res.pcm)
+    assert out[0] > 0
+    # Хвост, где говорил только второй канал, не обязан быть нулём.
+    assert out[-1] != 0 or out[159] >= 0
+
+
+def test_mix_sum_clipped_handles_unequal_buffer_lengths():
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, _pcm([10000] * 160))
+    mx.set_buffer(2, _pcm([20000] * 80))
+    res = mx.mix()
+    assert len(res.pcm) == 160 * 2
+    assert _unpack(res.pcm)[0] == 30000
+
+
+def test_mix_unequal_lengths_without_numpy():
+    """Чистая Python-ветка обязана давать тот же результат, что и numpy."""
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, _pcm([1000, 2000, 3000, 4000]))
+    mx.set_buffer(2, _pcm([500, 500]))
+    expected = _unpack(mx.mix().pcm)
+    assert expected == [1500, 2500, 3000, 4000]
+
+    import mcuclient.audio_mixer as mod
+
+    saved = mod._np
+    mod._np = None
+    try:
+        mx2 = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+        mx2.set_buffer(1, _pcm([1000, 2000, 3000, 4000]))
+        mx2.set_buffer(2, _pcm([500, 500]))
+        assert _unpack(mx2.mix().pcm) == expected
+    finally:
+        mod._np = saved
+
+
+def test_mix_for_unequal_lengths_excludes_self():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, _pcm([1000] * 320))
+    mx.set_buffer(2, _pcm([9000] * 80))
+    res = mx.mix_for(1)
+    # Для первого участника — только второй канал, коротких хвостов нет.
+    assert len(res.pcm) == 80 * 2
+    assert _unpack(res.pcm)[0] == 9000
+
+
+# --- Truncated (odd-length) PCM ---------------------------------------------
+# Нечётное число байт — реальность: pcm.in, оборванный на середине семпла,
+# битая граница IPC, любой внешний вызывающий. До правки 2026-10-10
+# numpy.frombuffer и array.frombytes бросали на таком ValueError, и покалеченный
+# буфер, уже лежащий в микшере, ронял КАЖДЫЙ следующий кадр разговора
+# (rms_level) — комната молчала при «живых» вызовах.
+
+
+def test_rms_odd_length_drops_half_sample():
+    # Один целый семпл 1 и висячий байт: половинки семпла не существует.
+    assert rms_level(b"\x01\x00\x02") == 1.0
+
+
+def test_mix_truncated_buffer_does_not_raise():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, b"\x40\x00\x40\x00\x40")       # усечённый: [64, 64]
+    mx.set_buffer(2, _pcm([2000, 2000, 2000, 2000]))
+    res = mx.mix()                                   # без ValueError
+    assert _unpack(res.pcm)[0] == 1032               # (64 + 2000) / 2
+
+
+def test_mix_for_survives_truncated_other_buffer():
+    """Главный симптом: усечённый канал A не должен глушить собеседника B."""
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer("A", b"\x10\x00\x20")              # 3 байта
+    mx.set_buffer("B", _pcm([400] * 4))
+    res = mx.mix_for("B")                             # A говорит в канал B
+    assert _unpack(res.pcm) == [16]
+    assert res.active_channels == 1
+
+
+def test_mix_truncated_same_result_without_numpy():
+    """Обе ветки (с numpy и без) обязаны вести себя одинаково."""
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, b"\x10\x00\x20\x00\x30")         # усечённый: [16, 32]
+    mx.set_buffer(2, _pcm([1, 2, 3, 4]))
+    expected = _unpack(mx.mix().pcm)
+    assert expected == [17, 34, 3, 4]
+
+    import mcuclient.audio_mixer as mod
+
+    saved = mod._np
+    mod._np = None
+    try:
+        mx2 = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+        mx2.set_buffer(1, b"\x10\x00\x20\x00\x30")
+        mx2.set_buffer(2, _pcm([1, 2, 3, 4]))
+        assert _unpack(mx2.mix().pcm) == expected
+    finally:
+        mod._np = saved
+
+
+# --- rms_percent: единая шкала громкости для volume_level --------------------
+
+
+def test_rms_percent_silence_is_zero():
+    assert rms_percent(0.0) == 0
+    assert rms_percent(-10.0) == 0
+
+
+def test_rms_percent_is_proportional():
+    assert rms_percent(LEVEL_FULL_RMS / 2.0) == 50
+    assert rms_percent(LEVEL_FULL_RMS) == 100
+
+
+def test_rms_percent_caps_at_hundred():
+    # Речь громче калибровочного уровня не должна отдавать панели 140 %.
+    assert rms_percent(LEVEL_FULL_RMS * 4.0) == 100
+
+
+def test_rms_percent_zero_scale_is_zero():
+    assert rms_percent(1000.0, full_rms=0.0) == 0
+
+
+# --- channel_levels / active_speaker ------------------------------------------
+
+
+def test_channel_levels_returns_rms_of_every_cell():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([100] * 8))
+    mx.set_buffer(2, _pcm([0] * 8))
+    levels = mx.channel_levels()
+    assert abs(levels[1] - 100.0) < 0.01
+    assert levels[2] == 0.0
+
+
+def test_active_speaker_picks_loudest_active_cell():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([0] * 8))
+    mx.set_buffer(2, _pcm([500] * 8))
+    mx.set_buffer(3, _pcm([50] * 8))
+    assert mx.active_speaker() == 2
+
+
+def test_active_speaker_none_when_everyone_silent():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([0] * 8))
+    assert mx.active_speaker() is None
+
+
+def test_active_speaker_uses_given_snapshot_not_buffers():
+    """Индикатор «говорит» отдаёт устаревшие каналы нулём и обязан выбирать
+    докладчика по уже очищенному снимку, а не по буферам.
+
+    Иначе флаг оставался бы на том, кто говорил первым: ячейка микшера живёт
+    до remove(), а уровень в ней — с прошлого кадра.
+    """
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([500] * 8))
+    mx.set_buffer(2, _pcm([0] * 8))
+    assert mx.active_speaker({1: 0.0, 2: 900.0}) == 2
+    assert mx.active_speaker({1: 0.0, 2: 0.0}) is None
+
+
+# --- LevelsIndicator: общее затухание для двух продюсеров --------------------
+
+
+def test_indicator_levels_are_percentages():
+    ind = LevelsIndicator()
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    levels = ind.update(mx)
+    assert levels[1] == 100
+    assert ind.speaker == 1
+
+
+def test_indicator_marks_channels_gone_from_mixer_as_zero():
+    """Ячейку сняли (мьют, выход, drop) — индикатор обязан погасить её сам.
+
+    Иначе «говорит» остаётся на том, кто замолчал: в микшере буфера уже нет,
+    а уровень в индикаторе всё ещё прошлый.
+    """
+    ind = LevelsIndicator()
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.update(mx)
+    assert ind.levels[1] == 100
+
+    mx.remove(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0, "замолчавший канал обязан погаснуть, а не гореть"
+    assert ind.speaker is None
+
+
+def test_indicator_fades_a_channel_silent_past_the_threshold():
+    ind = LevelsIndicator(stale_ms=-1.0)   # любой штамп считается устаревшим
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0
+
+
+def test_indicator_fresh_flag_is_a_liveness_mark():
+    """`fresh` должен ОБНОВЛЯТЬ штамп живости, а не быть вторым механизмом гашения.
+
+    В веб-микшере времени на кадре нет вовсе, только версия шины. Если «свежий»
+    не отмечал бы живость, браузер светился бы «говорит» ровно один тик.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("a", _pcm([4000] * 8))
+    ind.update(mx, {"a": True})
+    assert ind.levels["a"] == 100
+
+    ind.update(mx, {"a": False})
+    assert ind.levels["a"] == 100, "в пределах окна живой канал не гаснет"
+
+    ind.stale_ms = -1.0
+    ind.update(mx, {"a": False})
+    assert ind.levels["a"] == 0
+
+
+def test_indicator_marks_only_the_fresh_channels():
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("a", _pcm([4000] * 8))
+    mx.set_buffer("b", _pcm([4000] * 8))
+    ind.update(mx, {"a": True, "b": False})
+    assert (ind.levels["a"], ind.levels["b"]) == (100, 0)
+
+
+def test_indicator_forget_drops_the_stamp():
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.forget(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0, "забытый канал не должен гореть по старым штампам"
+
+
+# --- eligible: канал в миксе != канал, имеющий право быть докладчиком --------
+
+
+def test_indicator_eligible_limits_who_can_be_the_speaker():
+    """Служебный канал обязан Mixing'оваться, но не иметь права светиться.
+
+    Мост SIP<->веб льёт суммарный PCM всех терминалов в шину под одним
+    служебным id. У него нет тайла, а значит и докладчиком он быть не может:
+    без ограничения он перебивает браузеров громкостью и гасит подсветку У
+    ВСЕХ, потому что id служебного канала consumers не знают.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))     # терминал громче всех
+    mx.set_buffer("web-1", _pcm([1200] * 8))   # браузер, который реально поёт
+    ind.update(mx, {"sip": True, "web-1": True}, eligible={"web-1"})
+
+    assert ind.speaker == "web-1", f"служебный канал перехватил докладчика: {ind.speaker}"
+    assert ind.levels["sip"] == 75, "уровень служебного канала обязан считаться как обычно"
+    assert ind.levels["web-1"] == 30
+
+
+def test_indicator_eligible_without_any_loud_member_gives_none():
+    """Если среди имеющих право никого громче порога — докладчика нет.
+
+    «Докладчик = служебный канал» здесь был бы хуже тишины: панель показывала
+    бы подсветку на участнике, который молчит.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))
+    mx.set_buffer("web-1", _pcm([0] * 8))
+    ind.update(mx, {"sip": True, "web-1": True}, eligible={"web-1"})
+    assert ind.speaker is None
+    assert ind.levels["sip"] == 75
+
+
+def test_indicator_eligible_none_keeps_the_old_choice():
+    """Без `eligible` поведение не меняется: выбирается любой громкий канал.
+
+    У H.323-моста каждый канал — это участник комнаты, ограничивать нечего, и
+    второй продюсер не обязан выдумывать множество, которого у него нет.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("sip", _pcm([3000] * 8))
+    mx.set_buffer("web-1", _pcm([1200] * 8))
+    ind.update(mx, {"sip": True, "web-1": True})
+    assert ind.speaker == "sip"

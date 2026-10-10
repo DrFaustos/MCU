@@ -31,17 +31,34 @@ def gstreamer_available() -> bool:
     return shutil.which("gst-launch-1.0") is not None
 
 
+# Элементы GStreamer, по которым судим о наличии H.323-поддержки.
+_H323_ELEMENTS = ("h323src", "h323sink", "openh323src")
+
+
 def h323_plugins_available() -> bool:
-    """Проверить наличие H.323-элементов в GStreamer."""
+    """Проверить наличие H.323-элементов в GStreamer.
+
+    Спрашиваем конкретные элементы по именам (gst-inspect возвращает код 0,
+    только если элемент реально есть). Раньше вызывали `gst-inspect-1.0` без
+    аргументов и искали подстроку "h323" в выводе — а это полный дамп реестра
+    (~80 КБ+ описаний всех плагинов), где подстрока легко встречается в
+    произвольном тексте. Ложное "H.323 готов" хуже честного "недоступен":
+    start() запускает пайплайн, который гарантированно падает.
+    """
     if not gstreamer_available():
         return False
-    try:
-        out = subprocess.run(
-            ["gst-inspect-1.0"], capture_output=True, text=True, timeout=5, check=False
-        ).stdout.lower()
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "h323" in out or "openh323" in out
+    for element in _H323_ELEMENTS:
+        try:
+            rc = subprocess.run(
+                ["gst-inspect-1.0", element],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=False,
+            ).returncode
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if rc == 0:
+            return True
+    return False
 
 
 @dataclass

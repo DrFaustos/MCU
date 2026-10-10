@@ -71,3 +71,17 @@ def test_event_bus_bad_handler_does_not_break_others():
     bus.subscribe(lambda event, payload: seen.append(event))
     bus.emit("x")
     assert seen == ["x"]
+
+
+def test_bitrate_defaults_mean_unmeasured():
+    """Битрейт участника по умолчанию — None («не измерено»), а не 0.
+
+    Ноль наружу читается оператором как «0 кбит/с», т.е. «медиа нет», при
+    активном звонке. Медиа-битрейт SIP-вызова в текущей сборке pjsua2
+    измерить нечем: rtcp.rxStat/txStat.bytes считают RTCP-канал (замер живьём:
+    1.5 кбит/с при G.711, который обязан давать ~64). Для «нет данных» обязан
+    быть None — как и для level в McuCore.on_audio.
+    """
+    p = Participant(id=1, remote_uri="sip:a@h")
+    assert p.rx_bitrate_kbps is None, "0 маскируется под измерение"
+    assert p.tx_bitrate_kbps is None, "0 маскируется под измерение"

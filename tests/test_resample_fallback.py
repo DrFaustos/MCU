@@ -45,6 +45,33 @@ def test_resample_same_rate_without_numpy():
         w._np = saved
 
 
+def test_resample_truncated_pcm_keeps_whole_samples():
+    """Усечённый кадр (нечётное число байт) — не пустота и не исключение.
+
+    Половинка int16-семпла не существует: её надо отрезать. До правки
+    2026-10-10 numpy-ветка ловила ValueError в frombuffer и возвращала b"",
+    т.е. один оборванный pcm.in превращался в молчаливую тишину ровно на той
+    машине, где numpy установлен, — и только там.
+    """
+    odd = struct.pack("<2h", 1000, -1000) + b"\x7f"      # 5 байт: 2 семпла + хвост
+    out = w._resample_mono(odd, 8000, 1, 48000)
+    assert out, "ресемпл усечённого кадра потерял звук (вернул пусто)"
+    assert len(out) % 2 == 0, "на выходе появилась половинка семпла"
+    assert len(out) // 2 == 12                           # 2 семпла @8к -> 12 @48к
+
+
+def test_resample_truncated_pcm_agrees_without_numpy():
+    """Обе ветки (с numpy и без) обязаны согласованно резать один и тот же хвост."""
+    odd = struct.pack("<3h", 500, -500, 700) + b"\x11"   # 7 байт
+    expected_len = len(w._resample_mono(odd, 8000, 1, 48000))
+    saved = w._np
+    w._np = None
+    try:
+        assert len(w._resample_mono(odd, 8000, 1, 48000)) == expected_len
+    finally:
+        w._np = saved
+
+
 def test_resample_stereo_to_mono_without_numpy():
     saved = w._np
     w._np = None

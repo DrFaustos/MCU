@@ -96,3 +96,22 @@ def test_visible_participants_ignores_non_confirmed():
     p.state = CallState.CONNECTING
     room.add(p)
     assert ls.visible_participants(room) == []
+
+
+def test_visible_participants_speaker_prefers_actual_speaker():
+    """Режим speaker ставит главным того, кто говорит, а не первого по списку.
+
+    Кейс закрывает контракт поля is_speaking: раньше его только читали, и
+    порядок в комнате решал, кто «главный». Продюсер флага — аудио-мост.
+    """
+    ls = _service()
+    ls.set_layout("speaker")
+    room = Room(name="r", auto_created=True)
+    first = Participant(id=1, remote_uri="sip:a@h")
+    first.state = CallState.CONFIRMED
+    talking = Participant(id=2, remote_uri="sip:b@h")
+    talking.state = CallState.CONFIRMED
+    talking.is_speaking = True
+    room.add(first)
+    room.add(talking)
+    assert ls.visible_participants(room) == [talking]

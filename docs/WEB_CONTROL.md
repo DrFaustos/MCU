@@ -74,7 +74,18 @@ SIP/H.323-движка (в GUI или в `--headless`) оно может под�
 
 ## 2. Что умеет страница
 
-* **Тайлы участников** с состоянием, мутами, признаком «говорит».
+* **Тайлы участников** с состоянием, мутами, признаком «говорит». Подсветку
+  выставляют: браузеры — `AudioMixSession` по их публикациям, H.323-терминалы —
+  `H323AudioBridge` по PCM хоста `mcu_h323d`. У **SIP-вызова продюсера уровней
+  нет**: `SipBridgeService` отдаёт PCM всех вызовов в один суммарный канал,
+  идентичность вызова через колбэк pjsua2-порта не проходит, поэтому SIP-тайл
+  всегда отдаёт `speaking: false` и `volume_level: 0`. Это не «мелкое
+  запаздывание», а незакрытая предпосылка: подсветку вернёт только измерение
+  уровня по вызову, а не по суммарному каналу. Поля приходят в `participants[]`
+  и `conference_participants[]` статуса как `speaking` и `volume_level`
+  (проценты 0..100). Тот самый суммарный SIP-канал в подсветке не участвует:
+  быть докладчиком он не может (тайла у него нет), но остаётся в миксе и его
+  уровень считается как у всех — браузеры обязаны слышать терминал.
 * **Исходящий вызов** по SIP URI/IP.
 * Принять / отклонить / сбросить вызов.
 * Мут звука/видео участника, «Заглушить всех», «Сбросить всех».
@@ -101,16 +112,24 @@ GET:
 
 | Путь | Ответ |
 |------|-------|
-| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version |
+| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
+| `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`) |
 | `/api/devices/video` | `{devices:[{id,name,driver}]}` |
 | `/api/devices/audio` | `{devices:[...]}` |
 | `/api/layouts` | `{layouts:[...]}` |
+| `/api/address` | адрес МСУ: `{uri, domain, host, host_source, port, dial_targets[], summary, ok, warnings[]}` — см. `docs/SIP_ADDRESSING.md` |
+| `/api/codecs` | `{audio:[...], video:[...]}` кодеки с приоритетом |
+| `/api/encryption` | `{srtp, web_tls, ...}` текущее шифрование |
 | `/api/events` | SSE-поток событий шины |
 | `/api/frame.png` | последний кадр источника, PNG (404, если кадров нет) |
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
 | `/api/video.mjpeg` | MJPEG-поток (501, если нет кодировщика JPEG) |
+| `/api/conference` | `{participants:[{id,name,kind,video,audio}], webrtc:bool}` — конференция и доступен ли WebRTC |
+| `/api/webrtc/sessions` | `{sessions:[...], webrtc:bool}` — живые WebRTC-сессии панели |
+| `/api/web_recording` | статус записи веб-конференции (`{recording, file?}`) |
+| `/api/mediasoup` | `{available, stats}` — состояние SFU-sidecar (`null`-статистика, если не поднят) |
 
 POST (тело — JSON):
 
@@ -125,6 +144,7 @@ POST (тело — JSON):
 | `/api/layout` | `{layout}` | сменить раскладку |
 | `/api/recording` | `{enabled?}` | запись вкл/выкл/toggle |
 | `/api/chat` | `{text, id?}` | сообщение всем или участнику |
+| `/api/dtmf` | `{digits, id?, method?}` | DTMF: участнику или всем (`id` не указывать); `method`: `auto`/`rfc2833`/`sip-info` |
 | `/api/camera` | `{enabled}` | камера вкл/выкл |
 | `/api/microphone` | `{enabled}` | микрофон вкл/выкл |
 | `/api/video_send` | `{enabled}` | передача видео в эфир |
@@ -132,6 +152,21 @@ POST (тело — JSON):
 | `/api/video_source` | `{kind, device?}` | источник: camera/screen/colorbar |
 | `/api/video_device` | `{device}` | выбрать камеру по id |
 | `/api/audio_device` | `{device}` | выбрать микрофон по id |
+| `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
+| `/api/codecs` | `{profile}` | профиль кодеков |
+| `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
+| `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
+| `/api/web_port` | `{port}` | порт web-панели |
+| `/api/webrtc/offer` | `{sdp, type?, role?, subscribe?, participant?}` | SDP-offer браузера: `role=publish` (по умолчанию) — ingest своих треков, `role=viewer` — подписка на чужие (`subscribe` — список id). `participant` — id участника из `/api/conference/join`: без него публикация идёт в собственный канал `webrtc-<N>` |
+| `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели; панель зовёт его при остановке публикации, отписке от участника и при закрытии вкладки — `sendBeacon`, токен в `?token=` |
+| `/api/web_recording` | `{enabled?}` | запись веб-конференции вкл/выкл/toggle (`WebRecorder`: кадры + аудио-микс) |
+| `/api/conference/join` | `{name, role?}` | войти в конференцию из браузера (`role`: participant/presenter) |
+| `/api/conference/leave` | `{id}` | выйти из конференции |
+| `/api/conference/rename` | `{id, name}` | переименовать участника |
+| `/api/conference/media` | `{id, video?, audio?}` | включить/выключить передачу медиа участнику |
+| `/api/mediasoup/join` | `{participant}` | войти в комнату SFU-sidecar (mediasoup) |
+| `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU; закрывает `WebRtcTransport` на сайдкаре (панель зовёт его и при закрытии вкладки — `sendBeacon`, токен в `?token=`) |
+| `/api/mediasoup/signal` | `{action, participant, ...}` | сигнализация SFU (`createWebRtcTransport`, `connect`, `publish`, `subscribe` и т.п.) |
 
 Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
 
@@ -224,11 +259,16 @@ POST (тело — JSON):
 
 API конференции: `GET /api/conference`, `POST /api/conference/join` (имя),
 `/leave`, `/rename`, `/media`. WebRTC: `POST /api/webrtc/offer` с
-`role=publish|viewer` и `subscribe=[id,...]` для зрителя.
+`role=publish|viewer` и `subscribe=[id,...]` для зрителя. Публикатору, который
+хочет, чтобы его голос был подписан на id участника, надо передать
+`participant` (id из `conference/join`): без него сессия получает собственный
+канал `webrtc-<N>` — он не совпадает с id участника и живёт отдельно от
+реестра конференции (сессия закрывается по `session`, участник — по `id`).
 
-Ограничения: **нет записи веб-потока**, лимит 64 веб-участника. Зрители
-получают и видео, и **аудио** других веб-участников (аудио-fan-out). TURN
-поддерживается (см. §7b). Полноценный SFU (симулкаст, джиттер-буферы) — дальше.
+Ограничения: нет **симулкаста** и джиттер-буферов (полноценный SFU — дальше),
+лимит 64 веб-участника. Запись веб-конференции есть (§9): `WebRecorder` пишет
+кадры `FrameHub` и аудио-микс `AudioMixSession`. Зрители получают и видео, и
+**аудио** других веб-участников (аудио-fan-out). TURN поддерживается (см. §7b).
 
 ### Оптимизации fan-out (latest-wins + общий кэш)
 
@@ -283,7 +323,7 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 и аудио-треки; аудио хранится как последний s16-кадр на шине.
 
 Ограничения ingest: это **приём** в MCU (раздача — через fan-out); для
-интернета/NAT настройте STUN/TURN (§7b); аудио **не микшируется** — каждый
+интернета/NAT настройте STUN/TURN (§7b); аудио **микшируется**: каждый
 зритель получает **один смешанный аудио-трек** (голоса всех, кроме
 себя) через `AudioMixSession`; видео — по треку на публикатора.
 
@@ -302,9 +342,42 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 
 * Включается в `features.web.mediasoup.enabled` (по умолчанию **выкл**);  при старте приложение поднимает сайдкар дочерним процессом  (`mcuclient/mediasoup_supervisor.py`) и общается с ним по HTTP  control API (`mcuclient/mediasoup_client.py`). Медиа идёт по RTP,  через API — только управление.
 * Требует **Node.js ≥ 20** и открытый диапазон UDP `rtc_min..rtc_max`  (по умолчанию 40000-40100); для интернета — `announced_ip` и TURN.
-* Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
+* Control API: `/health`, `/rooms`, `/rooms/close`, `/rooms/stats`, `/transports/webrtc|plain|close`, `/transports/connect`, `/produce`, `/produce/plain`, `/consume`, `/consumer/set-layers` (симулкаст), `/producer/request-keyframe`. Полный перечень и тела — в `mediasoup-sidecar/README.md`; таблица дока сверяется с кодом тестом `tests/test_sidecar_api_paths.py`.
+* **Закрыть один транспорт.** `POST /transports/close` обязаны вызывать каждый
+  отказ RTP-моста от уже созданного `PlainTransport` (`stop()` и откат
+  `produce_plain`). Без него транспорт освобождается только вместе с комнатой и
+  всё это время держит UDP-порт из `rtc_min..rtc_max` (по умолчанию
+  40000-40100 = 101 порт), а повторные попытки поднять мост накапливали бы их
+  до исчерпания диапазона.
+* **Отказ mediasoup ≠ «выключено».** При `enabled: true` и недоступном сайдкаре
+  `GET /api/status` отдаёт `mediasoup_rtp: {started: false, reason: ...}`, а не
+  `None` (`None` — только когда режим выключен оператором); те же тексты
+  доезжают в 503 ответов `/api/mediasoup/*`, поэтому браузер видит настоящую
+  причину, а не «не включён». Повторная попытка достучаться до сайдкара — не
+  чаще раза в 10 с: мост дёргается на каждый аудиокадр, и повтор без троттла
+  вылился бы в шторм запросов к control API.
 * **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
   cp .env.example .env && docker compose up -d --build` — см.
   `docker/sfu/README.md`.
 * Запуск/проверка сайдкара: `cd mediasoup-sidecar && npm install &&  npm run smoke`.
 * Это **дополнение**, а не замена: базовый `aiortc`-SFU (микс, запись,  мост SIP↔WebRTC) продолжает работать без Node.
+
+---
+
+## DTMF (тоны набора)
+
+Аппаратные терминалы и телефоны (Polycom, Yealink, ISDN-шлюзы) передают
+номер зала, PIN и сигналы IVR **только** DTMF, поэтому МСУ обязан их
+принимать и отправлять:
+
+* приём: `onDtmfDigit` / `onDtmfEvent` → событие `dtmf.digits`
+  (`digits`, `direction=in`, `participant_id`, `peer`, `method`) и в
+  историю, отдаётся `GET /api/dtmf`;
+* отправка: `POST /api/dtmf` или `engine.send_dtmf(digits, id=None)`.
+  Без `id` тоны идут всем активным вызовам — так правильно «набрать PIN
+  в IVR для всего зала».
+
+Метод по умолчанию `auto`: RFC 2833, при ошибке SIP INFO. Только
+RFC 2833 — и старый шлюз не услышит тоны; только SIP INFO — не услышит
+половину парка Polycom.
+
