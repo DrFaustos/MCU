@@ -376,6 +376,14 @@ class WebSession:
         except Exception:  # noqa: BLE001
             log.debug("Остановка RTP-моста с ошибкой", exc_info=True)
         try:
+            # Комната и браузерные транспорты живут в процессе сайдкара, а он
+            # переживает restart() панели. Без close() старая сессия оставляла
+            # комнату и WebRtcTransport'ы висеть до смерти всего сайдкара.
+            if self._ms_signaling:
+                self._ms_signaling.close()
+        except Exception:  # noqa: BLE001
+            log.debug("Закрытие mediasoup-сигналинга с ошибкой", exc_info=True)
+        try:
             self._rec_stop.set()
             self._web_recorder.stop()
         except Exception:  # noqa: BLE001

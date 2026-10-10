@@ -244,6 +244,22 @@
   `mediasoup-sidecar/src/server.js`, таблица `mediasoup-sidecar/README.md`.
   Сверяется `tests/test_sidecar_api_paths.py`: новое имя маршрута без правки
   сайдкара больше не даст тихого 404, а маршрут без строки в README краснеет.
+- **Выход браузера обязан освобождать сайдкар.** Убрать участника из
+  `_participants` в `leave()` — недостаточно: `WebRtcTransport` остаётся в
+  mediasoup и держит пару UDP+TCP портов из `rtc_min..rtc_max`, пока не закрыта
+  комната (а комната — до смерти процесса сайдкара). Закрытие идёт через
+  `close_transport`; `MediasoupSignaling.close()` (из `WebSession.close()`) закрывает
+  комнату, при отказе — её транспорты по id. Панель зовёт `/api/mediasoup/leave`:
+  явный выход — `api()`, `pagehide` — `sendBeacon` (токен в query `qs`, потому
+  что `sendBeacon` не даёт заголовок `Authorization`, а асинхронный `api()` при
+  выгрузке страницы не доживает до `fetch`). Маршрут без вызова из веба —
+  мёртвый код: ровно так `/api/mediasoup/leave` и жил до 2026-10-10.
+- **reused-ответ `join()` несёт полный ICE/DTLS.** Собранный
+  `webui/mediasoup-client.js` бросает `TypeError: missing iceParameters` в
+  `createTransport` (`iceCandidates` — массив, `iceParameters`/`dtlsParameters` —
+  объекты), а `msReconnect()` полагается на повторный `join`: с одним `id`
+  переподключение умирало внутри `catch`. Регрессия:
+  `tests/test_mediasoup_signaling.py::test_reused_join_returns_full_transport_params`.
 
 ## 3. Грабли и известные проблемы (важно!)
 

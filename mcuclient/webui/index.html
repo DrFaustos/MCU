@@ -225,6 +225,9 @@ $('joinName').addEventListener('keydown', e => { if (e.key === 'Enter') joinConf
 
 async function leaveConference() {
   try { if (me) await api('/conference/leave', 'POST', { id: me.id }); } catch (e) { /* ignore */ }
+  // Медиаосвобождение и на сайдкаре: rtcUnpublish гасит только aiortc-путь, а
+  // WebRtcTransport mediasoup живёт, пока его не закроет приложение.
+  if (window.msConference) { try { window.msConference.leave(false); } catch (e) { /* ignore */ } }
   await rtcUnpublish();
   Object.keys(viewerPCs).forEach(k => stopViewer(k));
   me = null; webParticipants = [];

@@ -165,7 +165,7 @@ POST (тело — JSON):
 | `/api/conference/rename` | `{id, name}` | переименовать участника |
 | `/api/conference/media` | `{id, video?, audio?}` | включить/выключить передачу медиа участнику |
 | `/api/mediasoup/join` | `{participant}` | войти в комнату SFU-sidecar (mediasoup) |
-| `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU |
+| `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU; закрывает `WebRtcTransport` на сайдкаре (панель зовёт его и при закрытии вкладки — `sendBeacon`, токен в `?token=`) |
 | `/api/mediasoup/signal` | `{action, participant, ...}` | сигнализация SFU (`createWebRtcTransport`, `connect`, `publish`, `subscribe` и т.п.) |
 
 Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
