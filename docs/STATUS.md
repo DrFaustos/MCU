@@ -79,6 +79,71 @@
 
 ## Журнал исправлений
 
+### 2026-10-10 — обязательная точка проверки теряла 75 тестов молча
+
+**Симптом.** Запущенная по docs/AI_CONTEXT.md §4 проверка
+`python3 tests/_runner.py` (интерпретатор агента — 3.14, `pytest` в нём нет)
+выглядела здоровой: `--collect-only` печатал **999 cases collected** и **RC=0**.
+pytest на том же дереве собирал **1074**. Потерю в 75 кейсов видно, только если
+снять списки кейсов и сравнить: в выводе раннера о ней нет ни слова, кроме трёх
+строк `ERROR import`, которые тонут в потоке.
+
+**Корневая причина — два слоя, и каждый молчалив сам по себе.**
+
+1. `tests/test_sip_interop.py:19`, `tests/test_sip_registration.py:21`,
+   `tests/test_stand_exit_codes.py:27` — `import pytest` на уровне модуля (из 103
+   тестовых файлов так делают четыре, четвёртый — сам страж раннера). На
+   интерпретаторе без pytest файл не импортируется ЦЕЛИКОМ: 22 + 46 + 7 кейсов
+   перестают существовать для обязательной точки проверки.
+2. `tests/_runner.py` в режиме `--collect-only` возвращал 0 безусловно:
+   `ERROR import <файл>` печатался, `failed` рос, а RC оставался зелёным. И тем
+   же интерпретатором без pytest возвращал «пропущено» единственный страж,
+   сверяющий покрытие, — `test_runner_covers_every_case_pytest_collects` сам себя
+   пропускал ровно там, где расхождение возможно. То есть проверка «ни один тест
+   не потерялся молча» не работала именно в среде, где потеря и происходила.
+
+**Правка.** `tests/_runner.py` при `ImportError` подставляет в `sys.modules` свой
+модуль `pytest` (`_install_pytest_stub`) с тем API, который тесты реально вызывают:
+`raises` (с `match=` и `.value`), `mark.parametrize`, `mark.skipif`, `mark.skip`,
+`skip()`, `importorskip()`, `Skipped`. Набор снят грепом по всем `tests/*.py`, а не
+«на всякий случай»: всё остальное бросает `NotImplementedError`, чтобы расширение
+было явным и вместе с тестом на него. Настоящий pytest приоритетнее всегда — stub
+ставится только по `ImportError`. `Skipped` обязан наследоваться от `BaseException`
+и называться именно так: раннер распознаёт пропуск по имени класса в цепочке баз.
+В `--collect-only` итог теперь `1 if failed else 0`.
+
+**Страж** — `tests/test_test_runner.py` (19 кейсов, было 15): проба с полным
+набором API при `sys.modules['pytest'] = None` (это даёт ImportError даже под
+интерпретатором, где pytest установлен, поэтому проверка одинакова на любой
+машине); сверка всего набора «с pytest» против «без pytest» — и по числу кейсов,
+и по отсутствию `ERROR import`; отдельно — что `--collect-only` на битом импорте
+возвращает 1; и граница самого стаба — `test_stub_refuses_unknown_pytest_api`:
+неизвестный `pytest.approx` или незнакомый `mark.` обязан дать
+`NotImplementedError`, а не тихую заглушку (без этой проверки стаб молча
+превращал бы не реализованный API в «зелёный» тест).
+
+Стаб реализован не `types.ModuleType`, а `_PytestStub` с `__getattr__`: у
+обычного модуля незнакомое имя дало бы `AttributeError`, неотличимый от
+«таков контракт». Реализуемые маркеры перечислены в `SUPPORTED_MARKS`.
+
+**RED (снят до правки).** Все три новые проверки красятся на старом раннере:
+stub-проба даёт `ERROR import`, сверка всего набора — те же три файла,
+`--collect-only` на `BROKEN_IMPORT` — `assert 0 == 1`.
+
+**Проверено.** `python3 tests/_runner.py` (без pytest) → exit=0, **1075 passed,
+0 failed, 3 skipped**, `ERROR import` = 0; `/usr/bin/python3 tests/_runner.py`
+(pytest 9.1.1) → exit=0, **1078 passed, 0 failed, 0 skipped**;
+`/usr/bin/python3 -m pytest tests/` → **1078 passed**; `--collect-only` с обеих
+сторон называет **1078**, расхождений по файлам нет (`diff` списков кейсов пуст).
+Три пропущенных кейса честные: они просят нативный `pjsua2`, которого в агентской
+среде нет. `ruff check . --select E,F,W --ignore E501` и
+`--select F821,F811,F841,E9` — «All checks passed» в обоих шагах, `mypy mcuclient`
+— 0 ошибок (ruff 0.16.10 и mypy 2.4.0 в изолированном venv: в этой машине их не
+было, а PEP 668 не даёт ставить их в системный python).
+
+Числа `tests/test_test_runner.py` (15 → 19) пересняты в docs/AI_CONTEXT.md и в
+базе знаний — их сверяет `test_cited_case_counts_match_the_runner`.
+
 ### 2026-10-09 — CI линтовал часть shell-скриптов: перечень отстал от дерева
 
 **Симптом.** Шаг `Shellcheck dev scripts (syntax)` в `.github/workflows/ci.yml`

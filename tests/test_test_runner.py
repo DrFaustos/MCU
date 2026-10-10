@@ -11,6 +11,9 @@
  987, и итог при этом выглядел зелёным.
 3. не знал фикстуру capsys: тесты стендовых кодов возврата падали с
  TypeError на аргументе capsys, когда pytest оставался зелёным.
+4. на интерпретаторе без pytest терялись все файлы, где `import pytest`
+ стоит на уровне модуля: 75 кейсов из 1074 выпадали молча, а
+ --collect-only при этом возвращал 0 — неполный набор выглядел полным.
 
 Все три сбоя выглядят либо как «код сломан», либо как «всё хорошо»,
 поэтому семантика раннера проверяется здесь — на изолированных
@@ -131,12 +134,56 @@ CAPSYS_CASE = _src(
     )
 
 
+STUB_CASE = _src(
+    "import pytest",
+    "",
+    "@pytest.mark.parametrize('value', [1, 2])",
+    "def test_params(value):",
+    " assert value > 0",
+    "",
+    "@pytest.mark.skipif(True, reason='нет железа')",
+    "def test_skipped_by_mark():",
+    " assert False",
+    "",
+    "def test_skip_late():",
+    " pytest.skip('поздний')",
+    "",
+    "def test_missing_module():",
+    " pytest.importorskip('mcu_definitely_absent_module')",
+    "",
+    "def test_raises_with_match():",
+    " with pytest.raises(ValueError, match='нет файла') as exc:",
+    "  raise ValueError('нет файла 42')",
+    " assert 'нет файла' in str(exc.value)",
+)
+
+#: Прогон раннера там, где pytest НЕ импортируется. None в sys.modules даёт
+#: ImportError на `import pytest` даже под интерпретатором, где pytest
+#: установлен, — stub-режим проверяется на любой машине одинаково.
+NO_PYTEST = (
+    "import runpy, sys\n"
+    "sys.modules['pytest'] = None\n"
+    "sys.argv = sys.argv[1:]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
+
+
 def _run(tmp_path, source, *extra):
     """Прогон раннера над одним файлом-пробой: возвращает (rc, stdout)."""
     case = tmp_path / "test_probe.py"
     case.write_text(source, encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(RUNNER), str(case), *extra],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    return proc.returncode, proc.stdout
+
+
+def _run_no_pytest(tmp_path, source, *extra):
+    """То же, что _run, но pytest в дочернем процессе недоступен (stub)."""
+    case = tmp_path / "test_probe.py"
+    case.write_text(source, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-c", NO_PYTEST, str(RUNNER), str(case), *extra],
         cwd=str(ROOT), capture_output=True, text=True, timeout=180)
     return proc.returncode, proc.stdout
 
@@ -285,4 +332,76 @@ def test_runner_covers_every_case_pytest_collects(tmp_path):
     assert runner_cases == len(pytest_cases), (
         f"раннер собирает {runner_cases} кейсов, pytest — "
         f"{len(pytest_cases)}: часть набора потеряна молча")
+
+
+def test_runner_falls_back_to_its_own_pytest_stub(tmp_path):
+    # test_sip_interop / test_sip_registration / test_stand_exit_codes делают
+    # `import pytest` на уровне модуля. На интерпретаторе без pytest (ИИ-агент
+    # запускает обязательную проверку `python3 tests/_runner.py` именно так)
+    # все три файла выпадали ЦЕЛИКОМ — 75 кейсов из 1074 терялись молча.
+    # Раннер обязан подставить свой stub того же API.
+    rc, out = _run_no_pytest(tmp_path, STUB_CASE)
+    assert rc == 0, out
+    assert "3 passed, 0 failed, 3 skipped" in out, out
+
+
+def test_pytest_free_collection_loses_no_files():
+    # Тот же класс, но про весь набор: collect-only без pytest обязан собрать
+    # столько же кейсов, сколько на интерпретаторе, где pytest есть, и не
+    # потерять ни одного файла молча.
+    normal = subprocess.run(
+        [sys.executable, str(RUNNER), "--collect-only"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    assert normal.returncode == 0, normal.stdout[-2000:]
+    stub = subprocess.run(
+        [sys.executable, "-c", NO_PYTEST, str(RUNNER), "--collect-only"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    lost = [line for line in stub.stdout.splitlines()
+            if line.startswith("ERROR import")]
+    assert not lost, "\n".join(lost)
+    assert stub.returncode == 0, stub.stdout[-2000:]
+    n_normal = normal.stdout.strip().splitlines()[-1].split()[0]
+    n_stub = stub.stdout.strip().splitlines()[-1].split()[0]
+    assert n_normal == n_stub, (
+        f"с pytest собрано {n_normal} кейсов, без pytest — {n_stub}")
+
+
+def test_stub_refuses_unknown_pytest_api(tmp_path):
+    # Стаб гарантирует только то, что реально используют тесты, и обязан
+    # ОТКАЗЫВАТЬ на остальном. Тихо подставить заглушку на pytest.approx или на
+    # незнакомый mark — значит получить «зелёный» прогон с проверкой, которая
+    # ничего не проверяла. Тот же класс, что и весь этот страж.
+    rc, out = _run_no_pytest(tmp_path, _src(
+        "import pytest",
+        "",
+        "def test_unknown_api_is_refused():",
+        " try:",
+        "  pytest.approx(1)",
+        " except NotImplementedError as exc:",
+        "  assert 'approx' in str(exc), exc",
+        " else:",
+        "  raise AssertionError('pytest.approx принят тихо')",
+        " assert not hasattr(pytest, '_dunder_probe'), \\",
+        "  'служебное имя обязано давать AttributeError, а не отказ'",
+        "",
+        "def test_unknown_mark_is_refused():",
+        " try:",
+        "  pytest.mark.something_absurd",
+        " except NotImplementedError as exc:",
+        "  assert 'something_absurd' in str(exc), exc",
+        " else:",
+        "  raise AssertionError('неизвестный mark принят тихо')",
+        " assert not hasattr(pytest.mark, '_dunder_probe'), \\",
+        "  'служебное имя у mark обязано давать AttributeError'",
+    ))
+    assert rc == 0, out
+    assert "2 passed, 0 failed, 0 skipped" in out, out
+
+
+def test_collect_only_not_green_when_a_file_dropped(tmp_path):
+    # Раньше --collect-only возвращал 0 даже при ERROR import: сверка
+    # покрытия считала неполный набор полным, и молчание стоило 75 кейсов.
+    rc, out = _run(tmp_path, BROKEN_IMPORT, "--collect-only")
+    assert rc == 1, out
+    assert "ERROR import" in out, out
 

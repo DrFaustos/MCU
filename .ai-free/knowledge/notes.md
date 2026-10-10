@@ -185,29 +185,33 @@ parametrize, skipif/skip, pytest.skip/importorskip, `--collect-only`), а не
   имена параметров тестов vs `SUPPORTED` — так видно, что «неизвестный параметр»
   на деле аргумент `parametrize`, а не фикстура.
 
-Регрессия: `tests/test_test_runner.py` (15 кейсов) — семантика раннера на пробах в
+Регрессия: `tests/test_test_runner.py` (19 кейсов) — семантика раннера на пробах в
 tmp_path, гоняется и pytest'ом, и самим раннером.
 
 ## Боевой интерпретатор — /usr/bin/python3, а НЕ python3 из PATH
 
 В PATH сессии ИИ-агента первым стоит `python3` 3.14 из окружения Hermes
 (`.../.ai-free/hermes/chats/<id>/tools/python-3.14.7.../bin`), в нём **нет**
-`pytest` (и нет `pjsua2`). Прогон `python3 tests/_runner.py` им даёт **ложные**
-падения, к коду отношения не имеющие:
-* `ERROR import tests/test_sip_interop.py` / `test_sip_registration.py` →
- `ModuleNotFoundError: No module named 'pytest'` (файлы есть и проходят);
-* 5 падений `test_test_runner.py` — его probe-скрипты запускают раннер через
- `sys.executable`, то есть тем же битым интерпретатором;
-* `test_mixed_audio_track.py` → `RuntimeError: There is no current event loop`
- (в 3.14 `asyncio.get_event_loop()` луп не создаёт);
-* `test_sip_engine_nat_srtp.py::...stun...` — на 3.14 `StringVector`-проверка
- уходит в ветку «не применён».
+`pytest` (и нет `pjsua2`). Боевая среда проекта: `/usr/bin/python3` 3.12.3
+(pytest 9.1.1 + pjsua2 .egg). Различие сред — реальное, но врать оно больше
+не имеет права.
 
-Итог такого прогона 2026-10-08: «925 passed, 10 failed» при **зелёном** боевом
-наборе. Боевая среда: `/usr/bin/python3` 3.12.3 (pytest 9.1.1 + pjsua2 .egg) →
-`/usr/bin/python3 tests/_runner.py` = **1001 passed, 0 failed, RC=0**;
-`/usr/bin/python3 -m pytest tests/` = RC=0. Правило: проверять и сверять только
-боевым интерпретатором; при «падениях» в чужом python — сначала `which -a python3`.
+**Закрыто 2026-10-10.** Раньше `import pytest` на уровне модуля
+(`test_sip_interop.py`, `test_sip_registration.py`, `test_stand_exit_codes.py`)
+ронял файл ЦЕЛИКОМ: 75 кейсов из 1074 выпадали молча, а `--collect-only`
+возвращал 0. Теперь раннер сам подставляет stub того же API
+(`_install_pytest_stub`) и красит RC=1, если хоть один файл не импортировался.
+Снимок после правки: `python3 tests/_runner.py` = **1075 passed, 0 failed,
+3 skipped, RC=0**; `/usr/bin/python3 tests/_runner.py` = **1078 passed,
+0 failed, RC=0** (те же кейсы: три теста просят нативный `pjsua2` и под
+агентским python дают честный SKIP, а не FAIL); `--collect-only` с обеих
+сторон называет **1078**. Пункты записи 2026-10-08 про `event loop` в 3.14
+и `StringVector` в `test_sip_engine_nat_srtp` больше не воспроизводятся
+(0 failed), история — в git.
+
+Правило диагностики остаётся: при «падениях» — сначала `which -a python3` и
+`/usr/bin/python3 tests/_runner.py`, и только потом подозревать код; и всё
+равно читать **RC и итоговую строку**, а не только наличие текста в выводе.
 <!-- source: agent -->
 
 ## Unix-сокет: путь ограничен sockaddr_un.sun_path (108 байт)

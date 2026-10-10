@@ -7,7 +7,14 @@
 pytest.importorskip() (их Skipped — наследник BaseException, не Exception).
 
 --collect-only печатает кейсы, ничего не исполняя: этим сверяют покрытие
-раннера с pytest, чтобы ни один тест не потерялся молча.
+раннера с pytest, чтобы ни один тест не потерялся молча; если файл не
+импортировался, прогон возвращает 1 — неполный набор не должен выглядеть
+полным.
+
+Если pytest в этом интерпретаторе недоступен, в sys.modules подставляется stub
+того же API (см. _install_pytest_stub). Без него `import pytest` на уровне
+модуля ронял файл целиком: test_sip_interop, test_sip_registration и
+test_stand_exit_codes выпадали молча — 75 кейсов из 1074.
 
 Почему это важно: docs/AI_CONTEXT.md предписывает начинать проверку с
 `python3 tests/_runner.py`, но раннер не знал ни monkeypatch, ни parametrize.
@@ -26,14 +33,173 @@ import io
 import itertools
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import traceback
+import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 _SENTINEL = object()
+
+
+class Skipped(BaseException):
+    """Аналог pytest.Skipped: наследник BaseException, а не Exception.
+
+    В pytest Skipped тоже живёт вне иерархии Exception, поэтому `except
+    Exception` его не видит и честный пропуск вешается. Раннер распознаёт
+    пропуск по ИМЕНИ класса в цепочке баз (см. skip_signal), так что stub
+    обязан называться точно так же.
+    """
+
+
+class _Mark:
+    """Маркер на функции: ровно та форма, которую читает marks_of()."""
+
+    def __init__(self, name, args, kwargs):
+        self.name = name
+        self.args = tuple(args)
+        self.kwargs = dict(kwargs)
+
+
+#: Маркеры, которые раннер умеет исполнять. Неизвестный mark обязан быть
+#: ОТКЛОНЁН, а не проигнорирован: @pytest.mark.foo под стабом молча стал бы
+#: «зелёным» тестом, который ничего не проверял, — ровно тот класс вранья,
+#: против которого написан весь этот файл.
+SUPPORTED_MARKS = ("parametrize", "skip", "skipif")
+
+
+class _MarkSpace:
+    """pytest.mark.<имя>: декоратор со скобками и без, как в pytest."""
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            # copy/pickle/hasattr спрашивают служебные имена (__deepcopy__,
+            # __getstate__, ...) и ждут штатного «атрибута нет». Отказ здесь
+            # ломал бы hasattr() и прятал отсутствие атрибута под «контракт
+            # такой» — ровно то смешение, из-за которого стаб вообще написан
+            # отдельным классом.
+            raise AttributeError(name)
+        if name not in SUPPORTED_MARKS:
+            raise NotImplementedError(
+                f"stub pytest: маркер mark.{name} не реализован — добавь его "
+                "явно вместе с тестом на него")
+
+        def decorator(*args, **kwargs):
+            def wrap(fn):
+                marks = list(getattr(fn, "pytestmark", None) or [])
+                marks.append(_Mark(name, args, kwargs))
+                fn.pytestmark = marks
+                return fn
+
+            if len(args) == 1 and callable(args[0]) and not kwargs:
+                return wrap(args[0])  # @pytest.mark.foo — без скобок
+            return wrap
+        return decorator
+
+
+class _Raises:
+    """pytest.raises(Expected, match=...) с .value — как в pytest."""
+
+    def __init__(self, expected, match=None):
+        self.expected = expected
+        self.match = match
+        self.value = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            raise AssertionError(f"DID NOT RAISE {self.expected!r}")
+        if not issubclass(exc_type, self.expected):
+            return False  # чужое исключение идёт наружу, как в pytest
+        self.value = exc
+        if self.match is not None and not re.search(self.match, str(exc)):
+            raise AssertionError(
+                f"в сообщении {exc!r} нет соответствия {self.match!r}")
+        return True
+
+
+#: Что стаб действительно гарантирует. Расширять — только явно, вместе с
+#: тестом на новую возможность.
+SUPPORTED_PYTEST_API = ("raises", "mark", "skip", "importorskip", "Skipped")
+
+
+class _PytestStub(types.ModuleType):
+    """Модуль-стаб: неизвестный атрибут — ОТКАЗ, а не тихая заглушка.
+
+    У обычного types.ModuleType на незнакомом имени AttributeError, и тест с
+    pytest.approx развалился бы сообщением «нет атрибута», неотличимым от
+    «таков контракт». Здесь отказ называет имя и говорит, что делать. Тихая
+    подделка на незнакомый API дала бы «зелёный» прогон с проверкой, которая
+    ничего не проверяла, — тот же класс вранья, против которого написан весь
+    этот файл.
+    """
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            # Служебные имена (dunder-поиск importlib, copy, pickle) — как у
+            # любого модуля: AttributeError, иначе сломается сам импорт.
+            raise AttributeError(name)
+        raise NotImplementedError(
+            f"stub pytest: API {name} не реализован (умеет только "
+            f"{', '.join(SUPPORTED_PYTEST_API)}) — добавь его явно вместе с "
+            "тестом на него")
+
+
+def _install_pytest_stub():
+    """Подставляет свой pytest-API в sys.modules, если настоящего нет.
+
+    Случай ровно один: обязательную точку проверки `python3 tests/_runner.py`
+    (docs/AI_CONTEXT.md §4) агентская среда запускает интерпретатором, в
+    котором pytest не установлен. `import pytest` на уровне модуля при этом
+    ронял файл ЦЕЛИКОМ — тесты есть и под pytest проходят, а обязательная
+    точка проверки их не видела и выглядела зелёной.
+
+    Реализовано только то, что тесты действительно вызывают; набор снимался
+    грепом, а не «на всякий случай»: raises(match=...), mark.parametrize,
+    mark.skipif, mark.skip, skip(), importorskip(). Всё прочее —
+    NotImplementedError (см. _PytestStub и SUPPORTED_MARKS), а не тихая
+    подделка: новый API pytest обязан быть добавлен сюда явно и вместе с
+    тестом на него.
+    """
+    module = _PytestStub("pytest")
+
+    def raises(expected, match=None):
+        return _Raises(expected, match)
+
+    def skip(reason=""):
+        raise Skipped(reason or "skip")
+
+    def importorskip(name):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            raise Skipped(f"нет модуля {name}") from None
+
+    # Атрибуты через vars(), а не `module.raises = ...`: у динамически
+    # созданного модуля их заранее нет, и статические типизаторы (mypy, pyright)
+    # читают такое присваивание как ошибку «Attribute "raises" is unknown».
+    # dict модуля — тот же результат, и он не маскирует настоящий контракт
+    # (_PytestStub.__getattr__ отвечает отказом на всём, чего нет в этом списке).
+    vars(module).update({
+        "raises": raises,
+        "mark": _MarkSpace(),
+        "skip": skip,
+        "importorskip": importorskip,
+        "Skipped": Skipped,
+    })
+    sys.modules["pytest"] = module
+    return module
+
+
+try:  # настоящий pytest приоритетнее: подсовывать своё нельзя
+    import pytest  # noqa: F401
+except ImportError:
+    _install_pytest_stub()
 
 
 def skip_signal(exc) -> str:
@@ -355,7 +521,9 @@ def main(argv: list[str]) -> int:
     print()
     if collect_only:
         print(f"{collected} cases collected", flush=True)
-        return 0
+        # Раньше здесь безусловно стоял 0: ERROR import печатался, но rc
+        # оставался зелёным, и сверка покрытия считала неполный набор полным.
+        return 1 if failed else 0
     print(f"{passed} passed, {failed} failed, {skipped} skipped", flush=True)
     return 1 if failed else 0
 
