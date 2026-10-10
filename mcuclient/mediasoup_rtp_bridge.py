@@ -94,9 +94,14 @@ class MediasoupRtpBridge:
     def stats(self) -> Dict[str, Any]:
         rx = self._endpoint.rx_packets if self._endpoint else 0
         tx = self._endpoint.tx_packets if self._endpoint else 0
+        errs = self._endpoint.send_errors if self._endpoint else 0
+        last = self._endpoint.last_send_error if self._endpoint else ""
+        # sendErrors/lastSendError — чтобы «мост поднят, а звука нет»
+        # различалось в GET /api/status без чтения исходников.
         return {"started": self._started, "transport": self._transport_id,
                 "producer": self._producer_id, "localPort": self.local_port,
-                "rxPackets": rx, "txPackets": tx}
+                "rxPackets": rx, "txPackets": tx, "sendErrors": errs,
+                "lastSendError": last}
 
     # -- жизненный цикл ----------------------------------------------------
     def start(self) -> bool:
@@ -138,14 +143,19 @@ class MediasoupRtpBridge:
             try:
                 self._endpoint.stop()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("RTP-мост: остановка эндпоинта с ошибкой", exc_info=True)
         self._producer_id = None
         self._transport_id = None
         self._started = False
 
     # -- медиа -------------------------------------------------------------
     def push_sip_pcm(self, pcm: bytes) -> bool:
-        """Звук из SIP (pjsua2) -> RTP -> mediasoup (браузеры слышат терминал)."""
+        """Звук из SIP (pjsua2) -> RTP -> mediasoup (браузеры слышат терминал).
+
+        ``False`` — кадр не ушёл: причина в журнале у ``RtpUdpEndpoint``
+        и в ``stats()`` (``lastSendError``), откуда её видно в
+        ``GET /api/status`` как ``mediasoup_rtp``.
+        """
         if not self._started or self._endpoint is None or not pcm:
             return False
         return self._endpoint.send_pcm(pcm)

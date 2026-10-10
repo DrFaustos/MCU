@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
+import pathlib
 import struct
+import sys
 import time
 
-from mcuclient.rtp_audio import (
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Каталог tests/ — ради общего AST-сканера: tests/_runner.py кладёт в
+# sys.path только корень репозитория (см. заголовок test_log_visibility.py).
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _silent_handlers import (  # noqa: E402
+    scan_is_not_a_placeholder,
+    silent_handlers,
+)
+
+from mcuclient.rtp_audio import (  # noqa: E402
     PT_PCMA,
     PT_PCMU,
     RtpUdpEndpoint,
@@ -133,3 +147,162 @@ def test_pcma_path():
     finally:
         tx.stop()
         rx.stop()
+
+
+# --- отказ отправки: назван, посчитан, не превращается в шум -----------
+
+
+class _LogCapture(logging.Handler):
+    """Своими руками: у стаба pytest в мини-раннере фикстур нет."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records = []
+
+    def emit(self, record) -> None:
+        self.records.append((record.levelname, record.getMessage()))
+
+
+def _watch(logger_name):
+    logger = logging.getLogger(logger_name)
+    handler = _LogCapture()
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    return handler, logger, old_level
+
+
+def _unwatch(handler, logger, old_level):
+    logger.removeHandler(handler)
+    logger.setLevel(old_level)
+
+
+# IPv6-адрес на IPv4-сокете: getaddrinfo(family=AF_INET) отказывает
+# всегда (проверено зондом: gaierror -9), независимо от наличия IPv6.
+_BROKEN = ("::1", 40000)
+
+
+def test_send_failure_is_counted_and_named():
+    # Раньше: False и ни строки в журнале. Оператор видел txPackets=0 и
+    # не отличал «некуда слать» от «никто не говорит».
+    handler, logger, old = _watch("mcuclient.rtp")
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        ep.set_remote(*_BROKEN)
+        assert ep.send_pcm(_pcm([1] * 160)) is False
+        assert ep.send_errors == 1
+        assert ep.tx_packets == 0
+        assert ep.last_send_error, "причина отказа обязана быть видна"
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert len(warns) == 1
+        assert "не уходит" in warns[0] and "40000" in warns[0]
+    finally:
+        ep.stop()
+        _unwatch(handler, logger, old)
+
+
+def test_send_failure_series_named_once():
+    # Кадру 20 мс отказ приходит ~50 раз/с: одна строка на серию, а не
+    # ~3000 строк за минуту звонка.
+    handler, logger, old = _watch("mcuclient.rtp")
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        ep.set_remote(*_BROKEN)
+        for _ in range(50):
+            assert ep.send_pcm(_pcm([1] * 160)) is False
+        assert ep.send_errors == 50
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert len(warns) == 1, warns
+    finally:
+        ep.stop()
+        _unwatch(handler, logger, old)
+
+
+def test_send_recovery_is_named_and_reason_cleared():
+    # Отказ кончился: переход обязан быть назван, а причина — снята.
+    peer = RtpUdpEndpoint(local_port=0)
+    ep = RtpUdpEndpoint(local_port=0)
+    handler, logger, old = _watch("mcuclient.rtp")
+    try:
+        peer.start()
+        ep.set_remote(*_BROKEN)
+        assert ep.send_pcm(_pcm([1] * 160)) is False
+        assert ep.last_send_error
+        ep.set_remote("127.0.0.1", peer.local_port)
+        assert ep.send_pcm(_pcm([1] * 160)) is True
+        assert ep.last_send_error == ""
+        infos = [m for lvl, m in handler.records if lvl == "INFO"]
+        assert len(infos) == 1 and "восстановилась" in infos[0]
+    finally:
+        _unwatch(handler, logger, old)
+        ep.stop()
+        peer.stop()
+
+
+def test_send_without_remote_is_not_a_failure():
+    # Адрес не задан — нарушение контракта вызова, а не сетевой отказ:
+    # в статистику сбоев оно попадать не должно.
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        assert ep.send_pcm(_pcm([1] * 160)) is False
+        assert ep.send_errors == 0
+        assert ep.last_send_error == ""
+    finally:
+        ep.stop()
+
+
+def test_recv_break_is_named():
+    # Потеря приёмного потока = браузеры перестали слышать терминал.
+    class _DeadSocket:
+        def recvfrom(self, _size):
+            raise OSError("Bad file descriptor")
+
+        def close(self):
+            pass
+
+    handler, logger, old = _watch("mcuclient.rtp")
+    ep = RtpUdpEndpoint(local_port=0)
+    real = ep._sock
+    ep._sock = _DeadSocket()
+    try:
+        ep.start()
+        thread = ep._thread
+        deadline = time.time() + 3
+        while thread.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+        assert not thread.is_alive(), "поток обязан завершиться"
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert warns and "приём прерван" in warns[0]
+    finally:
+        ep._sock = real
+        _unwatch(handler, logger, old)
+        ep.stop()
+
+
+def test_normal_stop_leaves_no_warning():
+    # Вторая сторона границы: штатная остановка молчанием не считается,
+    # но и ложных тревог давать не обязана.
+    handler, logger, old = _watch("mcuclient.rtp")
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        ep.start()
+        time.sleep(0.7)  # больше одного цикла ожидания (0.5 с)
+        ep.stop()
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert not warns, warns
+    finally:
+        _unwatch(handler, logger, old)
+
+
+# --- страж: молчаливых обработчиков в модуле больше нет ----------------
+
+
+def test_rtp_audio_has_no_silent_except_handlers():
+    # Тот же класс, что и вся правка: молчаливый except в RTP
+    # неотличим от «всё работает» — а звук в звонке проверяют
+    # ушами, когда журнал уже не читают.
+    assert scan_is_not_a_placeholder(), "общий сканер молчит сам"
+    silent = silent_handlers(inspect.getsource(RtpUdpEndpoint))
+    assert not silent, (
+        "mcuclient/rtp_audio.py: except без сообщения об отказе — "
+        "назовите причину (log.warning/debug), строки: " + str(silent))

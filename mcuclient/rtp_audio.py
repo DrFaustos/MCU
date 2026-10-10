@@ -151,6 +151,8 @@ class RtpUdpEndpoint:
         self._stop = threading.Event()
         self._rx = 0
         self._tx = 0
+        self._tx_fail = 0
+        self._last_send_error = ""
 
     @property
     def remote(self) -> Optional[Tuple[str, int]]:
@@ -166,6 +168,16 @@ class RtpUdpEndpoint:
     @property
     def tx_packets(self) -> int:
         return self._tx
+
+    @property
+    def send_errors(self) -> int:
+        """Сколько кадров НЕ ушло (накоплено за жизнь эндпоинта)."""
+        return self._tx_fail
+
+    @property
+    def last_send_error(self) -> str:
+        """Причина последнего отказа отправки; "" — всё уходит."""
+        return self._last_send_error
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -183,16 +195,30 @@ class RtpUdpEndpoint:
         try:
             self._sock.close()
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("RTP: close() сокета дал ошибку", exc_info=True)
 
     def _recv_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 data, addr = self._sock.recvfrom(2048)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
+            except OSError as exc:
+                # socket.timeout — подкласс OSError, и ожидание пакета
+                # НЕ отказ: таймаут приключается дважды в секунду на
+                # каждый звонок, и строка в журнале на каждый из него
+                # значила бы шум навсегда. Остальной OSError — потеря
+                # приёма: браузеры перестают слышать терминал, а в
+                # журнале раньше не было ни строки. Граница названа:
+                # stop() закрывает сокет, и для потока штатная
+                # остановка выглядит как OSError — ложная тревога
+                # вредна не меньше молчания.
+                if isinstance(exc, socket.timeout):
+                    continue
+                if not self._stop.is_set():
+                    log.warning(
+                        "RTP: приём прерван (%s: %s) — браузеры "
+                        "перестают слышать терминал",
+                        type(exc).__name__, exc)
+                return
             if self._remote is None:
                 self._remote = addr
             pkt = parse_rtp(data)
@@ -211,7 +237,11 @@ class RtpUdpEndpoint:
                     log.debug("on_pcm упал", exc_info=True)
 
     def send_pcm(self, pcm: bytes) -> bool:
-        """PCM s16le -> RTP -> remote. False, если remote не задан."""
+        """PCM s16le -> RTP -> remote. False, если кадр не ушёл.
+
+        Причина — в :attr:`last_send_error` (и в ``stats()`` моста,
+        откуда её видно в ``GET /api/status`` как ``mediasoup_rtp``).
+        """
         if self._remote is None or not pcm:
             return False
         payload = pcm16_to_ulaw(pcm) if self.payload_type == PT_PCMU else _pcm16_to_alaw(pcm)
@@ -220,10 +250,28 @@ class RtpUdpEndpoint:
         packet = build_rtp(self.payload_type, self._seq, self._ts, self._ssrc, payload)
         try:
             self._sock.sendto(packet, self._remote)
-            self._tx += 1
-            return True
-        except OSError:
+        except OSError as exc:
+            # Кадру 20 мс отказ приходит ~50 раз/с: молчаливое False
+            # означало, что оператор видит txPackets=0 и не отличает
+            # «некуда слать» от «никто не говорит». Отказы считаем, а
+            # причину называем РОВНО один раз на серию — иначе журнал
+            # даёт ~3000 строк за минуту звонка.
+            self._tx_fail += 1
+            reason = "%s: %s" % (type(exc).__name__, exc)
+            if reason != self._last_send_error:
+                self._last_send_error = reason
+                host, port = self._remote
+                log.warning("RTP: звук не уходит на %s:%s (%s)", host, port, reason)
             return False
+        self._tx += 1
+        if self._last_send_error:
+            self._report_recovery()
+        return True
+
+    def _report_recovery(self) -> None:
+        """Серия отказов кончилась: назвать переход одной строкой."""
+        log.info("RTP: отправка восстановилась (всего не ушло %d кадров)", self._tx_fail)
+        self._last_send_error = ""
 
 
 def _alaw_to_pcm16(alaw: bytes) -> bytes:

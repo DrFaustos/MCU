@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+import inspect
+import pathlib
 import struct
+import sys
 
-from mcuclient.mediasoup_rtp_bridge import MediasoupRtpBridge, PLAIN_RTP_PARAMETERS
-from mcuclient.rtp_audio import PT_PCMU, RtpUdpEndpoint, parse_rtp
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Каталог tests/ — ради общего AST-сканера: tests/_runner.py кладёт в
+# sys.path только корень репозитория (см. заголовок test_log_visibility.py).
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _silent_handlers import (  # noqa: E402
+    scan_is_not_a_placeholder,
+    silent_handlers,
+)
+
+import mcuclient.mediasoup_rtp_bridge as bridge_module  # noqa: E402
+from mcuclient.mediasoup_rtp_bridge import (  # noqa: E402
+    MediasoupRtpBridge,
+    PLAIN_RTP_PARAMETERS,
+)
+from mcuclient.rtp_audio import (  # noqa: E402
+    PT_PCMU,
+    RtpUdpEndpoint,
+    parse_rtp,
+)
 
 
 def _pcm(v=1000, n=160):
@@ -148,3 +169,79 @@ def test_stats():
     finally:
         br.stop()
         c.close()
+
+
+# --- отказ отправки виден в stats() (значит, и в GET /api/status) ----
+
+
+class _FailingEndpoint:
+    """Внедряемый эндпоинт: отправка отказывает, как реальный сокет.
+
+    Нужен, чтобы проверить связь stats() с отказом, не трогая
+    приватные поля моста и не завися от того, пустует ли IPv6.
+    """
+
+    def __init__(self):
+        self.local_port = 40000
+        self.rx_packets = 0
+        self.tx_packets = 0
+        self.send_errors = 0
+        self.last_send_error = ""
+        self.remote = None
+
+    def set_remote(self, host, port):
+        self.remote = (host, port)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def send_pcm(self, pcm):
+        self.send_errors += 1
+        self.last_send_error = "gaierror: Address family not supported"
+        return False
+
+
+def test_stats_sees_send_failures():
+    # «Мост поднят, а звука нет» обязан различаться в GET /api/status
+    # (mediasoup_rtp), а не только в исходниках.
+    c = _FakeClient()
+    ep = _FailingEndpoint()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    try:
+        assert br.start() is True
+        assert br.push_sip_pcm(_pcm()) is False
+        st = br.stats()
+        assert st["started"] is True, "мост-то поднят"
+        assert st["txPackets"] == 0
+        assert st["sendErrors"] == 1
+        assert st["lastSendError"], "причина обязана доехать до панели"
+    finally:
+        br.stop()
+        c.close()
+
+
+def test_stats_clean_when_no_failures():
+    # Ложная тревога вредна не меньше молчания: без отказов поля пусты.
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1")
+    try:
+        assert br.start() is True
+        assert br.push_sip_pcm(_pcm()) is True
+        st = br.stats()
+        assert st["sendErrors"] == 0
+        assert st["lastSendError"] == ""
+        assert st["txPackets"] == 1
+    finally:
+        br.stop()
+        c.close()
+
+
+def test_rtp_bridge_has_no_silent_except_handlers():
+    assert scan_is_not_a_placeholder(), "общий сканер молчит сам"
+    silent = silent_handlers(inspect.getsource(bridge_module))
+    assert not silent, (
+        "mcuclient/mediasoup_rtp_bridge.py: except без сообщения об "
+        "отказе — назовите причину, строки: " + str(silent))
