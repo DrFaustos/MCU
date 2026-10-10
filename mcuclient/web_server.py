@@ -1090,6 +1090,22 @@ def _prop(obj: Any, name: str, default: Any = None) -> Any:
     return value
 
 
+def _kbps_or_none(value: Any) -> Optional[int]:
+    """Битрейт наружу: None = «не измерено», 0 = «измерено: ноль».
+
+    Прежний ``int(value or 0)`` превращал неизвестность в ноль, и оператор
+    читал ``rx_kbps: 0`` при активном звонке как «медиа нет». ``_opt_int`` для
+    этого не годится: он рассчитан на ВХОДЯЩИЕ параметры и бросает ApiError,
+    а проекция статуса падать не имеет права.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _participant_to_dict(p: Any) -> Dict[str, Any]:
     state = getattr(p, "state", None)
     return {
@@ -1103,8 +1119,8 @@ def _participant_to_dict(p: Any) -> Dict[str, Any]:
         "video_muted": bool(getattr(p, "is_video_muted", False)),
         "speaking": bool(getattr(p, "is_speaking", False)),
         "volume_level": int(getattr(p, "volume_level", 0) or 0),
-        "rx_kbps": int(getattr(p, "rx_bitrate_kbps", 0) or 0),
-        "tx_kbps": int(getattr(p, "tx_bitrate_kbps", 0) or 0),
+        "rx_kbps": _kbps_or_none(getattr(p, "rx_bitrate_kbps", None)),
+        "tx_kbps": _kbps_or_none(getattr(p, "tx_bitrate_kbps", None)),
     }
 
 

@@ -140,6 +140,30 @@ def test_participant_dict_carries_speaking_and_level():
     assert d["volume_level"] == 42
 
 
+def test_participant_dict_reports_unmeasured_bitrate_as_null():
+    """Битрейт, который нечем измерить, обязан уходить как null, а не как 0.
+
+    Ноль оператор читает как «0 кбит/с», т.е. «медиа нет» — при активном
+    звонке. Медиа-битрейт SIP-вызова в текущей сборке pjsua2 нечем мерить:
+    rtcp.rxStat/txStat.bytes считают RTCP-канал (замер живьём стендом двух
+    процессов: 1.5 кбит/с при G.711, который обязан давать ~64). Значит
+    «неизвестно» обязано быть отличием от «измерено и получилось 0».
+    """
+    from mcuclient.web_server import _participant_to_dict
+
+    live = Participant(id=8, remote_uri="sip:b@h", state=CallState.CONFIRMED)
+    d = _participant_to_dict(live)
+    assert d["rx_kbps"] is None, f"ложный ноль вместо «не измерено»: {d['rx_kbps']}"
+    assert d["tx_kbps"] is None, f"ложный ноль вместо «не измерено»: {d['tx_kbps']}"
+
+    # Измеренное значение обязано доезжать как число — включая настоящий ноль.
+    measured = Participant(id=9, remote_uri="sip:c@h", state=CallState.CONFIRMED,
+                           rx_bitrate_kbps=64, tx_bitrate_kbps=0)
+    m = _participant_to_dict(measured)
+    assert m["rx_kbps"] == 64
+    assert m["tx_kbps"] == 0, "настоящий ноль обязан остаться нулём"
+
+
 def _panel_html():
     """Текст страницы панели: её контракт с API проверяется по исходнику."""
     path = Path(__file__).resolve().parents[1] / "mcuclient" / "webui" / "index.html"

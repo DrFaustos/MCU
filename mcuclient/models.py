@@ -39,8 +39,13 @@ class Participant:
     is_video: bool = True
     audio_codec: Optional[str] = None
     video_codec: Optional[str] = None
-    rx_bitrate_kbps: int = 0
-    tx_bitrate_kbps: int = 0
+    # Битрейт: None — «не измерено», 0 — «измерено и получилось ноль». Разница
+    # принципиальная: ноль наружу читается как «медиа нет» при активном звонке.
+    # Медиа-битрейт SIP-вызова в текущей сборке pjsua2 мерить нечем —
+    # rtcp.rxStat/txStat.bytes считают RTCP-канал (замер живьём: 1.5 кбит/с при
+    # G.711, который обязан давать ~64), поэтому False-измерение хуже None.
+    rx_bitrate_kbps: Optional[int] = None
+    tx_bitrate_kbps: Optional[int] = None
     is_muted: bool = False
     is_video_muted: bool = False
     is_speaking: bool = False
