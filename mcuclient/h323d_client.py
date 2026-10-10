@@ -209,14 +209,29 @@ class H323dClient:
                 pass
             sock.close()
 
+    def _dispatch_event(self, ev: H323dEvent) -> None:
+        """Раздаёт событие подписчикам: ошибка одного не роняет остальных."""
+        with self._cb_lock:
+            subs = list(self._callbacks)
+        for cb in subs:
+            try:
+                cb(ev)
+            except Exception:  # noqa: BLE001
+                log.exception("H.323-хост: ошибка обработчика %s", ev.event)
+
     def _read_loop(self) -> None:
         sock = self._sock
         if sock is None:
             return
         buf = b""
+        reason = "eof"
         try:
             while self._running.is_set():
-                chunk = sock.recv(4096)
+                try:
+                    chunk = sock.recv(4096)
+                except OSError:
+                    reason = "error"
+                    break
                 if not chunk:
                     break
                 buf += chunk
@@ -234,15 +249,22 @@ class H323dClient:
                         # один раз — на подключении клиента, а не на подписку.
                         self._last_ready = ev
                         log.info("H.323-хост готов, порт %s", self.ready_port)
-                    with self._cb_lock:
-                        subs = list(self._callbacks)
-                    for cb in subs:
-                        try:
-                            cb(ev)
-                        except Exception:  # noqa: BLE001
-                            log.exception("H.323-хост: ошибка обработчика %s", ev.event)
+                    self._dispatch_event(ev)
         except OSError:
-            if self._running.is_set():
-                log.warning("H.323-хост: соединение разорвано")
+            reason = "error"
         finally:
+            # Разрыв БЕЗ close() означает, что хост умер (упал, убит, порт
+            # закрыт). Раньше здесь молчали: _running снимался, connected
+            # становился False, а подписчики не получали НИЧЕГО — эндпоинт
+            # держал вызовы мёртвого хоста как живые (фантомы в комнате и в
+            # микшере), web-панель показывала соединение. Теперь обрыв —
+            # событие, такое же, как любое другое.
+            # Намеренное close() снимает _running ДО закрытия сокета, поэтому
+            # штатная остановка сюда не попадает и ложных «обрывов» нет.
+            dropped = self._running.is_set()
             self._running.clear()
+            if dropped:
+                log.warning("H.323-хост: соединение разорвано (%s)", reason)
+                self._dispatch_event(
+                    H323dEvent("connection.closed", {"reason": reason})
+                )

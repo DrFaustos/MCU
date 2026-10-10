@@ -301,3 +301,64 @@ def test_ready_updates_port():
     _, ep, _ = _make_endpoint()
     ep.on_event(H323dEvent("ready", {"port": 1721, "auto_answer": "0"}))
     assert ep.port == 1721
+
+
+# --- потеря хоста: обрыв IPC без call.disconnected --------------------------
+# Хост mcu_h323d может упасть или быть убитым посреди разговора. Штатного
+# call.disconnected при этом не приходит НИКОГДА, и без зачистки участник
+# оставался в комнате в CONFIRMED навсегда: UI/web показывали живое соединение,
+# а hangup из панели уходил в мёртвый сокет.
+
+
+class _RecordingClient:
+    """Клиент хоста, который считает ушедшие команды (проверка «не слать в мёртвый сокет»)."""
+
+    def __init__(self) -> None:
+        self.commands: list = []
+        self.connected = True
+
+    def answer(self, token: str) -> bool:
+        self.commands.append(("answer", token))
+        return True
+
+    def hangup(self, token: str) -> bool:
+        self.commands.append(("hangup", token))
+        return True
+
+    def send_command(self, cmd: str, **fields) -> bool:
+        self.commands.append((cmd, fields.get("token", "")))
+        return True
+
+
+def test_host_lost_clears_phantom_participants():
+    room, ep, seen = _make_endpoint()
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "polycom"}))
+    assert room.count == 1
+
+    ep.on_event(H323dEvent("connection.closed", {"reason": "eof"}))
+
+    assert room.count == 0, "участник мёртвого хоста остался в комнате"
+    assert ep.find_by_token("t1") is None
+    assert any(n == "call.state" for n, _ in seen), "UI не уведомлён о завершении"
+
+
+def test_host_lost_with_no_calls_is_not_an_error():
+    """Хост умер в простое: зачищать нечего, падать не на чем."""
+    room, ep, _ = _make_endpoint()
+    ep.on_event(H323dEvent("connection.closed", {"reason": "error"}))
+    assert room.count == 0
+
+
+def test_host_lost_does_not_hangup_dead_host():
+    """call.hangup мёртвому хосту не отменяет вызов, но пачкает лог «не доставлен»."""
+    room = Room(name="r")
+    ep = H323Endpoint(room, EventBus())
+    client = _RecordingClient()
+    ep._client = client  # type: ignore[assignment]
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))
+    client.commands.clear()  # авто-ответ до обрыва — легитимная команда
+
+    ep.on_event(H323dEvent("connection.closed", {"reason": "error"}))
+
+    assert room.count == 0
+    assert client.commands == [], f"команды мёртвому хосту: {client.commands}"

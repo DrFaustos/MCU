@@ -442,11 +442,39 @@ class H323Endpoint:
                 self._port,
                 "авто" if self._auto_answer else "ручной",
             )
+        elif name == "connection.closed":
+            self._on_host_lost(str(data.get("reason", "") or ""))
         elif name == "shutdown":
             log.info("H.323: хост остановлен")
         elif name == "error":
             log.warning("H.323-хост: %s", data.get("message", ""))
         # прочие события (pong и т.п.) — игнорируются
+
+    def _on_host_lost(self, reason: str) -> None:
+        """Хост mcu_h323d потерян: обрыв IPC без ``call.disconnected``.
+
+        Никто не завершал вызовы, которые вёл H323Plus. Без зачистки участник
+        остаётся в комнате в ``CONFIRMED`` навсегда: UI и web-панель показывают
+        живое соединение, микшер держит буфер «фантома», а ``hangup`` из панели
+        уйдёт в мёртвый сокет. Штатный останов хоста приходит сюда же: за
+        событием ``shutdown`` следует EOF сокета.
+
+        ``notify_host=False``: хоста уже нет, и ``call.hangup`` не просто
+        бесполезен — он ещё и пачкает лог «не доставлен».
+        """
+        if not self._calls:
+            log.warning(
+                "H.323: хост mcu_h323d потерян (%s) — активных вызовов не было", reason
+            )
+            return
+        log.warning(
+            "H.323: хост mcu_h323d потерян (%s) — снимаю %d вызов(ов), "
+            "H.323-приём недоступен до перезапуска хоста",
+            reason,
+            len(self._calls),
+        )
+        for p in list(self._calls.values()):
+            self.disconnect(p, notify_host=False)
 
     def handle_host_event(self, event: H323dEvent) -> None:
         """Обработчик для :class:`H323dClient`."""

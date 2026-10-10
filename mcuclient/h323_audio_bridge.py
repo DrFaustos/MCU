@@ -168,9 +168,10 @@ class H323AudioBridge:
     def on_event(self, event: Any) -> None:
         """Обработчик :class:`~mcuclient.h323d_client.H323dClient`.
 
-        Нас интересуют три события: ``call.media`` (частота/кодек канала),
-        ``pcm.in`` (кадр входящего PCM) и ``call.disconnected`` (канал умер).
-        Остальные — мимо: их разбирает эндпоинт, дублировать нечего.
+        Нас интересуют четыре события: ``call.media`` (частота/кодек канала),
+        ``pcm.in`` (кадр входящего PCM), ``call.disconnected`` (канал умер) и
+        ``connection.closed`` (хост потерян целиком). Остальные — мимо: их
+        разбирает эндпоинт, дублировать нечего.
         """
         name = getattr(event, "event", "") or ""
         fields = getattr(event, "fields", None) or {}
@@ -180,6 +181,11 @@ class H323AudioBridge:
             self._on_pcm(fields)
         elif name == "call.disconnected":
             self.forget(str(fields.get("token", "") or ""))
+        elif name == "connection.closed":
+            # Хост мёртв: pcm.in больше не придёт ни по одному каналу, а
+            # ``call.disconnected`` по этому случаю не шлётся никогда. Без
+            # зачистки буферы микшера остаются на завершённых вызовах.
+            self.forget_all()
 
     def _on_media(self, fields: Dict[str, Any]) -> None:
         if str(fields.get("kind", "") or "").lower() not in ("", "audio"):
@@ -291,6 +297,21 @@ class H323AudioBridge:
                 return
         self._mixer.remove(pid)
         log.info("H.323: аудио-канал %s закрыт", token)
+
+    def forget_all(self) -> None:
+        """Снимает все каналы сразу — случай «хост mcu_h323d потерян».
+
+        ``stop()`` для этого не годится: он ещё и отписывает мост от событий,
+        а владельцем соединения остаёт эндпоинт — отписка чужая life-циклу.
+        Снимаем ровно те id, что завели сами (микшер может быть общим).
+        """
+        with self._lock:
+            pids = list(self._pids.values())
+            self._rates.clear()
+            self._codecs.clear()
+            self._pids.clear()
+        for pid in pids:
+            self._mixer.remove(pid)
 
     def _pid(self, token: str, *, create: bool = False) -> int:
         """Общий id участника комнаты для токена вызова.

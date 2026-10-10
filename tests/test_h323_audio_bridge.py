@@ -388,3 +388,42 @@ def test_external_mixer_is_reused():
     bridge.on_event(pcm_in("call-1", tone(16000), 16000))
     assert bridge.mixer is mixer
     assert 1 in mixer._buffers
+
+
+# --- потеря хоста ------------------------------------------------------------
+
+
+def test_host_lost_frees_every_mixer_buffer():
+    """Хост потерян целиком: очищаются ВСЕ каналы, по одному call.disconnected не будет.
+
+    Без зачистки буфер мёртвого вызова продолжает попадать в микс оставшимся
+    участникам — «фантом», который никто не вешал.
+    """
+    client, endpoint, bridge = _bridge()
+    endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    bridge.on_event(pcm_in("call-1", tone(16000), 16000))
+    assert bridge.mixer._buffers, "нечего освобождать — тест ничего не проверяет"
+
+    bridge.on_event(H323dEvent("connection.closed", {"reason": "eof"}))
+
+    assert bridge.channels() == []
+    assert bridge.mixer._buffers == {}, "буфер фантома остался в микшере"
+
+
+def test_host_lost_does_not_unsubscribe_the_bridge():
+    """Владельцем соединения остаётся эндпоинт: мост сам себя не отписывает.
+
+    Отписка внутри обработчика событий выглядела бы как «микшер почистился»,
+    а на деле H.323-приём терял медиа до самого перезапуска без единой ошибки.
+    """
+    client, endpoint, bridge = _bridge()
+    endpoint.add("call-1", 1)
+    bridge.on_event(media("call-1", 16000))
+
+    bridge.on_event(H323dEvent("connection.closed", {"reason": "eof"}))
+
+    assert client.subscribers == [bridge.on_event], "мост отписался сам себя"
+    assert bridge.enabled is True

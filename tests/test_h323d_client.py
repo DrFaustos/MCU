@@ -312,3 +312,66 @@ def test_late_subscriber_gets_only_ready_replay(tmp_path):
         finally:
             client.close()
             srv.close()
+
+
+# --- обрыв: хост mcu_h323d умер, не сказавшись ------------------------------
+# Разрыв без нашего close() — это упавший/убитый хост. Раньше _read_loop
+# молча снимал _running: connected становился False, а подписчики не получали
+# НИЧЕГО. Эндпоинт продолжал держать вызовы мёртвого хоста как живые (фантомы
+# в комнате и в микшере), а web-панель показывала действующее соединение.
+
+
+def _fake_host_dies(path, lines, after: float = 0.05):
+    """Заглушка: выливает события и ЗАКРЫВАЕТ соединение — как падающий хост."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def run():
+        conn, _ = srv.accept()
+        for ln in lines:
+            conn.sendall(ln.encode("utf-8") + b"\n")
+        time.sleep(after)
+        conn.close()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return srv, t
+
+
+def test_host_crash_emits_connection_closed(tmp_path):
+    with unix_socket_path(tmp_path, "mcu_drop.sock") as sock_p:
+        path = str(sock_p)
+        srv, _t = _fake_host_dies(path, ['{"event":"ready","port":1720}'])
+        events: list = []
+        client = H323dClient(path, on_event=lambda ev: events.append(ev.event))
+        try:
+            assert client.connect(timeout=2.0) is True
+            deadline = time.time() + 3.0
+            while time.time() < deadline and "connection.closed" not in events:
+                time.sleep(0.02)
+            assert "connection.closed" in events, events
+            assert client.connected is False
+        finally:
+            client.close()
+            srv.close()
+
+
+def test_intentional_close_is_not_reported_as_drop(tmp_path):
+    """Штатная остановка — не «обрыв»: иначе ложная тревога на каждом stop()."""
+    with unix_socket_path(tmp_path, "mcu_close.sock") as sock_p:
+        path = str(sock_p)
+        srv, _t = _fake_host_lines(path, ['{"event":"ready","port":1720}'])
+        events: list = []
+        client = H323dClient(path, on_event=lambda ev: events.append(ev.event))
+        try:
+            assert client.connect(timeout=2.0) is True
+            deadline = time.time() + 2.0
+            while time.time() < deadline and "ready" not in events:
+                time.sleep(0.02)
+            assert "ready" in events
+            client.close()
+            time.sleep(0.2)  # читатель обязан успеть завершиться
+            assert "connection.closed" not in events, events
+        finally:
+            srv.close()
