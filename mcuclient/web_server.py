@@ -308,6 +308,9 @@ class WebSession:
             self.conference.bus,
             recipients=self._mix_recipients,
             on_mix=self.sip_bridge.push_web_mix,
+            # Индикатор «говорит» для браузеров: микшер — единственный, кто
+            # видит их PCM, и он же раздаёт уровни в реестр конференции.
+            conference=self.conference,
         )
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
                                     bus=self.conference.bus,

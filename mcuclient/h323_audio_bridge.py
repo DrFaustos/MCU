@@ -34,11 +34,10 @@ from __future__ import annotations
 
 import base64
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .audio_mixer import AudioMixer, MixerConfig, rms_percent
+from .audio_mixer import AudioMixer, LevelsIndicator, MixerConfig
 from .log import get_logger
 from .webrtc_sfu import resample_mono
 
@@ -50,10 +49,10 @@ log = get_logger("h323mix")
 MIX_RATE_DEFAULT = 16000
 
 #: Сколько миллисекунд канал может не присылать ``pcm.in``, прежде чем
-#: индикатор «говорит» погаснет. Нужен именно порог, а не «пока буфер в
-#: микшере»: буфер микшера живёт до ``forget``, поэтому последний голос
-#: остался бы на участнике навсегда — панель показывала бы «говорит» у
-#: повесившей трубку стороны, а режим ``speaker`` держал бы её главной.
+#: индикатор «говорит» погаснет. Порог читается из модуля каждый раз (тесты
+#: подменяют именно его), а сама логика затухания — общая, в
+#: :class:`~mcuclient.audio_mixer.LevelsIndicator`: у веб-микшера она ровно та
+#: же, и две копии обязательно разошлись бы.
 LEVEL_STALE_MS = 120
 
 
@@ -111,10 +110,8 @@ class H323AudioBridge:
         self._rx_bytes = 0
         self._tx_bytes = 0
         self._undecodable = 0
-        # pid -> время последнего pcm.in (по нему гаснет «говорит») и
-        # последний розданный уровень (по нему гаснут ушедшие каналы).
-        self._last_rx: Dict[int, float] = {}
-        self._last_levels: Dict[int, float] = {}
+        # Индикатор «говорит»: тот же общий, что у веб-микшера.
+        self._indicator = LevelsIndicator(LEVEL_STALE_MS)
         self._speaker: Optional[int] = None
 
     # --- состояние -----------------------------------------------------------
@@ -182,9 +179,10 @@ class H323AudioBridge:
             self._rates.clear()
             self._codecs.clear()
             self._pids.clear()
-            self._last_rx.clear()
-            self._last_levels.clear()
             self._speaker = None
+        # Индикатор заменяется новым: у него нет сброса состояния, а штампы
+        # прошлого прогона не должны пережить остановку моста.
+        self._indicator = LevelsIndicator(LEVEL_STALE_MS)
         self._mixer.clear()
         self._enabled = False
 
@@ -316,9 +314,11 @@ class H323AudioBridge:
     # --- индикатор «говорит» ------------------------------------------------
     def _mark(self, token: str) -> None:
         """Отмечает живость канала: по штампу индикатор не гасит текущий голос."""
-        pid = self._pid(token, create=True)
-        with self._lock:
-            self._last_rx[pid] = time.monotonic()
+        # Порог выставляется здесь и в _publish_levels: тесты подменяют
+        # модульный LEVEL_STALE_MS уже после создания моста, а заморозка его в
+        # конструкторе сделала бы такую подмену бессмысленной.
+        self._indicator.stale_ms = float(LEVEL_STALE_MS)
+        self._indicator.mark(self._pid(token, create=True))
 
     def _publish_levels(self) -> None:
         """Раздаёт уровни и докладчика участникам комнаты.
@@ -335,25 +335,18 @@ class H323AudioBridge:
         * каналы, исчезнувшие из микшера (мьют, ``forget``), получают явный
           ноль, иначе замолчавший «продолжал бы говорить».
         """
-        now = time.monotonic()
         with self._lock:
-            stamps = dict(self._last_rx)
-            previous = dict(self._last_levels)
             by_pid = {}
             for token, pid in self._pids.items():
                 by_pid.setdefault(pid, token)
-        levels = self._mixer.channel_levels()
-        for pid in list(previous) + list(stamps):
-            levels.setdefault(pid, 0.0)
-        for pid in list(levels):
-            stamp = stamps.get(pid)
-            if stamp is None or (now - stamp) * 1000.0 > LEVEL_STALE_MS:
-                levels[pid] = 0.0
-        speaker = self._mixer.active_speaker(levels)
+        self._indicator.stale_ms = float(LEVEL_STALE_MS)
+        # Вызывается ПОСЛЕ set_buffer/remove: посчитанный раньше снимок отдал
+        # бы устаревшей ячейке последний RMS вместо нуля.
+        self._indicator.update(self._mixer)
+        speaker = self._indicator.speaker
         with self._lock:
             self._speaker = speaker
-            self._last_levels = dict(levels)
-        for pid, rms in levels.items():
+        for pid, pct in self._indicator.levels.items():
             # Участник ищется по ТОКЕНУ: ``find_by_token`` — единственный
             # контракт, который у эндпоинта есть всегда; поиск по id —
             # только резерв для каналов, снятых из ``_pids`` (forget).
@@ -363,7 +356,7 @@ class H323AudioBridge:
                 participant = self._participant_by_id(pid)
             if participant is None:
                 continue  # временный id: участника в комнате ещё нет
-            participant.volume_level = rms_percent(rms)
+            participant.volume_level = pct
             participant.is_speaking = speaker is not None and pid == speaker
 
     def active_speaker(self) -> Optional[int]:
@@ -373,8 +366,7 @@ class H323AudioBridge:
 
     def levels(self) -> Dict[int, int]:
         """Последние розданные уровни в процентах (0..100) по id комнаты."""
-        with self._lock:
-            return {pid: rms_percent(rms) for pid, rms in self._last_levels.items()}
+        return dict(self._indicator.levels)
 
     def _participant_by_id(self, pid: int) -> Any:
         find = getattr(self._endpoint, "find_by_id", None)
@@ -396,8 +388,8 @@ class H323AudioBridge:
             self._codecs.pop(token, None)
             if pid is None:
                 return
-            self._last_rx.pop(pid, None)
         self._mixer.remove(pid)
+        self._indicator.forget(pid)
         self._publish_levels()
         log.info("H.323: аудио-канал %s закрыт", token)
 
@@ -413,9 +405,9 @@ class H323AudioBridge:
             self._rates.clear()
             self._codecs.clear()
             self._pids.clear()
-            self._last_rx.clear()
         for pid in pids:
             self._mixer.remove(pid)
+            self._indicator.forget(pid)
         # Участники остаются в комнате (их снимает эндпоинт): индикатор
         # гасим явно, иначе «говорит» горел бы на мёртвом хосте.
         self._publish_levels()

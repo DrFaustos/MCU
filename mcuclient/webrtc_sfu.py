@@ -20,7 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .audio_mixer import AudioMixer, MixerConfig, MixStrategy
+from .audio_mixer import (LEVEL_STALE_MS_DEFAULT, AudioMixer, LevelsIndicator,
+                             MixerConfig, MixStrategy)
 from .log import get_logger
 
 try:  # numpy есть в зависимостях; при отсутствии — деградация.
@@ -44,6 +45,12 @@ class ConferenceParticipant:
     video_frames: int = 0
     audio_frames: int = 0
     state: str = "connected"
+    #: Громкость в процентах (0..100) и признак «говорит». Выставляет их
+    #: :meth:`AudioMixSession.tick` — единственный, кто видит PCM браузеров.
+    #: До 2026-10-10 полей не было вовсе, и панель держала для браузеров
+    #: константу ``speaking: false``.
+    volume_level: int = 0
+    is_speaking: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,6 +64,8 @@ class ConferenceParticipant:
             "audio_frames": self.audio_frames,
             "state": self.state,
             "kind": "web",
+            "volume_level": self.volume_level,
+            "speaking": self.is_speaking,
         }
 
 
@@ -267,7 +276,9 @@ class AudioMixSession:
 
     def __init__(self, bus: MediaBus, recipients=None, sample_rate: int = 48000,
                  frame_ms: int = 20, strategy: str = "average",
-                 mixer: Optional[AudioMixer] = None, on_mix=None) -> None:
+                 mixer: Optional[AudioMixer] = None, on_mix=None,
+                 conference: Optional[Conference] = None,
+                 level_stale_ms: float = LEVEL_STALE_MS_DEFAULT) -> None:
         self._bus = bus
         self._recipients = recipients  # callable -> list[str] | None
         self._rate = int(sample_rate)
@@ -288,6 +299,13 @@ class AudioMixSession:
         self._stop = threading.Event()
         # Колбэк общего микса: (pcm, rate, channels) — например, мост в SIP.
         self._on_mix = on_mix
+        # Индикатор «говорит»: реестр веб-участников, которому раздаются
+        # уровни (создаётся раньше микшера), и сам индикатор — тот же
+        # затухающий, что в H.323-мосту.
+        self._conference = conference
+        self._indicator = LevelsIndicator(level_stale_ms)
+        # pid -> версия последнего учтённого аудио-кадра шины.
+        self._last_audio_ver: Dict[str, int] = {}
 
     # -- параметры ---------------------------------------------------------
     @property
@@ -327,10 +345,18 @@ class AudioMixSession:
     def tick(self) -> int:
         """Один цикл микширования. Возвращает номер версии микса."""
         publishers = list(self._bus.publishers())
+        # «Свежий» = версия аудио выросла с прошлого тика: только новый кадр
+        # отмечает живость публикации. По последнему кадру шины гореть нельзя —
+        # MediaBus держит его до самого drop(), т.е. до выхода из конференции.
+        fresh: Dict[str, bool] = {}
         for pid in publishers:
             item = self._bus.latest_audio(pid)
             if item is None:
+                fresh[pid] = False
                 continue
+            ver = self._bus.audio_version(pid)
+            fresh[pid] = self._last_audio_ver.get(pid) != ver
+            self._last_audio_ver[pid] = ver
             pcm, rate, channels = item
             mono = _resample_mono(pcm, int(rate), int(channels), self._rate)
             self._mixer.set_buffer(pid, mono)
@@ -341,6 +367,16 @@ class AudioMixSession:
         for buffered in list(self._mixer.participant_ids):
             if buffered not in publishers:
                 self._mixer.remove(buffered)
+        for pid in list(self._last_audio_ver):
+            if pid not in publishers:
+                del self._last_audio_ver[pid]
+        # Индикатор обновляется ПОСЛЕ очистки микшера: removed-публикатор
+        # обязан получить явный ноль, а не последний RMS.
+        self._indicator.update(self._mixer, fresh)
+        conference = self._conference
+        if conference is not None:
+            conference.update_levels(self._indicator.levels,
+                                     self._indicator.speaker)
 
         recipients = self._recipients
         if callable(recipients):
@@ -368,6 +404,19 @@ class AudioMixSession:
             except Exception:  # noqa: BLE001
                 log.debug("on_mix упал", exc_info=True)
         return seq
+
+    # -- индикатор «говорит» -------------------------------------------------
+    def levels(self) -> Dict[str, int]:
+        """Уровни последнего тика в процентах (0..100) по id публикации.
+
+        Копия: внутренний словарь индикатора не должен раздаваться наружу —
+        вызывающий, изменив его, молча испортил бы следующий расчёт.
+        """
+        return dict(self._indicator.levels)
+
+    def active_speaker(self) -> Optional[str]:
+        """Публикатор, громчайший на последнем тике; None — тишина у всех."""
+        return self._indicator.speaker
 
     def record_mix(self):
         """Общий микс для записи: (seq, pcm) или None (все голоса)."""
@@ -467,6 +516,32 @@ class Conference:
                 p.video_frames += 1
             else:
                 p.audio_frames += 1
+
+    def update_levels(self, levels: Dict[str, int],
+                      speaker: Optional[str] = None) -> int:
+        """Выставить веб-участникам громкость и признак «говорит».
+
+        Продюсер — :meth:`AudioMixSession.tick` (он единственный видит PCM
+        браузеров), потребитель — веб-панель через :meth:`participants`.
+        Без этой связки тайл браузера подсвечивался бы «говорит» никогда.
+
+        ``on_change`` не зовётся: тик идёт каждые 20 мс, а панель опрашивает
+        статус сама — поднимать на уровни событие смены списка участников
+        значит заваливать подписчиков. Возвращает число изменённых участников.
+        """
+        changed = 0
+        with self._lock:
+            for pid, p in self._participants.items():
+                try:
+                    pct = int(levels.get(pid, 0) or 0)
+                except (TypeError, ValueError):
+                    pct = 0
+                speaking = speaker is not None and pid == speaker
+                if p.volume_level != pct or p.is_speaking != speaking:
+                    p.volume_level = pct
+                    p.is_speaking = speaking
+                    changed += 1
+        return changed
 
     def participants(self) -> List[Dict[str, Any]]:
         with self._lock:

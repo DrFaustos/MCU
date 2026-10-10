@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from mcuclient.webrtc_sfu import AudioMixSession, MediaBus
+from mcuclient.webrtc_sfu import AudioMixSession, Conference, MediaBus
 
 
 def _pcm(value: int, samples: int = 960) -> bytes:
@@ -88,3 +88,106 @@ def test_start_stop_thread():
         assert mix.mixed_for("web-2") is not None
     finally:
         mix.stop()
+
+
+# --- индикатор «говорит» веб-публикаций (продюсер — tick) --------------------
+
+
+def _conf_mix(**kw):
+    """Конференция + микшер, повёрнутый на неё: как в WebSession."""
+    conf = Conference()
+    mix = AudioMixSession(conf.bus,
+                          recipients=lambda: [p["id"] for p in conf.participants()],
+                          **kw)
+    return conf, mix
+
+
+def test_tick_marks_the_loudest_publisher_as_speaking():
+    conf, mix = _conf_mix(conference=None)
+    a = conf.join("Аня")
+    b = conf.join("Боря")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [a.id, b.id],
+                          conference=conf)
+    conf.bus.publish_audio(a.id, _pcm(4000), 48000, 1)
+    conf.bus.publish_audio(b.id, _pcm(0), 48000, 1)
+    mix.tick()
+
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[a.id]["speaking"] is True and rows[a.id]["volume_level"] == 100
+    assert rows[b.id]["speaking"] is False and rows[b.id]["volume_level"] == 0
+    assert mix.active_speaker() == a.id
+    assert mix.levels()[a.id] == 100
+
+
+def test_loudest_publisher_wins_the_spotlight():
+    conf, _ = _conf_mix()
+    a = conf.join("Аня")
+    b = conf.join("Боря")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [a.id, b.id],
+                          conference=conf)
+
+    conf.bus.publish_audio(a.id, _pcm(800), 48000, 1)
+    conf.bus.publish_audio(b.id, _pcm(0), 48000, 1)
+    mix.tick()
+    assert conf.participants()[0]["speaking"] is True   # Аня (она первой вошла)
+
+    conf.bus.publish_audio(a.id, _pcm(800), 48000, 1)
+    conf.bus.publish_audio(b.id, _pcm(4000), 48000, 1)
+    mix.tick()
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[b.id]["speaking"] is True and rows[a.id]["speaking"] is False
+    assert mix.active_speaker() == b.id
+
+
+def test_living_stream_does_not_blink_between_ticks():
+    """Панель опрашивает статус раз в 3 с, тик — каждые 20 мс.
+
+    Гасить «потому что в этом тике нового кадра не было» — значит показывать
+    «не говорит» у браузера, который говорит: публикация и тик идут с одинаковым
+    шагом и законно разъезжаются по фазе.
+    """
+    conf, _ = _conf_mix()
+    a = conf.join("Аня")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [a.id], conference=conf)
+    conf.bus.publish_audio(a.id, _pcm(4000), 48000, 1)
+    mix.tick()
+    mix.tick()                      # второй тик без новой публикации
+    row = conf.participants()[0]
+    assert row["speaking"] is True and row["volume_level"] == 100
+
+
+def test_silence_fades_the_indicator_past_the_threshold():
+    """Порог — единственный способ погаснуть: шина держит последний кадр до drop().
+
+    Отрицательный порог означает «любой штамп устарел» и даёт детерминизм без
+    time.sleep (тот же приём, что в тестах H.323-моста).
+    """
+    conf, _ = _conf_mix(level_stale_ms=-1.0)
+    a = conf.join("Аня")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [a.id], conference=conf,
+                          level_stale_ms=-1.0)
+    conf.bus.publish_audio(a.id, _pcm(4000), 48000, 1)
+    mix.tick()
+    row = conf.participants()[0]
+    assert row["volume_level"] == 0 and row["speaking"] is False
+
+
+def test_levels_snapshot_is_a_copy():
+    conf, mix = _conf_mix(conference=None)
+    a = conf.join("Аня")
+    conf.bus.publish_audio(a.id, _pcm(4000), 48000, 1)
+    mix.tick()
+    snap = mix.levels()
+    snap[a.id] = 0
+    assert mix.levels()[a.id] == 100, "наружу отдаётся копия, а не рабочий словарь"
+
+
+def test_levels_without_conference_still_counted():
+    """Микшер без конференции (тесты, мост SIP↔web) считает уровни наружу."""
+    conf, mix = _conf_mix(conference=None)
+    a = conf.join("Аня")
+    conf.bus.publish_audio(a.id, _pcm(4000), 48000, 1)
+    mix.tick()
+    assert mix.levels()[a.id] == 100
+    assert mix.active_speaker() == a.id
+    assert conf.participants()[0]["volume_level"] == 0   # раздавать было некому

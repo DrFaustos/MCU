@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcuclient.audio_mixer import (  # noqa: E402
     LEVEL_FULL_RMS,
+    LevelsIndicator,
     AudioMixer,
     MixerConfig,
     MixStrategy,
@@ -348,3 +349,83 @@ def test_active_speaker_uses_given_snapshot_not_buffers():
     mx.set_buffer(2, _pcm([0] * 8))
     assert mx.active_speaker({1: 0.0, 2: 900.0}) == 2
     assert mx.active_speaker({1: 0.0, 2: 0.0}) is None
+
+
+# --- LevelsIndicator: общее затухание для двух продюсеров --------------------
+
+
+def test_indicator_levels_are_percentages():
+    ind = LevelsIndicator()
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    levels = ind.update(mx)
+    assert levels[1] == 100
+    assert ind.speaker == 1
+
+
+def test_indicator_marks_channels_gone_from_mixer_as_zero():
+    """Ячейку сняли (мьют, выход, drop) — индикатор обязан погасить её сам.
+
+    Иначе «говорит» остаётся на том, кто замолчал: в микшере буфера уже нет,
+    а уровень в индикаторе всё ещё прошлый.
+    """
+    ind = LevelsIndicator()
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.update(mx)
+    assert ind.levels[1] == 100
+
+    mx.remove(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0, "замолчавший канал обязан погаснуть, а не гореть"
+    assert ind.speaker is None
+
+
+def test_indicator_fades_a_channel_silent_past_the_threshold():
+    ind = LevelsIndicator(stale_ms=-1.0)   # любой штамп считается устаревшим
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0
+
+
+def test_indicator_fresh_flag_is_a_liveness_mark():
+    """`fresh` должен ОБНОВЛЯТЬ штамп живости, а не быть вторым механизмом гашения.
+
+    В веб-микшере времени на кадре нет вовсе, только версия шины. Если «свежий»
+    не отмечал бы живость, браузер светился бы «говорит» ровно один тик.
+    """
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("a", _pcm([4000] * 8))
+    ind.update(mx, {"a": True})
+    assert ind.levels["a"] == 100
+
+    ind.update(mx, {"a": False})
+    assert ind.levels["a"] == 100, "в пределах окна живой канал не гаснет"
+
+    ind.stale_ms = -1.0
+    ind.update(mx, {"a": False})
+    assert ind.levels["a"] == 0
+
+
+def test_indicator_marks_only_the_fresh_channels():
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer("a", _pcm([4000] * 8))
+    mx.set_buffer("b", _pcm([4000] * 8))
+    ind.update(mx, {"a": True, "b": False})
+    assert (ind.levels["a"], ind.levels["b"]) == (100, 0)
+
+
+def test_indicator_forget_drops_the_stamp():
+    ind = LevelsIndicator(stale_ms=1000.0)
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([4000] * 8))
+    ind.mark(1)
+    ind.forget(1)
+    ind.update(mx)
+    assert ind.levels[1] == 0, "забытый канал не должен гореть по старым штампам"

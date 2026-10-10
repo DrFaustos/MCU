@@ -150,3 +150,59 @@ def test_leave_drops_bus_media():
     conf.bus.publish_video(p.id, "f", 1, 1)
     conf.leave(p.id)
     assert conf.bus.latest_video(p.id) is None
+
+
+# --- индикатор «говорит» у веб-участников ------------------------------------
+
+
+def test_update_levels_sets_speaking_and_volume():
+    conf = Conference()
+    a = conf.join("Аня")
+    b = conf.join("Боря")
+    changed = conf.update_levels({a.id: 100, b.id: 0}, a.id)
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[a.id]["speaking"] is True and rows[a.id]["volume_level"] == 100
+    assert rows[b.id]["speaking"] is False and rows[b.id]["volume_level"] == 0
+    assert changed == 1, "изменённым считается только тот, у кого поле поехало"
+
+
+def test_update_levels_is_idempotent():
+    conf = Conference()
+    a = conf.join("Аня")
+    conf.update_levels({a.id: 55}, a.id)
+    assert conf.update_levels({a.id: 55}, a.id) == 0
+
+
+def test_update_levels_handles_garbage_and_no_speaker():
+    conf = Conference()
+    a = conf.join("Аня")
+    conf.update_levels({a.id: None}, None)
+    row = conf.participants()[0]
+    assert row["volume_level"] == 0 and row["speaking"] is False
+
+
+def test_update_levels_does_not_fire_on_change():
+    """Тик микшера идёт каждые 20 мс.
+
+    Поднимать на уровни событие «список участников изменился» — значит
+    заваливать подписчиков десятки раз в секунду вместо того, чтобы панель
+    просто забрала их при следующем опросе статуса.
+    """
+    calls: list = []
+    conf = Conference(on_change=lambda: calls.append(1))
+    a = conf.join("Аня")
+    after_join = len(calls)          # join своё событие уже поднял
+    conf.update_levels({a.id: 80}, a.id)
+    conf.update_levels({a.id: 20}, None)
+    assert len(calls) == after_join, "на уровни событие смены списка не поднимается"
+
+
+def test_participants_snapshot_carries_speaking_and_volume():
+    """Ключи to_dict — контракт панели: тайл браузера берёт их оттуда."""
+    conf = Conference()
+    p = conf.join("Аня")
+    conf.update_levels({p.id: 42}, p.id)
+    row = conf.participants()[0]
+    assert row["speaking"] is True
+    assert row["volume_level"] == 42
+    assert row["kind"] == "web"

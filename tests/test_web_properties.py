@@ -8,6 +8,9 @@ SipEngine: часть API — свойства, часть — методы.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from mcuclient.models import CallState, EventBus, Participant, Room
 from mcuclient.web_server import WebSession
 
@@ -135,3 +138,33 @@ def test_participant_dict_carries_speaking_and_level():
     d = _participant_to_dict(p)
     assert d["speaking"] is True
     assert d["volume_level"] == 42
+
+
+def _panel_html():
+    """Текст страницы панели: её контракт с API проверяется по исходнику."""
+    path = Path(__file__).resolve().parents[1] / "mcuclient" / "webui" / "index.html"
+    return path.read_text(encoding="utf-8")
+
+
+def test_panel_has_no_hardcoded_speaking_false():
+    """Константа `speaking: false` делала подсветку тайла браузера недостижимой.
+
+    Микшер сколько угодно считал уровни — панель их не читала вовсе, и
+    «говорит» мог загореться только у SIP/H.323-участника.
+    """
+    html = _panel_html()
+    assert re.search(r"speaking:\s*false\b", html) is None, (
+        "веб-участникам снова выставлена константа вместо p.speaking из API")
+
+
+def test_panel_marks_speaking_on_both_tile_kinds():
+    """Подсветка обязана быть и у SIP/H.323-тайла, и у тайла браузера."""
+    html = _panel_html()
+    assert html.count("p.speaking ? 'speaking' : ''") == 2, (
+        "класс speaking должен ставиться в обоих шаблонах тайлов")
+
+
+def test_panel_passes_web_volume_through():
+    html = _panel_html()
+    assert "volume_level: p.volume_level || 0" in html, (
+        "громкость браузера не доезжает до модели тайла")

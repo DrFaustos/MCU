@@ -341,7 +341,8 @@ function renderTiles() {
   const sip = sipParticipants.map(p => ({ ...p, kindLabel: 'SIP/H.323' }));
   const web = webParticipants.map(p => ({
     id: p.id, uri: p.name, label: p.name, state: p.state,
-    muted: !p.audio_enabled, video_muted: !p.video_enabled, speaking: false,
+    muted: !p.audio_enabled, video_muted: !p.video_enabled,
+    speaking: !!p.speaking, volume_level: p.volume_level || 0,
     web: true, isMe: me && p.id === me.id, kindLabel: 'браузер'
   }));
   const all = [...sip, ...web];
@@ -349,7 +350,7 @@ function renderTiles() {
   grid.innerHTML = all.map(p => {
     if (p.web) {
       return `
-      <div class="tile" data-peer="${esc(p.id)}">
+      <div class="tile ${p.speaking ? 'speaking' : ''}" data-peer="${esc(p.id)}">
         <div class="state">${esc(p.state || '')}</div>
         <div class="flags">${p.muted ? '<span class="muted">🔇</span>' : ''}${p.video_muted ? '<span>📷✕</span>' : ''}</div>
         ${p.isMe ? '' : `<video autoplay playsinline></video>`}

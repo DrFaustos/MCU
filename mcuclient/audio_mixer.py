@@ -21,6 +21,7 @@ Default: AVERAGE as the safe compromise (as in OpenMCU.ru).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Union
@@ -142,6 +143,85 @@ def rms_percent(rms: float, full_rms: float = LEVEL_FULL_RMS) -> int:
     if rms <= 0.0 or full_rms <= 0.0:
         return 0
     return min(100, int(round(rms * 100.0 / float(full_rms))))
+
+
+#: Сколько миллисекунд канал может не подавать новых данных, прежде чем
+#: индикатор «говорит» погаснет. Порог нужен именно здесь: буфер микшера
+#: живёт до ``remove()``, поэтому последний услышанный голос горел бы на
+#: участнике до конца вызова.
+LEVEL_STALE_MS_DEFAULT = 120
+
+
+class LevelsIndicator:
+    """Кто сейчас говорит и насколько громко — поверх ``AudioMixer``.
+
+    Индикатор ничего не знает о протоколе. Продюсер вызывает :meth:`update`
+    после того, как обновил (и почистил) микшер, передавая либо ``fresh``
+    («был ли НОВЫЙ кадр с прошлого раза»), либо полагаясь на штампы :meth:`mark`.
+    Перепутать порядок нельзя: посчитанный до очистки микшера снимок отдаёт
+    устаревшей ячейке последний RMS вместо нуля, и «говорит» остаётся на том,
+    кто замолчал.
+
+    О новом кадре продюсер сообщает одним из двух способов — и это РОВНО
+    одно и то же событие, просто данные о кадре у источников разные:
+
+    * :meth:`mark` — канал дал кадр (H.323: PCM приходит кадр за кадром);
+    * ``fresh`` — словарь «был ли НОВЫЙ кадр с прошлого вызова» (веб-шина:
+      ``latest_audio`` хранит последний кадр до самого ``drop()``, времени там
+      нет, зато есть версия публикации).
+
+    Гаснет же всё по ОДНОМУ порогу (:attr:`stale_ms`). Соблазн для веб-стороны
+    — «нет нового кадра в этом тике = тишина» — выглядит правдоподобно и врёт:
+    тик микшера и публикация браузера идут с одинаковым шагом ~20 мс, поэтому
+    часть тиков законно не успевает увидеть новый кадр. Гасить по этому
+    признаку означало бы показывать «не говорит» у говорящего браузера.
+
+    :attr:`levels` отдаёт проценты 0..100 (шкала :func:`rms_percent`), поэтому
+    потребителю не нужно знать про RMS.
+    """
+
+    def __init__(self, stale_ms: float = LEVEL_STALE_MS_DEFAULT) -> None:
+        self.stale_ms = float(stale_ms)
+        #: id -> проценты громкости последнего обновления
+        self.levels: Dict[ParticipantId, int] = {}
+        #: id -> громчайший сейчас; None, если тишина у всех
+        self.speaker: Optional[ParticipantId] = None
+        self._last_mark: Dict[ParticipantId, float] = {}
+
+    def mark(self, channel_id: ParticipantId, now: Optional[float] = None) -> None:
+        """Отметить живость канала (вызывать на каждый новый кадр)."""
+        self._last_mark[channel_id] = time.monotonic() if now is None else now
+
+    def forget(self, channel_id: ParticipantId) -> None:
+        """Забыть канал целиком (он больше не участвует в миксе)."""
+        self._last_mark.pop(channel_id, None)
+
+    def update(self, mixer: "AudioMixer",
+               fresh: Optional[Dict[ParticipantId, bool]] = None,
+               now: Optional[float] = None) -> Dict[ParticipantId, int]:
+        """Пересчитать уровни по снимку микшера. Возвращает :attr:`levels`."""
+        moment = time.monotonic() if now is None else now
+        if fresh is not None:
+            # «Свежий кадр» и есть отметка живости: время одно, и считать
+            # затухание двум продюсерам по-разному нельзя.
+            for channel_id, is_fresh in fresh.items():
+                if is_fresh:
+                    self._last_mark[channel_id] = moment
+        marks = dict(self._last_mark)
+        rms = mixer.channel_levels()
+        # Каналы, которые были в прошлом снимке, но исчезли из микшера (мьют,
+        # выход, drop), обязаны получить явный ноль — иначе «говорит»
+        # останется на том, кто замолчал.
+        for channel_id in list(self.levels) + list(marks):
+            rms.setdefault(channel_id, 0.0)
+        for channel_id in list(rms):
+            stamp = marks.get(channel_id)
+            if stamp is None or (moment - stamp) * 1000.0 > self.stale_ms:
+                rms[channel_id] = 0.0
+        self.speaker = mixer.active_speaker(rms)
+        self.levels = {channel_id: rms_percent(value)
+                       for channel_id, value in rms.items()}
+        return self.levels
 
 
 def _aligned_int16_sum(np_mod, buffers: Dict[ParticipantId, bytes],
