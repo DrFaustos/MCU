@@ -281,6 +281,13 @@ class WebSession:
     молча подменяется дефолтом.
     """
 
+    #: Параметры PCM, который приходит из RTP-моста mediasoup. Брать их надо не
+    #: «на глаз», а из PLAIN_RTP_PARAMETERS моста: PCMU, 8 кГц, моно — иначе
+    #: приёмник декодировал бы 8-кГц поток как 16-кГц и голос терминала ехал бы
+    #: на полтонны ниже.
+    SFU_AUDIO_RATE = 8000
+    SFU_AUDIO_CHANNELS = 1
+
     def __init__(self, engine: Any, config: Any = None, h323: Any = None,
                  ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
@@ -948,10 +955,39 @@ class WebSession:
         return self._ms_rtp or None
 
     def _on_sfu_audio(self, pcm: bytes) -> None:
-        """Звук из mediasoup (SIP-участник слышен) -> в общий микс веба."""
+        """Входящий RTP из mediasoup: это звук ДЛЯ SIP-терминала, а не из веба.
+
+        Направление описано в самом мосту
+        (:mod:`mcuclient.mediasoup_rtp_bridge`): «Браузеры -> SIP: mediasoup
+        PlainTransport -> RTP -> ``RtpUdpEndpoint`` (``on_pcm``) -> колбэк
+        ``on_sip_pcm``». Голос самого терминала едет в обратную сторону — нашим
+        же ``produce_plain`` (``push_sip_pcm_to_sfu``). Значит кадр обязан
+        уйти в терминал, а не в шину веба.
+
+        Прежняя редакция выкладывала его в :class:`MediaBus` под id ``"sip"``
+        (замерено пробой живьём):
+
+        * браузеры получали СВОИ же голоса — микс Алисы: амплитуда 1000 при
+          нулевой речи в вебе; и это ещё и контур: шина -> ``on_mix`` ->
+          терминал -> ``push_sip_pcm_to_sfu`` -> SFU -> этот же колбэк;
+        * публикация была без парного ``drop`` — никто, включая ``close()``,
+          канал не убирал (после остановки панели ``publishers() == ['sip']``,
+          ``latest_audio('sip')`` — ЕСТЬ), т.е. фантом в миксе навсегда; тот
+          же класс, что закрыт в ``32f8fb8`` и ``7bd25e9``;
+        * id ``"sip"`` = :attr:`SipWebAudioBridge.SIP_PUBLISHER_ID`, то есть
+        чужой канал: ``web_mix_for_sip('sip-0')`` вычесть его не мог и
+        терминалу возвращался звук из SFU (замер: амплитуда 1000 вместо 0).
+
+        Канал не заводится вообще — убирать тогда нечего. Некому слушать (нет
+        ``sip_sink``) — кадр выбрасывается, а не остаётся в шине.
+        """
+        if not pcm:
+            return
         try:
-            self.conference.bus.publish_audio("sip", pcm, 8000, 1)  # G.711
-        except Exception:  # noqa: BLE001
+            # G.711: PLAIN_RTP_PARAMETERS у моста — PCMU, 8 кГц, моно.
+            self.sip_bridge.push_web_mix(pcm, self.SFU_AUDIO_RATE,
+                                         self.SFU_AUDIO_CHANNELS)
+        except Exception:  # noqa: BLE001 — RTP-поток не имеет права ронять панель
             log.debug("_on_sfu_audio упал", exc_info=True)
 
     def push_sip_pcm_to_sfu(self, pcm: bytes) -> bool:

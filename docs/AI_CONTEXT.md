@@ -200,6 +200,13 @@
 - `mediasoup_rtp_bridge.py` — `MediasoupRtpBridge`: PlainTransport +
   produce_plain, SIP-звук -> mediasoup и обратно.
 - `WebSession.mediasoup_rtp_bridge()`/`push_sip_pcm_to_sfu()`/`_on_sfu_audio`.
+  Направление у этих двух точек РАЗНОЕ и читать его надо из docstring моста:
+  `push_sip_pcm_to_sfu` — голос терминала в SFU (наш `produce_plain`), а
+  `_on_sfu_audio` — приём `on_pcm`, т.е. голоса браузеров **для** терминала:
+  он обязан уйти в `sip_bridge.push_web_mix` (в `sip_sink`), а НЕ в `MediaBus`.
+  Публикация его в шину под `SIP_PUBLISHER_ID` возвращала браузерам их же
+  голоса контуром «шина -> on_mix -> терминал -> SFU -> тот же колбэк» и
+  не имела парного `drop` — `tests/test_mediasoup_rtp_wiring.py` (11).
 - `sip_mock.py` — `MockSipAudioSource`: тестовый тон без терминала.
 
 ### 2.11. SFU mediasoup: сигналинг, браузер, стек одной командой
