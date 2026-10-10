@@ -23,16 +23,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Hashable, Iterable, List, Optional
+from typing import Any, Dict, Hashable, Iterable, List, Optional
 
 from .log import get_logger
 
 log = get_logger("mixer")
 
+#: Форма, зелёная в ОБЕИХ средах mypy. Сред здесь ДВЕ: среда разработки
+#: (numpy стоит) и среда CI-гейта (шаг typecheck ставил только mypy, без
+#: requirements.txt, — воспроизводится `mypy --no-site-packages mcuclient`).
+#: `_np = None` в except краснеет в первой (None в переменную типа Module);
+#: `import numpy as _np` после объявления краснеет во второй (no-redef).
+#: Разобрано 2026-10-10 на mcuclient/video_source.py (коммит 270441e упал
+#: именно на этом). Итог: объявление с типом, импорт без `as`, присваивание.
+_np: Any = None
 try:  # numpy is in project deps; fallback is pure Python.
-    import numpy as _np
+    import numpy
+
+    _np = numpy
 except Exception:  # noqa: BLE001
-    _np = None
+    # Нumpy недоступен: _np остаётся None, ветки ниже берут чистый Python.
+    pass
 
 
 def _clamp_int16(v: int) -> int:

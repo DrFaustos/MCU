@@ -23,10 +23,16 @@ from typing import Any, Callable, Dict, List, Optional
 from .audio_mixer import AudioMixer, MixerConfig, MixStrategy
 from .log import get_logger
 
+#: Та же форма, что в audio_mixer.py: зелёная и в среде С numpy, и в
+#: среде БЕЗ numpy (CI-гейт). Объявление с типом + импорт без `as` +
+#: присваивание; иначе `assignment` (с numpy) или `no-redef` (без numpy).
+_np: Any = None
 try:  # numpy есть в зависимостях; при отсутствии — деградация.
-    import numpy as _np
+    import numpy
+
+    _np = numpy
 except Exception:  # noqa: BLE001
-    _np = None
+    pass
 
 log = get_logger("sfu")
 
@@ -214,19 +220,25 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
             return out.tobytes()
         return arr.tobytes() if channels == 1 else arr.tobytes()
     try:
-        arr = _np.frombuffer(pcm, dtype=_np.int16)
+        pcm_i16 = _np.frombuffer(pcm, dtype=_np.int16)
     except Exception:  # noqa: BLE001
         return b""
-    if channels > 1 and len(arr) % channels == 0:
-        arr = arr.reshape(-1, channels).mean(axis=1)
-    if rate != target_rate and len(arr) > 1:
-        n = int(round(len(arr) * float(target_rate) / float(rate)))
+    # Два имени вместо одного `arr`: после сведения в моно и после ресемпла
+    # массив становится float64, а frombuffer отдаёт int16. Прежняя запись
+    # меняла dtype на одном имени, и mypy в среде с numpy (py.typed) краснел
+    # на этих двух строках. Значения не меняются — проверено побайтовым
+    # слепком аудио-пути (resample-кейсы 8к/48к, моно/стерео, границами).
+    data: Any = pcm_i16
+    if channels > 1 and len(pcm_i16) % channels == 0:
+        data = pcm_i16.reshape(-1, channels).mean(axis=1)
+    if rate != target_rate and len(data) > 1:
+        n = int(round(len(data) * float(target_rate) / float(rate)))
         if n <= 0:
             return b""
-        src = _np.arange(len(arr), dtype=_np.float64)
-        dst = _np.linspace(0.0, len(arr) - 1.0, n)
-        arr = _np.interp(dst, src, arr.astype(_np.float64))
-    return _np.clip(arr, -32768, 32767).astype(_np.int16).tobytes()
+        src = _np.arange(len(data), dtype=_np.float64)
+        dst = _np.linspace(0.0, len(data) - 1.0, n)
+        data = _np.interp(dst, src, data.astype(_np.float64))
+    return _np.clip(data, -32768, 32767).astype(_np.int16).tobytes()
 
 
 def _fit_frame(pcm: bytes, frame_bytes: int) -> bytes:
