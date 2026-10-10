@@ -11,7 +11,7 @@ from mcuclient.webrtc_ingest import (
     WebRTCManager,
     make_frame_hub_sink,
 )
-from mcuclient.webrtc_sfu import AudioMixSession, MediaBus
+from mcuclient.webrtc_sfu import AudioMixSession, Conference, MediaBus
 
 
 # --- фейковый aiortc --------------------------------------------------------
@@ -135,7 +135,7 @@ def test_available_manager_accepts_offer():
     assert m.available is True
     result = m.handle_offer("v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96")
     assert result["type"] == "answer"
-    assert result["session"] == "web-1"
+    assert result["session"] == "webrtc-1"
     assert "v=0" in result["sdp"]
     assert len(m.sessions()) == 1
     assert m.sessions()[0]["state"] in ("new", "unknown")
@@ -313,3 +313,58 @@ def test_close_session_keeps_other_participants_channels():
 
     m.close_all()
     assert bus.publishers() == [], "close_all обязан убрать каналы всех сессий"
+
+
+# --- пространства имён id: сессия != участник -------------------------------
+#
+# `Conference.join` даёт id вида `web-<N>`, и `handle_offer` строил сид тем же
+# шаблоном со СВОИМ счётчиком. `participant` в контракте POST /api/webrtc/offer
+# (docs/WEB_CONTROL.md) не обязателен, значит анонимный offer — штатный вызов, а
+# его каналом становился id живого участника. Замерено пробой боевым путём:
+# join() и handle_offer() вернули `web-1`; PCM анонита лёг в канал участника, а
+# conference.leave() участника обнулил шину при ЖИВОЙ сессии анонима.
+
+def test_anonymous_session_does_not_borrow_participant_channel():
+    bus = MediaBus()
+    conf = Conference(bus=bus)
+    alice = conf.join("Алиса")
+
+    fake = _FakeAiortc()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    sid = m.handle_offer("v=0", role="publish")["session"]
+    assert sid != alice.id, (
+        f"сид сессии совпал с id участника ({sid}): каналы шины гарантированно "
+        "столкнутся — два разных генератора в одном пространстве имён")
+
+    _publish(m, fake, 0)
+    bus.publish_audio(sid, _loud(), 48000, 1)
+    assert bus.latest_audio(alice.id) is None, (
+        "анонимный публикатор пишет в канал живого участника")
+
+    # Штатный выход Алисы обязан убрать ЕЁ канал, а не канал чужой сессии.
+    assert conf.leave(alice.id) is True
+    assert bus.publishers() == [sid], (
+        "выход участника снёс канал живой сессии анонима")
+
+
+def test_anonymous_publisher_is_still_heard_by_participants():
+    """Обратная половина: разделение id не прячет анонимный звук.
+
+    Иначе «починка» коллизии выродилась бы в заглушку — браузер, вошедший без
+    id участника, перестал бы быть слышен конференции.
+    """
+    bus = MediaBus()
+    conf = Conference(bus=bus)
+    alice = conf.join("Алиса")
+
+    fake = _FakeAiortc()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    sid = m.handle_offer("v=0", role="publish")["session"]
+    _publish(m, fake, 0)
+    bus.publish_audio(sid, _loud(), 48000, 1)
+
+    mix = AudioMixSession(bus, recipients=lambda: [alice.id])
+    mix.tick()
+    item = mix.mixed_for(alice.id)
+    assert item is not None and _amp(item[1]) > 0, (
+        "анонимный публикатор пропал из микса участника")

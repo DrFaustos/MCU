@@ -299,7 +299,15 @@ class WebRTCManager:
                             participant: Optional[str] = None) -> Dict[str, Any]:
         mod = self._aiortc
         self._counter += 1
-        sid = f"web-{self._counter}"
+        # Id СЕССИИ живёт в ОТДЕЛЬНОМ пространстве имён от id УЧАСТНИКА
+        # конференции (`Conference.join` тоже `web-<N>`, но со своим
+        # счётчиком). Иначе анонимный offer — а `participant` в контракте
+        # POST /api/webrtc/offer (docs/WEB_CONTROL.md) не обязателен — делает
+        # сид каналом шины, и он же есть канал живого участника. Замерено
+        # пробой боевым путём: join() и handle_offer() вернули `web-1`, PCM
+        # анонима лёг в канал участника, а conference.leave() снёс канал
+        # живой сессии (publishers() стал пустым при живом анониме).
+        sid = f"webrtc-{self._counter}"
         info = SessionInfo(id=sid)
         info.role = role
         pc = mod.RTCPeerConnection(self._pc_config())

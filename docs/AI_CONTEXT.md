@@ -254,7 +254,7 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 принадлежит УЧАСТНИКУ, а не сессии: под одним `publish_id` могут стоять
 публикация и просмотр одного человека, поэтому `drop` происходит только когда под
 этим id не публикует больше никто живой. Регрессия —
-`tests/test_webrtc_ingest.py` (13).
+`tests/test_webrtc_ingest.py` (15).
 
 ### 3.8. ICE-серверы: строки И словари (исправлено, `ceb38fe`)
 `Config.web_ice_servers` отдаёт список словарей `{urls, username, credential}`

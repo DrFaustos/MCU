@@ -157,7 +157,7 @@ POST (тело — JSON):
 | `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |
 | `/api/web_port` | `{port}` | порт web-панели |
-| `/api/webrtc/offer` | `{sdp, type?, subscribe?}` | SDP-offer браузера: ingest (публикация) или подписка на чужие треки (`subscribe` — список id) |
+| `/api/webrtc/offer` | `{sdp, type?, role?, subscribe?, participant?}` | SDP-offer браузера: `role=publish` (по умолчанию) — ingest своих треков, `role=viewer` — подписка на чужие (`subscribe` — список id). `participant` — id участника из `/api/conference/join`: без него публикация идёт в собственный канал `webrtc-<N>` |
 | `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели |
 | `/api/web_recording` | `{enabled?}` | запись веб-конференции вкл/выкл/toggle (`WebRecorder`: кадры + аудио-микс) |
 | `/api/conference/join` | `{name, role?}` | войти в конференцию из браузера (`role`: participant/presenter) |
@@ -259,7 +259,11 @@ POST (тело — JSON):
 
 API конференции: `GET /api/conference`, `POST /api/conference/join` (имя),
 `/leave`, `/rename`, `/media`. WebRTC: `POST /api/webrtc/offer` с
-`role=publish|viewer` и `subscribe=[id,...]` для зрителя.
+`role=publish|viewer` и `subscribe=[id,...]` для зрителя. Публикатору, который
+хочет, чтобы его голос был подписан на id участника, надо передать
+`participant` (id из `conference/join`): без него сессия получает собственный
+канал `webrtc-<N>` — он не совпадает с id участника и живёт отдельно от
+реестра конференции (сессия закрывается по `session`, участник — по `id`).
 
 Ограничения: нет **симулкаста** и джиттер-буферов (полноценный SFU — дальше),
 лимит 64 веб-участника. Запись веб-конференции есть (§9): `WebRecorder` пишет
