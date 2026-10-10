@@ -37,9 +37,11 @@ web_server.py. Придуманный режим, отставшее число 
 
 import ast
 import copy
+import io
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -781,3 +783,345 @@ def test_dead_mypy_pointer_probe_recognizes_the_real_defect_shape():
                                  + tick + ' из pyproject.toml **не читает**', True)
     # Легитимно: мёртвой ссылки нет вообще.
     assert not _dead_mypy_pointer('r.md', 'см. ' + tick + 'mypy.ini' + tick, True)
+
+
+# --- ссылки «файл.py::символ» обязаны вести на живой символ ------------------
+#
+# Воспроизведено 2026-10-10 в этом же журнале: запись про кодек RTP-моста
+# (docs/STATUS.md:127) сослалась на `tests/test_mediasoup_rtp_bridge.py::
+# test_router_...`. Имя набрано усечённо — читатель тест по нему не найдёт, а
+# прогон зелёный: сверка чисел кейсов смотрит на ФАЙЛ, живость ИМЁН не
+# проверял никто. Таких ссылок в дереве десять: три в markdown, одна в
+# комментарии сайдкара (mediasoup-sidecar/src/room.js), шесть в базе знаний.
+# Переименование функции ломает все десять молча.
+
+#: Цель берётся из AST, а не из вывода pytest. Проверено этим же днём:
+#: `pytest -q --collect-only` в 9.x печатает `файл: N`, а не `::`-строки, и
+#: первая версия пробника по такому выводу объявила мёртвыми ВСЕ ссылки на
+#: тесты — 3 ложных срабатывания из 4.
+PY_SYMBOL_REF = re.compile(r'([A-Za-z0-9_./-]+\.py)::([A-Za-z_][A-Za-z0-9_]*)')
+
+#: Усечение БЕЗ начала имени (`файл.py::...stun...`): идентификаторного
+#: префикса нет, PY_SYMBOL_REF такую форму не видит вовсе. Живой пример —
+#: .ai-free/knowledge/notes.md:221 (усечённая ссылка на stun-тест).
+TRUNCATED_REF = re.compile(r'([A-Za-z0-9_./-]+\.py)::(?![A-Za-z_])')
+FENCE_RE = re.compile(r'^\s*```')
+JS_COMMENT_RE = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/')
+_SYMBOLS = {}
+
+
+def _pointer_sources():
+    """[(путь, текст)] — тексты, где ссылка обязана быть живой.
+
+    Markdown берётся ВСЁМ, включая журнал docs/STATUS.md: в отличие от
+    значений режимов (там журнал исключён, потому что обязан цитировать
+    исправленное заблуждение дословно), битое ИМЯ теста бьёт по читателю в
+    любом документе. tests/ исключён СОЗНАТЕЛЬНО: там живут probe-строки —
+    tests/test_test_runner.py подсовывает раннеру несуществующий
+    test_probe.py::test_bad, фикция, которая обязана НЕ находиться. Покрывать
+    tests/ — значит заставить страж утверждать, что фикция жива.
+    """
+    paths = [ROOT / 'README.md'] + sorted((ROOT / 'docs').glob('*.md'))
+    knowledge = ROOT / '.ai-free' / 'knowledge'
+    if knowledge.is_dir():
+        paths += sorted(knowledge.glob('*.md'))
+    for sub in ('mcuclient', 'scripts'):
+        if (ROOT / sub).is_dir():
+            paths += sorted((ROOT / sub).rglob('*.py'))
+    if (ROOT / 'mediasoup-sidecar' / 'src').is_dir():
+        paths += sorted((ROOT / 'mediasoup-sidecar' / 'src').glob('*.js'))
+    for path in paths:
+        if path.is_file():
+            yield path.relative_to(ROOT).as_posix(), path.read_text(
+                encoding='utf-8')
+
+
+def _markdown_prose_lines(text):
+    """Строки markdown вне ``` ```-блоков: вывод команд — данные, не указатель.
+
+    В fenced-блоке раннер печатает `FAIL test_probe.py::test_bad` — такой
+    цели в дереве нет и быть не может, а краснеть на данных — значит получить
+    прогон, который правят молчанием проверки.
+    """
+    out, fenced = [], False
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        if FENCE_RE.match(raw):
+            fenced = not fenced
+            continue
+        if not fenced:
+            out.append((lineno, raw))
+    return out
+
+
+def _python_prose_lines(rel, text):
+    """Только проза кода: комментарии и docstring'и, без строк-данных."""
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        tree = ast.parse(text)
+    except (SyntaxError, IndentationError, tokenize.TokenError) as exc:
+        # Молча пропустить неразобранный файл — та же «зелёная дыра», из-за
+        # которой страж вообще написан: краснеем явно.
+        raise AssertionError('%s не разбирается: %s' % (rel, exc))
+    lines = text.splitlines()
+    out = [(tok.start[0], tok.string) for tok in tokens
+           if tok.type == tokenize.COMMENT]
+    for node in ast.walk(tree):
+        body = getattr(node, 'body', None)
+        # isinstance(list): у ast.Lambda и ast.IfExp атрибут `body` — ОДИНОЧНЫЙ
+        # узел-выражение, а не список. На `lambda: ...` в mcuclient/abr_service.py
+        # первая версия давала TypeError: 'Call' object is not subscriptable —
+        # то есть страж падал на целом модуле вместо находки.
+        if not isinstance(body, list) or not body:
+            continue
+        if not isinstance(body[0], ast.Expr):
+            continue
+        first = body[0].value
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            # end_lineno у Constant типизирован как int | None: арифметика на
+            # None дала бы TypeError вместо находки.
+            start, end = first.lineno, first.end_lineno
+            if start is None or end is None:
+                continue
+            out.extend((no, lines[no - 1]) for no in range(start, end + 1))
+    out.sort()
+    return out
+
+
+def _js_prose_lines(text):
+    return [(text[:m.start()].count('\n') + 1, m.group(0))
+            for m in JS_COMMENT_RE.finditer(text)]
+
+
+def _pointer_lines(where, text):
+    if where.endswith('.md'):
+        return _markdown_prose_lines(text)
+    if where.endswith('.py'):
+        return _python_prose_lines(where, text)
+    if where.endswith('.js'):
+        return _js_prose_lines(text)
+    return []
+
+
+def _symbol_kinds(rel):
+    """{имя: вид} — все def/class (любая вложенность) + присваивания.
+
+    Вложенность учитывается: `tests/_ipc_path.py::unix_socket_path` и
+    `mcuclient/sip_engine.py::_park_call` живут на верхнем уровне, но
+    `Config.set_srtp` когда-нибудь доедет сюда же, а сверка только
+    верхнего уровня объявила бы живой ссылке «мёртва».
+    """
+    if rel in _SYMBOLS:
+        return _SYMBOLS[rel]
+    out = {}
+    path = ROOT / rel
+    if path.is_file():
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.setdefault(node.name, 'функция')
+            elif isinstance(node, ast.ClassDef):
+                out.setdefault(node.name, 'класс')
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        out.setdefault(target.id, 'переменная')
+    _SYMBOLS[rel] = out
+    return out
+
+
+#: Поблажка «это цитата» существует НЕ для всех документов, а только там, где
+#: журнал обязан цитировать исправленное заблуждение ДОСЛОВНО (JOURNAL_DOCS —
+#: ровно поэтому журнал исключён и из сверки значений). В инструкции оператора
+#: и в комментариях кода битая ссылка обязана краснеть даже в кавычках: иначе
+#: «заметить» указатель ёлочкой стало бы способом заглушить проверку.
+CITED_OK_PREFIXES = ('.ai-free/knowledge/',)
+
+
+def _citations_allowed(where):
+    if where in JOURNAL_DOCS:
+        return True
+    return where.startswith(CITED_OK_PREFIXES)
+
+
+#: Признак цитаты — пара кавычек-ёлочек, ОТКРЫТАЯ И ЗАКРЫТАЯ на одной строке.
+#: Бэктик признаком быть не может: той же формой набраны живые УКАЗАТЕЛИ
+#: (README.md:654, docs/SIP_ADDRESSING.md:91) — иначе проверка в markdown не
+#: проверяла бы ничего. Незакрытая кавычка цитатой НЕ считается (fail-closed).
+QUOTE_OPEN = chr(0x00AB)
+QUOTE_CLOSE = chr(0x00BB)
+
+
+def _quote_ranges(line):
+    """[(start, end)] — пары «…», открытые и закрытые на ОДНОЙ строке."""
+    ranges, open_at = [], None
+    for index, ch in enumerate(line):
+        if ch == QUOTE_OPEN:
+            if open_at is None:
+                open_at = index
+        elif ch == QUOTE_CLOSE and open_at is not None:
+            ranges.append((open_at, index + 1))
+            open_at = None
+    return ranges
+
+
+def _is_cited(ranges, pos):
+    return any(start <= pos < end for start, end in ranges)
+
+
+def _dead_pointers(where, lines, allow_cited=None):
+    """Находки «ссылка ведёт в никуда» по одному тексту (чисто для проб).
+
+    allow_cited=None — по области (см. _citations_allowed); в self-test'е
+    передаётся явно, чтобы обе ветки были видны в одном месте.
+    """
+    if allow_cited is None:
+        allow_cited = _citations_allowed(where)
+    bad = []
+    for lineno, line in lines:
+        quotes = _quote_ranges(line) if allow_cited else []
+        for match in PY_SYMBOL_REF.finditer(line):
+            if _is_cited(quotes, match.start()):
+                continue
+            target, sym = match.group(1), match.group(2)
+            gap = '%s:%d %s::%s' % (where, lineno, target, sym)
+            if not (ROOT / target).is_file():
+                bad.append('%s — файла нет в дереве' % gap)
+                continue
+            kinds = _symbol_kinds(target)
+            if sym in kinds:
+                continue
+            near = sorted(n for n in kinds if n.startswith(sym))
+            hint = ''
+            if len(near) == 1:
+                hint = ('; рядом есть %s (%s) — имя, похоже, усечено'
+                        % (near[0], kinds[near[0]]))
+            elif near:
+                hint = '; рядом: %s' % ', '.join(near[:3])
+            bad.append('%s — символа нет в %s%s' % (gap, target, hint))
+        for match in TRUNCATED_REF.finditer(line):
+            # Поблажка для ЦИТАТ обязана действовать на обе ветки правила:
+            # иначе журнал, обязанный цитировать битое дословно, краснел бы
+            # второй веткой, и правку начали бы с вычёркивания проверки.
+            if _is_cited(quotes, match.start()):
+                continue
+            bad.append('%s:%d %s::… — имя символа усечено (многоточие вместо '
+                       'имени), тест по такой ссылке не ищется'
+                       % (where, lineno, match.group(1)))
+    return bad
+
+
+def _all_pointers():
+    """[(где, строка, цель, символ)] — все найденные ссылки (мера покрытия)."""
+    found = []
+    for where, text in _pointer_sources():
+        for lineno, line in _pointer_lines(where, text):
+            for match in PY_SYMBOL_REF.finditer(line):
+                found.append((where, lineno, match.group(1), match.group(2)))
+    return found
+
+
+def test_doc_pointers_to_code_symbols_are_alive():
+    bad = []
+    for where, text in _pointer_sources():
+        bad.extend(_dead_pointers(where, _pointer_lines(where, text)))
+    assert not bad, 'ссылки «файл.py::символ» ведут в никуда:\n' + '\n'.join(bad)
+
+
+def test_pointer_guard_scope_covers_the_files_that_carry_pointers():
+    """Граница области — часть контракта (см. test_scope_covers_...)."""
+    names = [name for name, _ in _pointer_sources()]
+    assert 'README.md' in names, names
+    assert 'docs/STATUS.md' in names, 'журнал вне проверки: битая ссылка в ' \
+        'нём краснеет только случайно'
+    assert 'mediasoup-sidecar/src/room.js' in names, \
+        'комментарий сайдкара вне проверки — единственная ссылка на контракт ' \
+        'роутера никем неguarded'
+    assert any(n.startswith('.ai-free/knowledge/') for n in names), names
+    assert any(n.startswith('mcuclient/') for n in names), names
+    assert not any(n.startswith('tests/') for n in names), \
+        'tests/ под проверкой: probe-фикции test_test_runner.py краснеют ' \
+        'законно, правку начнут с молчания стража'
+
+
+def test_pointer_guard_sees_the_pointers_it_protects():
+    """Зелёный страж с пустым сканером — самообман, а не порядок.
+
+    Без этой меры достаточно сломать регулярку (или переименовать папку в
+    области), и test_doc_pointers_to_code_symbols_are_alive останется
+    зелёным, ничего не прочитав.
+    """
+    found = _all_pointers()
+    assert len(found) >= 8, 'найдено лишь %d ссылок — сканер ослеп' % len(found)
+    targets = {t for _, _, t, _ in found}
+    assert 'tests/test_mediasoup_rtp_bridge.py' in targets, targets
+    assert 'mcuclient/sip_registration.py' in targets, targets
+
+
+def test_pointer_probe_recognizes_the_real_defect_shape():
+    """Правило обязано ловить ОБЕ живые формы усечения и не краснеть на данных.
+
+    Пары «дефект / легитимно» — как в test_glue_probe_...: без них непонятно,
+    что поймано, а первая версия правила краснела на выводе раннера.
+    """
+    tick = chr(96)
+    probe = '\n'.join([
+        # Дефект 1 — ровно форма docs/STATUS.md:127: префикс имени + ...
+        tick + 'tests/test_mediasoup_rtp_bridge.py::test_router_...' + tick,
+        # Дефект 2 — форма .ai-free/knowledge/notes.md:221: ... без начала.
+        tick + 'test_sip_engine_nat_srtp.py::...stun...' + tick,
+        # Дефект 3 — файл переехал/переименован.
+        tick + 'mcuclient/no_such_module.py::foo' + tick,
+        # Легитимно — живая ссылка (та же форма, что в README:654).
+        tick + 'tests/test_doc_values.py::'
+        'test_strict_typing_sets_do_not_drift_apart' + tick,
+        # Легитимно — заглушка-плейсхолд в базе знаний: `tests/файл.py::тест`.
+        tick + 'tests/файл.py::тест' + tick,
+    ])
+    found = _dead_pointers('probe.md', _pointer_lines('probe.md', probe))
+    assert len(found) == 3, found
+    assert 'символа нет' in found[0], found[0]
+    assert 'усечено (многоточие' in found[1], found[1]
+    assert 'файла нет' in found[2], found[2]
+    # Легитимно — вывод раннера в fenced-блоке это ДАННЫЕ.
+    fenced = _dead_pointers('probe.md', _pointer_lines(
+        'probe.md', '```\nFAIL test_probe.py::test_bad\n```\n'))
+    assert not fenced, fenced
+
+
+def test_citation_waiver_is_scoped_and_fail_closed():
+    """Поблажка «это цитата» имеет право быть узкой, иначе она = выключатель.
+
+    Без этой меры достаточно обернуть битую ссылку в «ёлочки», и проверка
+    замолчала бы в ЛЮБОМ документе — ровно тот приём, которым глушат
+    неудобные стражи. Поэтому меряются сразу четыре границы.
+    """
+    broken = 'см. ' + chr(96) + 'mcuclient/no_such_module.py::foo' + chr(96)
+    cited = '\u00ab' + broken + '\u00bb'
+
+    # 1. Легитимно: журнал цитирует исправленное заблуждение дословно.
+    assert not _dead_pointers('docs/STATUS.md', _pointer_lines(
+        'docs/STATUS.md', cited)), 'цитата в журнале краснеет'
+    # 2. Легитимно: база знаний (тот же контракт цитаты).
+    assert not _dead_pointers('.ai-free/knowledge/notes.md', _pointer_lines(
+        '.ai-free/knowledge/notes.md', cited)), 'цитата в базе знаний краснеет'
+    # 3. ДЕФЕКТ: в инструкции оператора поблажки нет — битое краснеет и в
+    #    кавычках. Иначе README научился бы прятать мёртвые ссылки.
+    found = _dead_pointers('README.md', _pointer_lines('README.md', cited))
+    assert len(found) == 1 and 'файла нет' in found[0], found
+    # 4. ДЕФЕКТ: незакрытая кавычка — НЕ цитата (fail-closed) даже в журнале.
+    assert _dead_pointers('docs/STATUS.md', _pointer_lines(
+        'docs/STATUS.md', '\u00ab' + broken)), 'незакрытая ёлочка заглушила ' \
+        'проверку'
+    # 5. Легитимно: живая ссылка survives поблажку — «цитата» не превращает
+    #    битую проверку в вечный зелёный прогон вне цитат.
+    assert not _dead_pointers('docs/STATUS.md', _pointer_lines(
+        'docs/STATUS.md', 'см. ' + chr(96) + 'tests/test_doc_values.py::'
+        'test_citation_waiver_is_scoped_and_fail_closed' + chr(96)))
+    # 6. Поблажка обязана действовать и на вторую ветку правила (усечение без
+    #    начала имени), иначе журнал краснел бы именно ей.
+    trunc = '\u00ab' + chr(96) + 'test_sip_engine_nat_srtp.py::...stun...' \
+        + chr(96) + '\u00bb'
+    assert not _dead_pointers('docs/STATUS.md', _pointer_lines(
+        'docs/STATUS.md', trunc)), 'вторая ветка правила не знает про цитаты'
+    assert len(_dead_pointers('README.md', _pointer_lines(
+        'README.md', trunc))) == 1, 'в инструкции усечение должно краснеть'
