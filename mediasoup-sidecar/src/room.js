@@ -34,6 +34,13 @@ const mediaCodecs = [
   },
   // Аудио: Opus — стандарт WebRTC.
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2, parameters: {} },
+  // Аудио: G.711 µ-law — кодек RTP-моста. Python льёт в PlainTransport ровно
+  // PCMU 8 кГц моно (mcuclient/mediasoup_rtp_bridge.PLAIN_RTP_PARAMETERS), а
+  // роутер принимает только заявленное здесь: без этой строки produce_plain
+  // отбивается 400 «unsupported codec [mimeType:audio/PCMU, payloadType:0]»
+  // и SIP-терминал в браузерах не слышно вовсе. Сверяется тестом
+  // tests/test_mediasoup_rtp_bridge.py::test_router_media_codecs_advertise_the_bridge_codec
+  { kind: 'audio', mimeType: 'audio/PCMU', clockRate: 8000, channels: 1, parameters: {} },
 ];
 
 export class Room {

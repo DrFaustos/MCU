@@ -79,6 +79,55 @@
 
 ## Журнал исправлений
 
+### 2026-10-10 (h323) — роутер mediasoup не принимал кодек RTP-моста: SIP-терминал было не слышно
+
+`mcuclient/mediasoup_rtp_bridge.py` льёт в `PlainTransport` ровно
+PCMU/8000/моно (`PLAIN_RTP_PARAMETERS`), а `mediasoup-sidecar/src/room.js`
+объявлял роутеру только VP8, H.264 и opus. mediasoup принимает produce строго
+того кодека, который роутер задекларировал при создании комнаты, поэтому
+`produce_plain` отбивался 400 «unsupported codec
+[mimeType:audio/PCMU, payloadType:0]» — аппаратный терминал, заведённый в
+mediasoup-комнату, не звучал ни в одном браузере.
+
+Молчал дефект потому, что ни один тест ветки не читал исходник сайдкара:
+Python-сторона (сборка RTP, `RtpUdpEndpoint`, сам мост) на фейковом
+control-клиенте зелёна полностью — фейк `produce_plain` не проверяет кодек и
+всегда возвращает `producerId`. Проверялось только «мост поднялся», а решение о
+подъёме принимает другая сторона границы.
+
+Правка: в `mediaCodecs` объявлен `audio/PCMU` (8000 Гц, 1 канал) — те же
+значения, что в `PLAIN_RTP_PARAMETERS`, и ни на шаг свои.
+
+Страж контракта: `tests/test_mediasoup_rtp_bridge.py`
+`test_router_media_codecs_advertise_the_bridge_codec` вынимает блок
+`const mediaCodecs = [...]` из room.js и сверяет его с
+`PLAIN_RTP_PARAMETERS` — с источником правды, а не с копией значений внутри
+теста, иначе страж пережил бы смену кодека моста, охраняя прошлое. Парсер
+разбит по якорям `mimeType:`, а не по закрывающей `}`: у H.264 внутри
+`parameters` свои вложенные фигурные скобки, и наивный `\{.*?\}` разрезал бы
+запись на куски. Кейс `test_codec_guard_probe_recognizes_the_real_defect_shape`
+подсовывает замороженный слепок HEAD-списка БЕЗ PCMU: краснеет сам зонд, если
+разбор ослеп, — зелёное «всё объявлено» при мёртвом парсере было бы покрытой им
+дырой.
+
+Проверено НА ЖИВОМ сайдкаре (Node 26 + собранный `mediasoup-worker`,
+`node_modules` в ветке есть): поднят `src/server.js`, создан комната, запущен
+боевой `MediasoupRtpBridge.start()` — `started: true`,
+`transport`/`producer` выданы, `push_sip_pcm` → `true`. На HEAD-версии `room.js`
+тот же проб даёт `started: false` и ровно тот текст ошибки, который обещает
+комментарий в коде. Этим закрыта оговорка предыдущей записи «не проверено на
+живом сайдкаре».
+
+Тесты: `tests/test_mediasoup_rtp_bridge.py` 8 → 10. RED подтверждён откатом
+`room.js` на HEAD: падает ровно `test_router_media_codecs_advertise_the_bridge_codec`.
+
+Проверки: **1188 passed, 0 failed, 0 skipped**; `tests/test_doc_values.py` ->
+17 passed; `scripts/check_annotations.py` -> OK; ruff (--select E,F,W) по
+затронутым файлам чист. Комментарий в `room.js` ссылается на тест по имени
+(`tests/test_mediasoup_rtp_bridge.py::test_router_...`) — стража «ссылка в
+комментарии живая» в ветке нет, таких ссылок три, и править их придётся руками
+вместе с тестом.
+
 ### 2026-10-10 (h323) — H.323-вызов замолчал, но его последний голос остался в миксе всех
 
 Девятый срез той же линии («замолчавший канал обязан уйти из микса»), теперь со

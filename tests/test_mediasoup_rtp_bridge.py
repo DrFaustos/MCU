@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import struct
+from pathlib import Path
 
 from mcuclient.mediasoup_rtp_bridge import MediasoupRtpBridge, PLAIN_RTP_PARAMETERS
 from mcuclient.rtp_audio import PT_PCMU, RtpUdpEndpoint, parse_rtp
@@ -148,3 +150,132 @@ def test_stats():
     finally:
         br.stop()
         c.close()
+
+
+# --- Страж контракта Python<->сайдкар: роутер обязан заявить кодек моста ----
+#
+# Python льёт в PlainTransport ровно PCMU/8000/моно (PLAIN_RTP_PARAMETERS), а
+# mediasoup принимает только тот кодек, который роутер задекларировал при
+# создании комнаты. Без объявления audio/PCMU в mediasoup-sidecar/src/room.js
+# produce_plain отвечает 400 «unsupported codec [mimeType:audio/PCMU,
+# payloadType:0]» — SIP-терминала не слышно ни в одном браузере, причём весь
+# Python-набор остаётся зелёным: до этого коммита ни один тест не читал
+# исходник сайдкара. Единственный источник правды — PLAIN_RTP_PARAMETERS;
+# room.js обязан объявлять тот же кодек, а не «догадываться» о нём.
+
+ROOM_JS = Path(__file__).resolve().parents[1] / "mediasoup-sidecar" / "src" / "room.js"
+
+
+def _router_audio_codecs(source: str) -> list[dict]:
+    """Вынимает объявления кодеков из блока `const mediaCodecs = [...]` room.js.
+
+    Разбор по якорям `mimeType:` (в записи ровно один), а не по закрывающей
+    `}`: у H.264 внутри `parameters` свои вложенные фигурные скобки, и наивный
+    `\\{.*?\\}` разрезал бы запись на куски — парсер «работал» бы ровно до
+    первого кодека с параметрами. clockRate/channels идут ПОСЛЕ mimeType,
+    поэтому чанк записи — от её mimeType до mimeType следующей.
+    """
+    block = re.search(r"const mediaCodecs\s*=\s*\[(.*?)\];", source, re.S)
+    assert block, "в room.js не найден блок `const mediaCodecs = [...]`"
+    body = block.group(1)
+    marks = list(re.finditer(r"mimeType:\s*'([^']+)'", body))
+    found: list[dict] = []
+    for index, match in enumerate(marks):
+        tail_end = marks[index + 1].start() if index + 1 < len(marks) else len(body)
+        chunk = body[match.start():tail_end]
+        rate = re.search(r"clockRate:\s*(\d+)", chunk)
+        channels = re.search(r"channels:\s*(\d+)", chunk)
+        payload_type = re.search(r"preferredPayloadType:\s*(\d+)", chunk)
+        found.append({
+            "mimeType": match.group(1),
+            "clockRate": int(rate.group(1)) if rate else None,
+            # mediasoup считает отсутствующий channels равным 1 — не выдумываем 2.
+            "channels": int(channels.group(1)) if channels else 1,
+            "preferredPayloadType": (int(payload_type.group(1))
+                                     if payload_type else None),
+        })
+    return found
+
+
+def _missing_bridge_codecs(source: str) -> list[str]:
+    """Кодеки, которые мост льёт в сайдкар, но роутер их не принимает."""
+    advertised = _router_audio_codecs(source)
+    missing: list[str] = []
+    for codec in PLAIN_RTP_PARAMETERS["codecs"]:
+        same = [a for a in advertised if a["mimeType"] == codec["mimeType"]]
+        if not same:
+            missing.append(f"{codec['mimeType']} отсутствует в mediaCodecs")
+            continue
+        for entry in same:
+            if (entry["clockRate"] == codec["clockRate"]
+                    and entry["channels"] == codec["channels"]):
+                break
+        else:
+            missing.append(
+                f"{codec['mimeType']} заявлен {same[-1]['clockRate']} Гц/"
+                f"{same[-1]['channels']} кан., а мост льёт "
+                f"{codec['clockRate']} Гц/{codec['channels']}")
+    return missing
+
+
+def test_router_media_codecs_advertise_the_bridge_codec():
+    """room.js обязан объявить ровно тот кодек, который льёт мост.
+
+    Сверяется с PLAIN_RTP_PARAMETERS — не с копией значений внутри теста:
+    иначе страж пережил бы смену кодека моста, продолжая охранять прошлое.
+    """
+    source = ROOM_JS.read_text(encoding="utf-8")
+    missing = _missing_bridge_codecs(source)
+    assert not missing, (
+        "сайдкар отобьёт produce_plain ошибкой 400 (терминал не слышно "
+        "в браузере): " + "; ".join(missing))
+
+    # preferredPayloadType: mediasoup по умолчанию ставит PCMU PT=0, и Python
+    # кладёт в заголовок RTP тот же PT_PCMU. Если в room.js явно проставят
+    # другой — заголовок и декодер разъедутся, а звук станет шумом.
+    bridge_pt = PLAIN_RTP_PARAMETERS["codecs"][0]["payloadType"]
+    for entry in _router_audio_codecs(source):
+        if entry["mimeType"] == PLAIN_RTP_PARAMETERS["codecs"][0]["mimeType"]:
+            assert entry["preferredPayloadType"] in (None, bridge_pt), (
+                f"room.js заявляет preferredPayloadType="
+                f"{entry['preferredPayloadType']}, мост же шлёт PT={bridge_pt}")
+
+
+def test_codec_guard_probe_recognizes_the_real_defect_shape():
+    """Зонд обязан краснеть на ДО-версии room.js, а не молчать.
+
+    Замороженный слепок — реальный HEAD-список кодеков (VP8, H264 с вложенным
+    parameters, opus) БЕЗ PCMU. Если парсер ослепнет (случайно станет пустым
+    или срежет запись на вложенных скобках `parameters`), краснеет ЭТОТ тест:
+    зелёное «всё объявлено» при мёртвом разборе — это покрытая им дыра, а не
+    проверка.
+    """
+    before_fix = """
+const mediaCodecs = [
+  { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, parameters: {} },
+  {
+    kind: 'video',
+    mimeType: 'video/H264',
+    clockRate: 90000,
+    parameters: {
+      'packetization-mode': 1,
+      'profile-level-id': '42e01f',
+      'level-asymmetry-allowed': 1,
+    },
+  },
+  { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2,
+    parameters: {} },
+];
+"""
+    advertised = _router_audio_codecs(before_fix)
+    assert {c["mimeType"] for c in advertised} == {
+        "video/VP8", "video/H264", "audio/opus",
+    }, f"парсер не узнал объявления записей — он слеп и на живом room.js: {advertised}"
+    h264 = next(c for c in advertised if c["mimeType"] == "video/H264")
+    assert h264["clockRate"] == 90000, (
+        "вложенные фигурные скобки parameters порезали запись H.264")
+
+    missing = _missing_bridge_codecs(before_fix)
+    assert missing and "audio/PCMU" in missing[0], (
+        "зонд не увидел ровно тот дефект, из-за которого правился room.js: "
+        f"{missing}")
