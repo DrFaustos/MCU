@@ -19,6 +19,8 @@ from _silent_handlers import (  # noqa: E402
     silent_handlers,
 )
 
+import mcuclient.rtp_audio as rtp_audio_module  # noqa: E402
+
 from mcuclient.rtp_audio import (  # noqa: E402
     PT_PCMA,
     PT_PCMU,
@@ -177,9 +179,11 @@ def _unwatch(handler, logger, old_level):
     logger.setLevel(old_level)
 
 
-# IPv6-адрес на IPv4-сокете: getaddrinfo(family=AF_INET) отказывает
-# всегда (проверено зондом: gaierror -9), независимо от наличия IPv6.
-_BROKEN = ("::1", 40000)
+# Адрес для «отказ ОТПРАВКИ»: broadcast без SO_BROADCAST резолвится штатно
+# (числовой адрес сам в себя), но sendto отказывает PermissionError 13
+# (замерено). Так кейс остаётся про отказ СДЕТА, а не про отказ резолва —
+# резолв теперь живёт в set_remote и проверяется отдельными тестами.
+_BROKEN = ("255.255.255.255", 40000)
 
 
 def test_send_failure_is_counted_and_named():
@@ -239,6 +243,25 @@ def test_send_recovery_is_named_and_reason_cleared():
         peer.stop()
 
 
+def test_bad_address_replaced_by_good_one_is_named():
+    # Отказ конфигурации сменился рабочим адресом: журнал обязан это
+    # назвать, а не оставлять ERROR висеть без продолжения.
+    peer = RtpUdpEndpoint(local_port=0)
+    ep = RtpUdpEndpoint(local_port=0)
+    handler, logger, old = _watch("mcuclient.rtp")
+    try:
+        peer.start()
+        assert ep.set_remote("::1", 40000) is False
+        assert ep.set_remote("127.0.0.1", peer.local_port) is True
+        assert ep.last_send_error == "", "причину обязан снять переход"
+        infos = [m for lvl, m in handler.records if lvl == "INFO"]
+        assert len(infos) == 1 and "восстановилась" in infos[0], infos
+    finally:
+        _unwatch(handler, logger, old)
+        ep.stop()
+        peer.stop()
+
+
 def test_send_without_remote_is_not_a_failure():
     # Адрес не задан — нарушение контракта вызова, а не сетевой отказ:
     # в статистику сбоев оно попадать не должно.
@@ -292,6 +315,99 @@ def test_normal_stop_leaves_no_warning():
         assert not warns, warns
     finally:
         _unwatch(handler, logger, old)
+
+
+def test_set_remote_resolves_hostname_once():
+    # Резолв обязан происходить здесь (конфигурация), а не в sendto на
+    # каждый кадр 20 мс: отказ резолва .local = 5.03 с — аудио встаёт
+    # колом и молчит (замерено).
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        assert ep.set_remote("localhost", 40000) is True
+        host, port = ep.remote
+        assert port == 40000
+        assert host not in ("localhost", ""), \
+            "set_remote обязан сохранить РАЗРЕШЁННЫЙ адрес, а не имя"
+    finally:
+        ep.stop()
+
+
+def test_unresolvable_address_is_named_and_not_stored():
+    # Битый адрес не должен доходить до сокета: отказ назван в set_remote,
+    # remote остаётся unset, и это НЕ сетевой сбой (send_errors==0) — тот
+    # же принцип, что test_send_without_remote_is_not_a_failure.
+    handler, logger, old = _watch("mcuclient.rtp")
+    ep = RtpUdpEndpoint(local_port=0)
+    try:
+        assert ep.set_remote("::1", 40000) is False  # ::1 под AF_INET нерезолвим
+        assert ep.remote is None, "неразрешённый адрес нельзя ставить в сокет"
+        assert ep.send_pcm(_pcm([1] * 160)) is False
+        assert ep.send_errors == 0
+        assert ep.last_send_error, (
+            "причина обязана доехать до GET /api/status "
+            "(mediasoup_rtp.lastSendError)")
+        errs = [m for lvl, m in handler.records if lvl == "ERROR"]
+        assert errs and "не разрешился" in errs[0], errs
+    finally:
+        ep.stop()
+        _unwatch(handler, logger, old)
+
+
+# --- страж: докстроки не испорчены склейкой строк -------------------
+
+
+Q = chr(34)
+TRIPLE = Q * 3
+
+
+def _docstrings_of(module):
+    """(имя, докстрока) для модуля, его классов и их функций."""
+    found = []
+    if module.__doc__:
+        found.append((module.__name__, module.__doc__))
+    for cname, cls in vars(module).items():
+        if not inspect.isclass(cls) or cls.__module__ != module.__name__:
+            continue
+        if cls.__doc__:
+            found.append((cname, cls.__doc__))
+        for mname, member in vars(cls).items():
+            doc = getattr(member, "__doc__", None)
+            if isinstance(doc, str) and doc:
+                found.append(("%s.%s" % (cname, mname), doc))
+    for fname, fn in vars(module).items():
+        if (inspect.isfunction(fn) and fn.__module__ == module.__name__ and fn.__doc__):
+            found.append((fname, fn.__doc__))
+    assert found, "модуль без докстрок — страж был бы пустышкой"
+    return found
+
+
+def _spliced(docs):
+    """Докстроки с мусором от склейки: тройная кавычка или висячая."""
+    bad = []
+    for name, doc in docs:
+        if TRIPLE in doc:
+            bad.append(name)
+        elif any(ln.lstrip().startswith(Q) for ln in doc.splitlines()):
+            bad.append(name)
+    return sorted(bad)
+
+
+def test_docstring_guard_catches_splicing():
+    # Страж на подсове: тот же класс порчи, что нашли в реальном файле.
+    # Без пробы страж, который всегда даёт [], держал бы прогон зелёным.
+    broken = "Первая строка" + Q + chr(10) + Q + "        " + Q + "вторая"
+    assert _spliced([("probe", broken)]) == ["probe"]
+    assert _spliced([("triple", "текст " + TRIPLE + " текст")]) == ["triple"]
+    clean = [("ok", "Обычная докстрока.\n\n    details\n"), ("quotes", "Пусто: " + Q + Q + " — всё уходит.")]
+    assert _spliced(clean) == []
+
+
+def test_rtp_audio_docstrings_are_not_spliced():
+    # Парсер такую порчу не видит (литералы склеиваются в валидную
+    # строку), ruff и тесты тоже. Смотрим на содержимое докстроки.
+    bad = _spliced(_docstrings_of(rtp_audio_module))
+    assert not bad, ("mcuclient/rtp_audio.py: в докстроках мусор от"
+        " склейки строк (висячая кавычка): " + ", ".join(bad))
 
 
 # --- страж: молчаливых обработчиков в модуле больше нет ----------------

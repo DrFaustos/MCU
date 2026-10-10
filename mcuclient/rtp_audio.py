@@ -158,8 +158,48 @@ class RtpUdpEndpoint:
     def remote(self) -> Optional[Tuple[str, int]]:
         return self._remote
 
-    def set_remote(self, host: str, port: int) -> None:
-        self._remote = (str(host), int(port))
+    def set_remote(self, host: str, port: int) -> bool:
+        """Задать получателя RTP. True — адрес разрешён и сохранён.
+
+        Разбор адреса происходит ЗДЕСЬ (это конфигурация), а не в
+        ``sendto``: audio-port дёргает ``send_pcm`` на каждый кадр 20 мс,
+        а CPython при hostname в ``sendto`` резолвит внутри C на КАЖДЫЙ
+        кадр. Отказ резолва дорог (замерено: ``*.local`` — 5.03 с/вызов
+        mDNS-таймаута, ``*.invalid`` — 0.09 с), и в потоке кадра он
+        вставал колом в звонок. Здесь адрес один раз разворачивается в
+        числовой IP; hostname, который перестал резолвиться ПОЗЖЕ, даст
+        штатный OSError в ``sendto`` — он уже назван.
+
+        Неразрешённый адрес НЕ сохраняется: ``remote`` остаётся
+        незаданным (``send_pcm`` честно отвечает ``False``), а причина
+        уходит в журнал и в :attr:`last_send_error`, откуда её видно в
+        ``GET /api/status`` как ``mediasoup_rtp.lastSendError``. Счётчик
+        ``send_errors`` при этом не растёт: это ошибка конфигурации, а не
+        сетевой отказ, — тот же принцип, что у «remote не задан».
+        """
+        port = int(port)
+        try:
+            infos = socket.getaddrinfo(str(host), port,
+                                       socket.AF_INET, socket.SOCK_DGRAM)
+        except OSError as exc:
+            # Логгер не молчит: без строки здесь оператор видит только
+            # txPackets=0 и не отличает битый адрес от тишины в динамиках.
+            reason = "%s: %s" % (type(exc).__name__, exc)
+            self._last_send_error = reason
+            log.error("RTP: адрес %s:%d не разрешился (%s) — remote не "
+                      "задан, звук уходить не будет", host, port, reason)
+            return False
+        # sockaddr разнотипный -> mypy даёт str|int; адрес обязан быть
+        # строкой: аннотация _remote Tuple[str, int], и sendto с int
+        # внутри кортежа падает в другом месте и с другой причиной.
+        self._remote = (str(infos[0][4][0]), port)
+        if self._last_send_error:
+            # Причина была — неразрешённый адрес или серия отказов отправки.
+            # Переход называем одной строкой и снимаем причину: без неё в
+            # журнале остаётся ERROR, по которому не отличить «оператор
+            # поправил адрес» от «мы всё ещё глушим звук».
+            self._report_recovery()
+        return True
 
     @property
     def rx_packets(self) -> int:
@@ -176,7 +216,8 @@ class RtpUdpEndpoint:
 
     @property
     def last_send_error(self) -> str:
-        """Причина последнего отказа отправки; "" — всё уходит."""
+        """Причина последнего сбоя — отказа отправки или неразрешённого
+        адреса из set_remote; "" — всё уходит."""
         return self._last_send_error
 
     def start(self) -> None:
