@@ -17,6 +17,8 @@ def _pcm(v=1000, n=160):
 class _FakeClient:
     def __init__(self, fail_transport=False, fail_produce=False):
         self.calls = []
+        # id транспортов, закрытых на сайдкаре: утечка видна по этому списку.
+        self.closed: list = []
         self.fail_transport = fail_transport
         self.fail_produce = fail_produce
         self.ip = "127.0.0.1"
@@ -39,6 +41,15 @@ class _FakeClient:
         if self.fail_produce:
             raise RuntimeError("produce failed")
         return {"ok": True, "producerId": "prod-sip"}
+
+    def close_transport(self, room_id, transport_id):
+        # Реальный клиент умеет закрывать ОДИН транспорт (POST
+        # /transports/close). Фейк обязан уметь то же: без этого метода мост
+        # уходит в ветку «клиент не умеет» и ничего не закрывает, а прогон
+        # остаётся зелёным — т.е. проверка утечки была бы фиктивной.
+        self.calls.append(("close", transport_id))
+        self.closed.append(transport_id)
+        return {"ok": True}
 
     def recv_one(self):
         data, _ = self._sock.recvfrom(2048)
@@ -279,3 +290,128 @@ const mediaCodecs = [
     assert missing and "audio/PCMU" in missing[0], (
         "зонд не увидел ровно тот дефект, из-за которого правился room.js: "
         f"{missing}")
+
+
+# --- утечка PlainTransport на сайдкаре --------------------------------------
+#
+# Замерено пробой живьём (Node + C++ worker, 5 циклов start()/stop() одной
+# комнаты) ДО правки: transports 0 -> 5, producers 0 -> 5, после stop() не
+# освобождён ни один. Прежний stop() лишь обнулял _transport_id, и для
+# сайдкара это значило «транспорт живёт дальше» и держит UDP-порт из
+# rtc_min..rtc_max (по умолчанию 40000-40100 = 101 порт). Пока отказ сайдкара
+# кэшировался навсегда, повторных попыток не было и утечка спала; с ретраем
+# каждый цикл «отказал — попробовал снова» добавлял ещё транспорт, и
+# диапазон исчерпался бы примерно за 17 минут непрерывных отказов.
+
+
+def test_stop_frees_the_transport_of_a_started_bridge():
+    """Остановленный мост освобождает транспорт на сайдкаре."""
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1")
+    try:
+        assert br.start() is True
+        assert c.closed == [], "поднятый мост не имел права ничего закрывать"
+        br.stop()
+        assert c.closed == ["pt-1"], (
+            "транспорт не закрыт на сайдкаре — утечка UDP-порта из "
+            "rtc_min..rtc_max: %s" % c.closed)
+        assert br.transport_id is None
+    finally:
+        c.close()
+
+
+def test_repeated_stop_does_not_close_the_same_transport_twice():
+    """Повторная остановка не шлёт close за тем же id (второй close — 400).
+
+    Без обнуления id во `_close_remote_transport` второй stop() повторил бы
+    вызов, а сайдкар отвечает на неизвестный транспорт ошибкой — отказ
+    закрытия был бы неотличим от реальной утечки.
+    """
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1")
+    try:
+        assert br.start() is True
+        br.stop()
+        br.stop()
+        assert c.closed == ["pt-1"], c.closed
+    finally:
+        c.close()
+
+
+def test_failed_produce_closes_the_transport_it_already_made():
+    """Откат produce_plain обязан ОСВОБОДИТЬ транспорт, а не просто забыть id."""
+    c = _FakeClient(fail_produce=True)
+    br = MediasoupRtpBridge(c, "room-1")
+    try:
+        assert br.start() is False
+        assert br.started is False
+        assert br.producer_id is None
+        assert c.closed == ["pt-1"], (
+            "отказавший транспорт оставлен на сайдкаре: ретрай накопит их до "
+            "исчерпания диапазона rtc_min..rtc_max: %s" % c.closed)
+        assert "produce_plain" in br.start_error(), br.start_error()
+    finally:
+        br.stop()
+        c.close()
+
+
+def test_stop_survives_a_client_without_close_transport():
+    """Граница: клиент без close_transport — остановка не бросает.
+
+    Отказ закрытия обязан называться в журнале, но не валить остановку
+    панели: stop() вызывается и из WebSession.close(). Клиент «до появления
+    маршрута» сделан ОБЁРТКОЙ, а не подклассом с close_transport = None:
+    заглушка значением ломает сигнатуру метода (Pyright краснеет), а обёртка
+    честно моделирует «метода нет вообще» — ровно та ветка getattr, ради
+    которой написан кейс.
+    """
+    class _ClientWithoutCloser:
+        def __init__(self, inner: _FakeClient) -> None:
+            self._inner = inner
+            self.closed: list = []
+
+        def create_plain_transport(self, room_id, rtcp_mux=True):
+            return self._inner.create_plain_transport(room_id, rtcp_mux=rtcp_mux)
+
+        def produce_plain(self, room_id, transport_id, kind, rtp, app_data=None):
+            return self._inner.produce_plain(room_id, transport_id, kind, rtp,
+                                            app_data=app_data)
+
+        def close(self) -> None:
+            self._inner.close()
+
+    inner = _FakeClient()
+    c = _ClientWithoutCloser(inner)
+    br = MediasoupRtpBridge(c, "room-1")
+    try:
+        assert br.start() is True
+        br.stop()  # не должно бросить
+        assert br.started is False
+        assert br.transport_id is None, "id обязан забыться и без закрытия"
+        assert c.closed == []
+    finally:
+        c.close()
+
+
+def test_start_error_is_empty_when_bridge_is_up():
+    """Поднятый мост не имеет права нести причину отказа (иначе панель врёт).
+
+    start_error() читает web_server и кладёт в mediasoup_rtp.reason. Если он
+    останется непустым после успешного старта, оператор увидит отказ там, где
+    мост работает.
+    """
+    c = _FakeClient()
+    c2 = _FakeClient(fail_transport=True)
+    br = MediasoupRtpBridge(c, "room-1")
+    br2 = MediasoupRtpBridge(c2, "room-1")
+    try:
+        assert br.start() is True
+        assert br.start_error() == "", br.start_error()
+        br.stop()
+        assert br2.start() is False
+        assert "sidecar down" in br2.start_error(), br2.start_error()
+    finally:
+        br.stop()
+        br2.stop()
+        c.close()
+        c2.close()

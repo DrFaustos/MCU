@@ -31,7 +31,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
+                    Optional, Tuple, Union)
 from urllib.parse import parse_qs, urlparse
 
 from .log import get_logger
@@ -45,6 +46,10 @@ from .webrtc_ingest import (
 from .webrtc_sfu import AudioMixSession, Conference
 from .web_recorder import WebRecorder
 from .sip_web_bridge import SipWebAudioBridge
+
+if TYPE_CHECKING:  # только аннотации: эти модули подключаются лениво
+    from .mediasoup_rtp_bridge import MediasoupRtpBridge
+    from .mediasoup_signaling import MediasoupSignaling
 
 log = get_logger("web")
 
@@ -268,6 +273,17 @@ class _EventHub:
                 log.debug("SSE-клиент отстал, событие %s отброшено", event)
 
 
+#: Пауза между повторными попытками достучаться до mediasoup-sidecar, сек.
+#: Отказ «сайдкар ещё не поднялся» НЕ имеет права кэшироваться навсегда:
+#: транзиентный сбой на 20 секунд превращался в «mediasoup выключен» до
+#: перезапуска приложения (замерено пробом: после того как сайдкар ожил,
+#: новых обращений к control API — ровно 0). Но и повтор на каждый вызов здесь
+#: ОПАСЕН: push_sip_pcm_to_sfu() дёргает фабрику мостов на каждый кадр, а
+#: каждая попытка создаёт PlainTransport. Значит повтор обязан БЫТЬ и обязан
+#: быть ограниченным по частоте.
+MS_RETRY_INTERVAL = 10.0
+
+
 class WebSession:
     """Слой операций над движком, отдающий JSON-совместимые данные.
 
@@ -329,9 +345,26 @@ class WebSession:
         self._rec_thread: Optional[threading.Thread] = None
         self._rec_stop = threading.Event()
         # Сигналинг mediasoup (опционально): браузеры как SFU-участники.
-        self._ms_signaling = None
+        # False — «выключено оператором» (штатно, повтор не нужен). None —
+        # «ещё не пробовали» ИЛИ «пробовали и не вышло»; эти два случая
+        # различает _ms_signaling_error. Раньше False значил и то и другое,
+        # и отказ, попавшийся на старте, запрещал любую повторную попытку.
+        self._ms_signaling: Optional[Union[Literal[False], "MediasoupSignaling"]] = None
+        # Причина отказа сигналингa ("" — отказа не было). Без неё ветка
+        # except схлопывала «включено, но сайдкар недоступен» в то же None,
+        # что и «выключено».
+        self._ms_signaling_error: str = ""
         # RTP-мост SIP/H.323 <-> mediasoup (опционально).
-        self._ms_rtp = None
+        self._ms_rtp: Optional[Union[Literal[False], "MediasoupRtpBridge"]] = None
+        # Причина отказа моста ("" — отказа не было): чтобы «включён, но мост
+        # честно отказал» не схлопывался в тот же None, что и «выключено».
+        self._ms_rtp_error: str = ""
+        # Когда разрешена следующая попытка достучаться до mediasoup
+        # (time.monotonic(); 0.0 — «пробовать сразу»). Поле ОБЩЕЕ для обеих
+        # ленивых фабрик: push_sip_pcm_to_sfu() дёргает их на каждый кадр,
+        # повтор без троттла вылился бы в шторм control API и в повторные
+        # PlainTransport.
+        self._ms_rtp_retry_at: float = 0.0
         # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
         self._sip_bridge_service = None
 
@@ -425,7 +458,7 @@ class WebSession:
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
             "conference_participants": self.conference.participants(),
-            "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
+            "mediasoup_rtp": self._ms_rtp_display(),
             "sip_bridge": self.sip_bridge_stats(),
             "registration": _registration_dict(eng),
             "address": _address_dict(eng),
@@ -935,10 +968,21 @@ class WebSession:
         ошибке возвращает None и не мешает базовому режиму.
         """
         if self._ms_rtp is not None:
-            return self._ms_rtp or None
+            if self._ms_rtp:
+                return self._ms_rtp
+            if time.monotonic() < self._ms_rtp_retry_at:
+                return None
+            # Срок повтора истёк: кэш отказа сбрасывается, пробуем снова.
+            self._ms_rtp = None
+            self._ms_rtp_error = ""
         sig = self.mediasoup_signaling()
         if sig is None:
             self._ms_rtp = False
+            # Отказ signaling обязан доехать до панели: иначе «включено, но
+            # сайдкар недоступен» снова схлопывается в None, неотличимое от
+            # «выключено». «Выключено оператором» оставляет reason пустым.
+            self._ms_rtp_error = self._ms_signaling_error
+            self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
             return None
         try:
             from .mediasoup_rtp_bridge import MediasoupRtpBridge
@@ -947,11 +991,21 @@ class WebSession:
                 sig._client, room_id, on_sip_pcm=self._on_sfu_audio)  # noqa: SLF001
             if not bridge.start():
                 self._ms_rtp = False
+                self._ms_rtp_error = bridge.start_error() or "мост не поднят"
+                self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
                 return None
             self._ms_rtp = bridge
-        except Exception:  # noqa: BLE001
-            log.debug("mediasoup RTP-мост не поднялся", exc_info=True)
+            self._ms_rtp_error = ""
+        except Exception as exc:  # noqa: BLE001
+            # Молчаливый log.debug прятал отказ того же класса: панель
+            # оставалась с None без причины.
+            log.warning("mediasoup RTP-мост не поднялся: %s: %s — повтор "
+                        "через %g с", type(exc).__name__, exc,
+                        MS_RETRY_INTERVAL, exc_info=True)
             self._ms_rtp = False
+            self._ms_rtp_error = "mediasoup RTP-мост: %s: %s" % (
+                type(exc).__name__, exc)
+            self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
         return self._ms_rtp or None
 
     def _on_sfu_audio(self, pcm: bytes) -> None:
@@ -999,38 +1053,96 @@ class WebSession:
 
     def mediasoup_rtp_stats(self) -> Dict[str, Any]:
         bridge = self.mediasoup_rtp_bridge()
-        return bridge.stats() if bridge is not None else {"started": False}
+        if bridge is not None:
+            return bridge.stats()
+        out: Dict[str, Any] = {"started": False}
+        if self._ms_rtp_error:
+            out["reason"] = self._ms_rtp_error
+        return out
+
+    def _ms_rtp_display(self) -> Optional[Dict[str, Any]]:
+        """mediasoup_rtp для GET /api/status: поднятый мост, отказ либо None.
+
+        Сводить отказ к None нельзя: «выключено» и «включено, но сайдкар
+        отказал» давали один и тот же None, и оператор с тишиной в обоих
+        каналах не видел причины — она жила только в журнале.
+        """
+        if self._ms_rtp:
+            return self._ms_rtp.stats()
+        if self._ms_rtp_error:
+            return {"started": False, "reason": self._ms_rtp_error}
+        return None
 
     # -- mediasoup-сигналинг (опциональный SFU) ----------------------------
     def mediasoup_signaling(self):
-        """Ленивый MediasoupSignaling по features.web.mediasoup. Или None."""
+        """Ленивый MediasoupSignaling по features.web.mediasoup. Или None.
+
+        `False` в кэше — «выключено оператором»: штатно, повтор не нужен.
+        ОТКАЗ (сайдкар ещё не поднялся) в False НЕ пишется: `_ms_signaling`
+        остаётся None, причина ложится в `_ms_signaling_error`, а повтор
+        разрешён не чаще MS_RETRY_INTERVAL. Раньше отказ кэшировался как
+        False — транзиентные 20 секунд простоя сайдкара превращались в
+        «mediasoup выключен» до перезапуска приложения (замерено пробом:
+        после того как сайдкар ожил, новых обращений к control API — 0).
+        """
         if self._ms_signaling is not None:
             return self._ms_signaling or None
+        now = time.monotonic()
+        if now < self._ms_rtp_retry_at:
+            # Окно повтора не наступило: hot-path (push_sip_pcm_to_sfu дёргает
+            # фабрику на каждый кадр) не должен превращать ретрай в шторм
+            # обращений к control API.
+            return None
         try:
             from .mediasoup_client import MediasoupClient
             from .mediasoup_signaling import MediasoupSignaling
             cfg = (self._config.web or {}).get("mediasoup", {}) if self._config else {}
             if not cfg.get("enabled"):
                 self._ms_signaling = False
+                self._ms_signaling_error = ""
                 return None
             host = cfg.get("host", "127.0.0.1")
             port = cfg.get("port", 4443)
             client = MediasoupClient(base_url=f"http://{host}:{port}",
                                      token=str(cfg.get("token", "") or ""))
             self._ms_signaling = MediasoupSignaling(client)
-        except Exception:  # noqa: BLE001
-            log.debug("mediasoup-сигналинг недоступен", exc_info=True)
-            self._ms_signaling = False
+            self._ms_signaling_error = ""
+        except Exception as exc:  # noqa: BLE001
+            # log.debug здесь читался как «сайдкара нет», и панель врала про
+            # «выключено». Причина едет в панель; WARNING — только на переход
+            # в отказ, чтобы каждые 10 с не выть.
+            was_ok = not self._ms_signaling_error
+            self._ms_signaling_error = "mediasoup-сигналинг недоступен: %s: %s" % (
+                type(exc).__name__, exc)
+            if was_ok:
+                log.warning("%s — повтор через %g с", self._ms_signaling_error,
+                            MS_RETRY_INTERVAL)
+            else:
+                log.debug("%s (повтор)", self._ms_signaling_error, exc_info=True)
+            self._ms_rtp_retry_at = now + MS_RETRY_INTERVAL
         return self._ms_signaling or None
 
     def mediasoup_available(self) -> bool:
         sig = self.mediasoup_signaling()
         return bool(sig and sig.available)
 
+    def _ms_unavailable(self) -> str:
+        """Почему mediasoup недоступен, словами: «выключено» ≠ «не достучались».
+
+        После того как отказ перестал кэшироваться навсегда,
+        :meth:`mediasoup_signaling` возвращает ``None`` в обоих случаях. Если
+        и в ответ API свести их к «не включён», оператор с ``enabled: true`` и
+        упавшим сайдкаром получит враньё уже не в панели, а в лице браузера
+        (``ms-conference.js`` показывает этот текст как причину отказа входа).
+        """
+        if self._ms_signaling is False:
+            return "mediasoup не включён"
+        return self._ms_signaling_error or "mediasoup недоступен"
+
     def mediasoup_join(self, pid: str) -> Dict[str, Any]:
         sig = self.mediasoup_signaling()
         if sig is None:
-            raise ApiError("mediasoup не включён", status=503)
+            raise ApiError(self._ms_unavailable(), status=503)
         try:
             return sig.join(pid)
         except Exception as exc:  # noqa: BLE001
@@ -1043,7 +1155,7 @@ class WebSession:
     def mediasoup_signal(self, action: str, pid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         sig = self.mediasoup_signaling()
         if sig is None:
-            raise ApiError("mediasoup не включён", status=503)
+            raise ApiError(self._ms_unavailable(), status=503)
         try:
             if action == "connect":
                 return sig.connect(pid, payload.get("dtlsParameters") or {})

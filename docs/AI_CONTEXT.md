@@ -226,6 +226,24 @@
   `webui/ms-conference.js`; чекбокс «SFU mediasoup» на странице.
 - Супервизор: `mediasoup_supervisor.py` (запуск сайдкара, `run.py`).
 - Стек одной командой: `docker/sfu/` (mediasoup + coturn), см. README.
+- **Отказ сайдкара — не «выключено».** `False` в `_ms_signaling`/`_ms_rtp`
+  означает ТОЛЬКО «оператор выключил». Ошибка связи кэш в `False` не пишет:
+  поле остаётся `None`, причина ложится в `_ms_signaling_error` /
+  `_ms_rtp_error`, повтор разрешён не чаще `MS_RETRY_INTERVAL` (10 с).
+  Троттл обязателен: `push_sip_pcm_to_sfu()` дёргает обе ленивые фабрики на
+  каждый кадр, и наивный ретрай превращается в шторм обращений к control API.
+  Панель обязана различать два состояния (`mediasoup_rtp.reason`,
+  `_ms_unavailable()` для 503) — иначе `enabled: true` с упавшим сайдкаром
+  враньём выглядит как «mediasoup не включён».
+- **Транспорт обязан освобождаться.** Каждый отказ моста от уже созданного
+  `PlainTransport` зовёт `close_transport` (`POST /transports/close`), иначе
+  транспорт держит UDP-порт из `rtc_min..rtc_max`, пока не закрыта комната.
+  Забыть `_transport_id` — НЕ закрытие.
+- **Маршруты control API — одно множество в трёх местах**: `self.call()` в
+  `mediasoup_client.py`, развилка `method === ... && path === ...` в
+  `mediasoup-sidecar/src/server.js`, таблица `mediasoup-sidecar/README.md`.
+  Сверяется `tests/test_sidecar_api_paths.py`: новое имя маршрута без правки
+  сайдкара больше не даст тихого 404, а маршрут без строки в README краснеет.
 
 ## 3. Грабли и известные проблемы (важно!)
 

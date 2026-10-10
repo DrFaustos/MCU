@@ -342,7 +342,20 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
 
 * Включается в `features.web.mediasoup.enabled` (по умолчанию **выкл**);  при старте приложение поднимает сайдкар дочерним процессом  (`mcuclient/mediasoup_supervisor.py`) и общается с ним по HTTP  control API (`mcuclient/mediasoup_client.py`). Медиа идёт по RTP,  через API — только управление.
 * Требует **Node.js ≥ 20** и открытый диапазон UDP `rtc_min..rtc_max`  (по умолчанию 40000-40100); для интернета — `announced_ip` и TURN.
-* Control API: `/health`, `/rooms`, `/transports/webrtc|plain`,  `/produce`, `/consume`, `/consumer/set-layers` (симулкаст),  `/producer/request-keyframe`.
+* Control API: `/health`, `/rooms`, `/rooms/close`, `/rooms/stats`, `/transports/webrtc|plain|close`, `/transports/connect`, `/produce`, `/produce/plain`, `/consume`, `/consumer/set-layers` (симулкаст), `/producer/request-keyframe`. Полный перечень и тела — в `mediasoup-sidecar/README.md`; таблица дока сверяется с кодом тестом `tests/test_sidecar_api_paths.py`.
+* **Закрыть один транспорт.** `POST /transports/close` обязаны вызывать каждый
+  отказ RTP-моста от уже созданного `PlainTransport` (`stop()` и откат
+  `produce_plain`). Без него транспорт освобождается только вместе с комнатой и
+  всё это время держит UDP-порт из `rtc_min..rtc_max` (по умолчанию
+  40000-40100 = 101 порт), а повторные попытки поднять мост накапливали бы их
+  до исчерпания диапазона.
+* **Отказ mediasoup ≠ «выключено».** При `enabled: true` и недоступном сайдкаре
+  `GET /api/status` отдаёт `mediasoup_rtp: {started: false, reason: ...}`, а не
+  `None` (`None` — только когда режим выключен оператором); те же тексты
+  доезжают в 503 ответов `/api/mediasoup/*`, поэтому браузер видит настоящую
+  причину, а не «не включён». Повторная попытка достучаться до сайдкара — не
+  чаще раза в 10 с: мост дёргается на каждый аудиокадр, и повтор без троттла
+  вылился бы в шторм запросов к control API.
 * **Одна команда для SFU-стека** (mediasoup + coturn): `cd docker/sfu &&
   cp .env.example .env && docker compose up -d --build` — см.
   `docker/sfu/README.md`.
