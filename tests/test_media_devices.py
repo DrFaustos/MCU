@@ -6,7 +6,9 @@ arecord) подменяются, поэтому тесты одинаково п
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -265,3 +267,91 @@ def test_video_device_synthetic_flag_detected():
     assert media_devices._is_synthetic_video("Colorbar", "Colorbar generator") is True
     assert media_devices._is_synthetic_video("SDL", "SDL renderer") is True
     assert media_devices._is_synthetic_video("v4l2", "HD Camera") is False
+
+
+# --- отказ опроса != «устройства нет» ---------------------------------------
+
+
+def test_run_reports_timeout_as_no_answer():
+    """Зависшая утилита — «ответа нет» (None), а не пустой ответ."""
+    orig = media_devices.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, media_devices._PROBE_TIMEOUT)
+
+    media_devices.subprocess.run = fake_run  # type: ignore[assignment]
+    try:
+        assert media_devices._run(["v4l2-ctl", "--all"]) is None
+    finally:
+        media_devices.subprocess.run = orig  # type: ignore[assignment]
+
+
+def test_run_reports_nonzero_rc_as_no_answer():
+    """rc!=0 с причиной в stderr — «ответа нет»: пустой stdout не ответ.
+
+    Так выглядит камера, занятая другим приложением: v4l2-ctl пишет
+    «Device or resource busy» в stderr, stdout остаётся пустым.
+    """
+    orig = media_devices.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        return types.SimpleNamespace(
+            returncode=1, stdout="", stderr="Device or resource busy")
+
+    media_devices.subprocess.run = fake_run  # type: ignore[assignment]
+    try:
+        assert media_devices._run(["v4l2-ctl", "--all"]) is None
+    finally:
+        media_devices.subprocess.run = orig  # type: ignore[assignment]
+
+
+def test_run_keeps_empty_stdout_as_answer():
+    """Успешный ответ с пустым выводом — это ответ (""), а не None."""
+    orig = media_devices.subprocess.run
+    media_devices.subprocess.run = lambda cmd, **kw: types.SimpleNamespace(  # type: ignore[assignment]
+        returncode=0, stdout="", stderr="")
+    try:
+        assert media_devices._run(["v4l2-ctl", "--all"]) == ""
+    finally:
+        media_devices.subprocess.run = orig  # type: ignore[assignment]
+
+
+def test_is_capture_capable_true_when_probe_gives_no_answer():
+    """Не смогли спросить — НЕ считаем «не камера» (камера не исчезает)."""
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    media_devices._run = lambda cmd: None  # type: ignore[assignment]
+    media_devices.shutil.which = lambda name: "/usr/bin/v4l2-ctl"  # type: ignore[assignment]
+    try:
+        assert media_devices._is_capture_capable("/dev/video0") is True
+    finally:
+        media_devices._run = orig_run  # type: ignore[assignment]
+        media_devices.shutil.which = orig_which  # type: ignore[assignment]
+
+
+def test_busy_camera_stays_in_list():
+    """Сквозная регрессия: камера, занятая другим приложением, видна UI.
+
+    На старом коде давала пустой список: «опрос не ответил» = «не камера»,
+    и оператор вместо «камера занята» видел «камер нет».
+    """
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    orig_nodes = media_devices._v4l2_capture_nodes
+
+    def fake_run(cmd):
+        if "--info" in cmd:
+            return "Card type: Busy Cam\nDriver name: uvcvideo"
+        return None  # --all: утилита не ответила (занято)
+
+    media_devices._run = fake_run  # type: ignore[assignment]
+    media_devices.shutil.which = lambda name: "/usr/bin/v4l2-ctl"  # type: ignore[assignment]
+    media_devices._v4l2_capture_nodes = lambda: ["/dev/video0"]  # type: ignore[assignment]
+    try:
+        cams = media_devices._list_linux_cameras()
+    finally:
+        media_devices._run = orig_run  # type: ignore[assignment]
+        media_devices.shutil.which = orig_which  # type: ignore[assignment]
+        media_devices._v4l2_capture_nodes = orig_nodes  # type: ignore[assignment]
+    assert [c.id for c in cams] == ["/dev/video0"]
+    assert cams[0].name == "Busy Cam"

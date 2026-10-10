@@ -4,7 +4,10 @@
 приближено к реальному железу:
 
 * Linux  — камеры через ``v4l2-ctl --list-devices`` (реальные имена) с
-  фильтром «умеет Video Capture» и fallback на ``/dev/video*``;
+  фильтром «умеет Video Capture» и fallback на ``/dev/video*``. Фильтр
+  отсеивает только то, о чём утилита ответила: если опрос не состоялся
+  (завис, вернул ошибку — занятая другим приложением камера), устройство
+  остаётся в списке;
   микрофоны через ``pactl``/``arecord -l`` (реальные имена) с fallback на
   ``/proc/asound``.
 * Windows — через ``sounddevice`` (микрофоны) и pjsua2 (после старта движка).
@@ -84,15 +87,29 @@ class MediaState:
         self.microphones = microphones
 
 
-def _run(cmd: List[str]) -> str:
-    """Запустить внешнюю утилиту и вернуть stdout (пусто при ошибке)."""
+def _run(cmd: List[str]) -> Optional[str]:
+    """Запустить внешнюю утилиту и вернуть stdout.
+
+    ``None`` — ОТВЕТА НЕТ (утилита не запускается, зависла, вернула ненулевой
+    код). ``""`` — утилита ответила успешно, но вывод пуст. Различие
+    принципиально: «не удалось спросить» не имеет права считаться отказом
+    устройства (см. :func:`_is_capture_capable` и ту же идею в
+    ``log._make_file_handler``, где None различим от «файл пуст»).
+    """
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=False,
         )
-        return proc.stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("Опрос устройств не состоялся (%s): %s", cmd[0], exc)
+        return None
+    if proc.returncode != 0:
+        # v4l2-ctl пишет причину в stderr и молчит в stdout: «Device or
+        # resource busy», когда камеру держит браузер/видеозвонок.
+        log.debug("Опрос устройств отклонён (%s, rc=%d): %s",
+                  cmd[0], proc.returncode, (proc.stderr or "").strip()[:200])
+        return None
+    return proc.stdout or ""
 
 
 def _v4l2_capture_nodes() -> List[str]:
@@ -114,7 +131,7 @@ def _v4l2_device_name(dev: str) -> Tuple[str, str]:
     out = _run(["v4l2-ctl", "-d", dev, "--info"])
     name = ""
     driver = ""
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         low = line.strip().lower()
         if low.startswith("card type") and ":" in line:
             name = line.split(":", 1)[1].strip()
@@ -124,12 +141,21 @@ def _v4l2_device_name(dev: str) -> Tuple[str, str]:
 
 
 def _is_capture_capable(dev: str) -> bool:
-    """Умеет ли узел Video Capture (не метаданные/не encoder-нода)."""
+    """Умеет ли узел Video Capture (не метаданные/не encoder-нода).
+
+    Узел остаётся камерой во всех случаях, когда спросить НЕ УДАЛОСЬ: узлы
+    /dev/videoN уже перечислены ядром, а ложное «не камера» целиком лишает
+    оператора устройства, которое просто занято другим приложением. Тот же
+    принцип уже выбран выше: при отсутствии v4l2-ctl считаем камерой.
+    Отсеивается только то, о чём утилита ОТВЕТИЛА и не увидела Video Capture.
+    """
     if not shutil.which("v4l2-ctl"):
         return True  # не можем проверить — считаем камерой
     out = _run(["v4l2-ctl", "-d", dev, "--all"])
+    if out is None:
+        return True  # утилита промолчала/отказала — та же невозможность проверить
     if not out:
-        return False
+        return False  # ответили успешно и пустым выводом: возможностей нет
     return "Video Capture" in out
 
 
@@ -181,7 +207,7 @@ def _pactl_sources() -> List[DeviceInfo]:
     if not shutil.which("pactl"):
         return mics
     out = _run(["pactl", "list", "short", "sources"])
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
             continue
@@ -199,7 +225,7 @@ def _arecord_cards() -> List[DeviceInfo]:
     if not shutil.which("arecord"):
         return mics
     out = _run(["arecord", "-l"])
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         m = re.match(r"card\s+(\d+):\s+([^\[]+)\[([^\]]+)\],\s+device\s+(\d+)", line)
         if m:
             card, _short, long_name, dev = m.groups()
