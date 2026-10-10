@@ -220,7 +220,12 @@ def resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> byt
             return out.tobytes()
         return arr.tobytes() if channels == 1 else arr.tobytes()
     try:
-        arr = _np.frombuffer(pcm, dtype=_np.int16)
+        # Нечётный хвост отрезается ровно как в pure-Python ветке выше: иначе
+        # один усечённый кадр превращался в МОЛЧАЛИВУЮ тишину только на машине
+        # с numpy — поведение двух веток расходилось (проверено 2026-10-10:
+        # resample_mono(3 байта, 8000->16000) давало b'').
+        arr = _np.frombuffer(pcm[: len(pcm) - (len(pcm) % 2)],
+                             dtype=_np.int16)
     except Exception:  # noqa: BLE001
         return b""
     if channels > 1 and len(arr) % channels == 0:

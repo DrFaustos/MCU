@@ -232,3 +232,55 @@ def test_mix_for_unequal_lengths_excludes_self():
     # Для первого участника — только второй канал, коротких хвостов нет.
     assert len(res.pcm) == 80 * 2
     assert _unpack(res.pcm)[0] == 9000
+
+
+# --- Truncated (odd-length) PCM ---------------------------------------------
+# Нечётное число байт — реальность: pcm.in, оборванный на середине семпла,
+# битая граница IPC, любой внешний вызывающий. До правки 2026-10-10
+# numpy.frombuffer и array.frombytes бросали на таком ValueError, и покалеченный
+# буфер, уже лежащий в микшере, ронял КАЖДЫЙ следующий кадр разговора
+# (rms_level) — комната молчала при «живых» вызовах.
+
+
+def test_rms_odd_length_drops_half_sample():
+    # Один целый семпл 1 и висячий байт: половинки семпла не существует.
+    assert rms_level(b"\x01\x00\x02") == 1.0
+
+
+def test_mix_truncated_buffer_does_not_raise():
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer(1, b"\x40\x00\x40\x00\x40")       # усечённый: [64, 64]
+    mx.set_buffer(2, _pcm([2000, 2000, 2000, 2000]))
+    res = mx.mix()                                   # без ValueError
+    assert _unpack(res.pcm)[0] == 1032               # (64 + 2000) / 2
+
+
+def test_mix_for_survives_truncated_other_buffer():
+    """Главный симптом: усечённый канал A не должен глушить собеседника B."""
+    mx = AudioMixer(MixerConfig())
+    mx.set_buffer("A", b"\x10\x00\x20")              # 3 байта
+    mx.set_buffer("B", _pcm([400] * 4))
+    res = mx.mix_for("B")                             # A говорит в канал B
+    assert _unpack(res.pcm) == [16]
+    assert res.active_channels == 1
+
+
+def test_mix_truncated_same_result_without_numpy():
+    """Обе ветки (с numpy и без) обязаны вести себя одинаково."""
+    mx = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+    mx.set_buffer(1, b"\x10\x00\x20\x00\x30")         # усечённый: [16, 32]
+    mx.set_buffer(2, _pcm([1, 2, 3, 4]))
+    expected = _unpack(mx.mix().pcm)
+    assert expected == [17, 34, 3, 4]
+
+    import mcuclient.audio_mixer as mod
+
+    saved = mod._np
+    mod._np = None
+    try:
+        mx2 = AudioMixer(MixerConfig(strategy=MixStrategy.SUM_CLIPPED))
+        mx2.set_buffer(1, b"\x10\x00\x20\x00\x30")
+        mx2.set_buffer(2, _pcm([1, 2, 3, 4]))
+        assert _unpack(mx2.mix().pcm) == expected
+    finally:
+        mod._np = saved

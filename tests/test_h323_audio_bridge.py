@@ -413,6 +413,31 @@ def test_host_lost_frees_every_mixer_buffer():
     assert bridge.mixer._buffers == {}, "буфер фантома остался в микшере"
 
 
+def test_truncated_pcm_in_does_not_silence_the_room():
+    """Усечённый pcm.in (нечётное число байт) не имеет права глушить комнату.
+
+    До правки 2026-10-10 кадр, оборванный на середине int16-семпла, попадал в
+    микшер и ронял ValueError на СЛЕДУЮЩЕМ кадре любого канала (rms_level), т.е.
+    один битый фрейм выключал аудио всей конференции, а вызовы оставались
+    «живыми». Проверено зондом: после усечённого кадра pcm.out не уходил вовсе.
+    """
+    client, endpoint, bridge = _bridge()
+    endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", b"\x10\x00\x20", 16000))  # 3 байта
+
+    assert client.sent_for("call-2"), "усечённый кадр заглушил канал собеседника"
+
+    # И следующий кадр обязан пройти: микшер не выбит навсегда одним битым
+    # фреймом — иначе симптом выглядел бы как «звук пропал и больше не появился».
+    client.sent.clear()
+    bridge.on_event(pcm_in("call-2", tone(16000), 16000))
+    assert client.sent_for("call-1"), "микшер молчит после усечённого кадра"
+
+
 def test_host_lost_does_not_unsubscribe_the_bridge():
     """Владельцем соединения остаётся эндпоинт: мост сам себя не отписывает.
 

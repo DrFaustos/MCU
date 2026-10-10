@@ -81,8 +81,24 @@ class MixResult:
     speaker_id: Optional[ParticipantId]
 
 
+def _even_pcm(pcm: bytes) -> bytes:
+    """Отрезает усечённый последний байт: половина int16-семпла не существует.
+
+    Обрезанный кадр (укороченный ``pcm.in``, битая граница IPC, любой внешний
+    вызывающий) приходит с нечётным числом байт. На нём ``numpy.frombuffer`` и
+    ``array.frombytes`` бросают ValueError, а это рвёт микширование посреди
+    разговора: усечённый буфер уже лежит в микшере, и с этого момента ПАДАЕТ
+    КАЖДЫЙ чужой кадр (сначала на ``rms_level``) — комната молчит при
+    «живых» вызовах. Воспроизведено 2026-10-10 (mix_for -> ValueError).
+    """
+    if len(pcm) % 2:
+        return pcm[:-1]
+    return pcm
+
+
 def _to_int16_array(pcm: bytes):
-    """Converts PCM16 (little-endian) to an int16 array."""
+    """Converts PCM16 (little-endian) to an int16 array (odd tail dropped)."""
+    pcm = _even_pcm(pcm)
     if _np is not None:
         return _np.frombuffer(pcm, dtype=_np.int16)
     import array
@@ -155,8 +171,13 @@ class AudioMixer:
         return list(self._buffers.keys())
 
     def set_buffer(self, participant_id: ParticipantId, pcm: bytes) -> None:
-        """Stores/updates a participant PCM buffer (decoded from its codec)."""
-        self._buffers[participant_id] = pcm or b""
+        """Stores/updates a participant PCM buffer (decoded from its codec).
+
+        Нечётный хвост отрезается здесь, а не у каждого вызывающего: буферы
+        читаются ``rms_level``, ``_aligned_int16_sum`` и pure-Python ветками —
+        одна усечённая запись глушила всю комнату (см. ``_even_pcm``).
+        """
+        self._buffers[participant_id] = _even_pcm(pcm or b"")
 
     def remove(self, participant_id: ParticipantId) -> None:
         """Removes a participant from the mixer (on disconnect)."""
