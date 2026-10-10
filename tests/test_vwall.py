@@ -108,6 +108,16 @@ def test_speaker_ignores_bad_values():
     assert active_speaker_by_level({1: "bad", 2: 5.0}) == 2
 
 
+def test_speaker_at_threshold_counts_as_active():
+    """Граница порога обязана совпадать с микшером: `>=`, как в `AudioMixer`.
+
+    Здесь сравнивали строго «больше», микшер — «не меньше»: канал ровно на
+    пороге молча выпадал из раскладки `speaker`, хотя микшер считал его
+    активным. Порог один и знак один, иначе две таблицы врут по-разному.
+    """
+    assert active_speaker_by_level({1: 1.0}) == 1
+
+
 def test_capacity():
     lay = Layout(cols=3, rows=2, tiles=[Tile(0, 0, 1)])
     assert lay.capacity == 6

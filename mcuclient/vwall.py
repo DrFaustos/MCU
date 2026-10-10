@@ -61,16 +61,29 @@ def build_layout(participant_ids: Sequence[int], speaking_id: Optional[int] = No
 
 
 def active_speaker_by_level(levels: Dict[int, float], threshold: float = 1.0) -> Optional[int]:
+    """Громчайший уровень не ниже ``threshold``; None, если ниже у всех.
+
+    Порог сравнивается как ``>=`` — ровно так же, как ``AudioMixer`` считает
+    канал не-тишиной (``rms_level(pcm) >= config.silence_rms``). Строгое ``>``
+    молча выбрасывало канал ровно на пороге: микшер его суммирует как
+    голосующий, а раскладка `speaker` его не видела.
+    """
     if not levels:
         return None
-    best_id = None
+    best_id: Optional[int] = None
     best = threshold
     for pid, level in levels.items():
         try:
             val = float(level)
         except (TypeError, ValueError):
             continue
-        if val > best:
+        if val < threshold:
+            continue
+        # При равных уровнях берётся ПЕРВЫЙ по обходу: AudioMixer выбирает
+        # докладчика через max(active, key=...), а это тоже первый из равных.
+        # Второй порядок дал бы раскладку о том же разговоре, где звук идёт из
+        # другой ячейки.
+        if best_id is None or val > best:
             best = val
             best_id = pid
     return best_id
