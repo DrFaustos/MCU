@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -270,17 +271,22 @@ class H323AudioBridge:
     def _mix_and_send(self, sender: str, pcm: bytes) -> None:
         """Кладёт голос ``sender`` в микшер и рассылает микс остальным."""
         sender_pid = self._pid(sender, create=True)
-        self._mark(sender)
+        # Время — ОДИН снимок на весь вызов: им отмечается живость, им же
+        # гасятся устаревшие каналы. Своего тикера у моста нет (микс считается
+        # здесь, по приходу кадра), поэтому «поток иссяк» виден только на чужом
+        # кадре — и обязан быть виден в МИКШЕ, а не только в подсветке.
+        moment = time.monotonic()
+        self._mark(sender, moment)
         if _is_muted(self._participant(sender)):
             # Мьют обязан глушить и буфер: иначе голос уедет другим, как только
             # мьют снимут, а «сейчас» станет нечем отличить тихий голос от тишины.
             self._mixer.remove(sender_pid)
-            self._publish_levels()
+            self._publish_levels(moment)
             return
         self._mixer.set_buffer(sender_pid, pcm)
         # Индикаторы обновляются на каждый кадр: панель и режим ``speaker``
         # иначе показывали бы голос того, кто говорил первым.
-        self._publish_levels()
+        self._publish_levels(moment)
         with self._lock:
             # Частоту берём тем же снимком, что и список каналов: иначе между
             # снимком и чтением в словарь впишется call.media, и кадр уйдёт по
@@ -312,15 +318,21 @@ class H323AudioBridge:
             return False
 
     # --- индикатор «говорит» ------------------------------------------------
-    def _mark(self, token: str) -> None:
-        """Отмечает живость канала: по штампу индикатор не гасит текущий голос."""
+    def _mark(self, token: str, now: Optional[float] = None) -> None:
+        """Отмечает живость канала: по штампу индикатор не гасит текущий голос.
+
+        ``now`` — снимок времени вызывающего. Он обязателен к передаче там, где
+        по этому же моменту гасятся устаревшие каналы (:meth:`_publish_levels`):
+        два разных вызова ``time.monotonic()`` на один кадр — это два разных
+        ответа на вопрос «жив ли канал».
+        """
         # Порог выставляется здесь и в _publish_levels: тесты подменяют
         # модульный LEVEL_STALE_MS уже после создания моста, а заморозка его в
         # конструкторе сделала бы такую подмену бессмысленной.
         self._indicator.stale_ms = float(LEVEL_STALE_MS)
-        self._indicator.mark(self._pid(token, create=True))
+        self._indicator.mark(self._pid(token, create=True), now)
 
-    def _publish_levels(self) -> None:
+    def _publish_levels(self, now: Optional[float] = None) -> None:
         """Раздаёт уровни и докладчика участникам комнаты.
 
         Мост — единственный владелец PCM H.323-вызовов, поэтому ``volume_level``
@@ -335,14 +347,30 @@ class H323AudioBridge:
         * каналы, исчезнувшие из микшера (мьют, ``forget``), получают явный
           ноль, иначе замолчавший «продолжал бы говорить».
         """
+        moment = time.monotonic() if now is None else now
         with self._lock:
             by_pid = {}
+            mine = set(self._pids.values())
             for token, pid in self._pids.items():
                 by_pid.setdefault(pid, token)
         self._indicator.stale_ms = float(LEVEL_STALE_MS)
+        # Залипший PCM обязан уйти из МИКШЕРА, а не только из подсветки: буфер
+        # живёт до ``forget``, а ``mix_for`` в ``_mix_and_send`` суммирует ВСЕ
+        # ячейки. Замерено пробой живьём ДО правки: ``call-1`` замолчал навсегда
+        # (вызов жив, новых ``pcm.in`` нет), ``is_speaking`` уже False и
+        # ``volume_level`` 0, а микс для собеседника по-прежнему RMS 5656 —
+        # последний услышанный голос звучал у всех до конца вызова.
+        #
+        # Убираются ТОЛЬКО свои каналы (значения ``_pids``): мост умеет
+        # работать на внедрённом общем микшере (``test_external_mixer_is_reused``),
+        # где живут участники SIP-слоя, и всеобщая зачистка оглушила бы их.
+        for pid in mine:
+            if self._indicator.is_stale(pid, moment):
+                self._mixer.remove(pid)
+                self._indicator.forget(pid)
         # Вызывается ПОСЛЕ set_buffer/remove: посчитанный раньше снимок отдал
         # бы устаревшей ячейке последний RMS вместо нуля.
-        self._indicator.update(self._mixer)
+        self._indicator.update(self._mixer, now=moment)
         speaker = self._indicator.speaker
         with self._lock:
             self._speaker = speaker

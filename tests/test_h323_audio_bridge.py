@@ -607,3 +607,175 @@ def test_stats_report_active_speaker_and_levels():
 
     assert bridge.stats().speaker_pid == 1
     assert bridge.levels().get(1) == 100
+
+
+# --- залипший PCM обязан уходить из МИКШЕРА, а не только из подсветки -------
+#
+# Мост наполняет микшер push-ом (`set_buffer` на каждый `pcm.in`) и убирает
+# буфер только по ЯВНОМУ событию: мьют, `call.disconnected`,
+# `connection.closed`. У замолчавшего, но живого вызова такого события не
+# бывает в природе — UDP-поток просто молчит, хост ничего не сообщает.
+#
+# Замерено пробой живьём ДО правки: подсветка `call-1` уже погашена
+# (is_speaking=False, volume_level=0), а микс для собеседника по-прежнему
+# RMS 5656.6 — последний услышанный голос суммировался в микс ВСЕХ до конца
+# вызова. Молчаливость ровно та же, что в веб-микшере (`f8d8a59`): уровни
+# гасятся по штампу кадра, а микс считается по буферам микшера — то есть от
+# РАЗНЫХ предпосылок.
+
+
+def _stale_threshold(ms: int = 0):
+    """Порог «любой канал без нового кадра устарел» — в МИЛЛИСЕКУНДАХ.
+
+    Единица здесь важнее значения: `stale_ms` сравнивается с разницей
+    `time.monotonic()`, умноженной на 1000, т.е. часы секундные, а порог
+    миллисекундный (в проде `LEVEL_STALE_MS = 120` = 120 мс). Значение `int`, а
+    не `float`: константа модуля целая, и mypy ловит присваивание float в
+    int-атрибут (`warn_redundant_casts` к тому же не любит лишние `float()`).
+
+    0, а не -1: при -1 устаревает и канал, получивший кадр в ЭТОМ же тике, и
+    мост не отправляет ни одного кадра — тест проверял бы отсутствие отправки,
+    а не залипание. При 0 текущий канал жив ((`moment` - `stamp`) * 1000 равно
+    нулю, сравнение в `is_stale` строгое), а предыдущий — устарел.
+    """
+
+    class _Ctx:
+        def __enter__(self) -> None:
+            import mcuclient.h323_audio_bridge as mod
+
+            self._mod = mod
+            self._saved = mod.LEVEL_STALE_MS
+            mod.LEVEL_STALE_MS = ms
+
+        def __exit__(self, *exc: object) -> None:
+            self._mod.LEVEL_STALE_MS = self._saved
+
+    return _Ctx()
+
+
+def _room():
+    """Комната из трёх вызовов: говорящий, молчальник и слушатель.
+
+    Третий нужен НЕ «для полноты»: `mix_for(token)` вычитает САТОГО получателя,
+    а отправитель вообще не получает кадра, поэтому голос замолчавшего вызова
+    физически audible только в миксе КОГО-ТО ТРЕТЬЕГО. В паре «двое» тест
+    проверял бы тишину, которая там и так — регрессия была бы зелёной при
+    полностью мёртвом микшере.
+    """
+    client, endpoint, bridge = _bridge()
+    talker = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    endpoint.add("call-3", 3)
+    for tok in ("call-1", "call-2", "call-3"):
+        bridge.on_event(media(tok, 16000))
+    return client, endpoint, bridge, talker
+
+
+def test_silent_channel_leaves_the_mixer_not_only_the_spotlight():
+    """Замолчавший вызов обязан исчезнуть из микса, а не только с панели."""
+    import time
+
+    client, _endpoint, bridge, p1 = _room()
+
+    # Базовая половина: голос call-1 обязан дойти до слушателя (кадр шлёт
+    # молчальник call-2, микс для call-3 = буферы call-1 + call-2). Без этого
+    # assert весь тест был бы зелёным при полностью мёртвом миксе.
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+    bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+    assert rms(client.sent_for("call-3")[-1]) > 1000, (
+        "живой голос не дошёл до слушателя — тесту нечего проверять")
+    assert p1.is_speaking is True
+
+    # call-1 замолчал НАВЕЧНО: вызов жив, события нет, новых pcm.in нет.
+    with _stale_threshold():
+        time.sleep(0.005)          # только разница часов, порога не ждём
+        before = len(client.sent_for("call-3"))
+        bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+        fresh = client.sent_for("call-3")[before:]
+
+    assert 1 not in bridge.mixer.participant_ids, (
+        "замолчавший канал остался в микшере: его PCM суммируется в микс всех")
+    assert p1.is_speaking is False and p1.volume_level == 0
+    assert fresh, "новый кадр не ушёл: проверка ниже ничего не утверждает"
+    loud = [round(rms(pcm), 1) for pcm in fresh if rms(pcm) > 1]
+    assert not loud, (
+        f"залипший PCM по-прежнему в миксе: RMS {loud} при погасшей подсветке")
+
+
+def test_revived_channel_is_heard_again():
+    """Затухание не имеет права быть глушением: поток ожил — голос вернулся.
+
+    Иначе правка «в одну сторону» тихо ломала бы вызовы, в которых звук
+    пропал на минуту: канал убран из микшера, а обратно не возвращается —
+    участник молчит для всех до самого `call.disconnected`.
+    """
+    import time
+
+    client, _endpoint, bridge, _p1 = _room()
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+    bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+
+    with _stale_threshold():
+        time.sleep(0.005)
+        bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+    assert 1 not in bridge.mixer.participant_ids
+
+    # Поток возобновился — канал обязан вернуться в микс СВОИМ голосом, и
+    # услышать его обязан СЛУШАТЕЛЬ: mix_for вычитает самого звонящего, так
+    # что в его собственный канал этот голос не уходит никогда.
+    before = len(client.sent_for("call-3"))
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=6000), 16000))
+    assert 1 in bridge.mixer.participant_ids, (
+        "возобновлённый канал не вернулся в микшер")
+    fresh = client.sent_for("call-3")[before:]
+    assert fresh and any(rms(pcm) > 1000 for pcm in fresh), (
+        "вернувшийся голос не дошёл до слушателя")
+
+
+def test_living_channel_is_not_faded_between_ticks():
+    """Живой поток с джиттером переживает чужие кадры: гасить по «тика без
+    нового кадра» нельзя — публикация и расчёт идут одним шагом (20 мс) и
+    законно разъезжаются по фазе.
+    """
+    client, _endpoint, bridge, _p1 = _room()
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+
+    # Три кадра от собеседника подряд, порог штатный (120 мс) — call-1 новых
+    # кадров не слал, но жив: глушить его права нет. Слушатель — call-3.
+    for _ in range(3):
+        bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+
+    assert 1 in bridge.mixer.participant_ids, (
+        "живой канал вычищен до истечения порога — собеседник оглохнет")
+    assert rms(client.sent_for("call-3")[-1]) > 1000, (
+        "живой голос исчез из микса слушателя без всякого порога")
+
+
+def test_stale_sweep_does_not_touch_foreign_mixer_channels():
+    """Мост на внедрённом общем микшере обязан чистить ТОЛЬКО свои каналы.
+
+    `mixer=` внедряют, чтобы MCU сводил H.323 с остальными; в таком микшере
+    живут каналы SIP-слоя и веба. Всеобщая зачистка по штампу оглушила бы их,
+    а своего штампа у них у моста нет — `is_stale` для них ответил бы «да».
+    """
+    import time
+
+    client = FakeClient()
+    endpoint = FakeEndpoint()
+    mixer = AudioMixer(MixerConfig(sample_rate=16000))
+    bridge = H323AudioBridge(client, endpoint, mixer=mixer)
+    bridge.start()
+    endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    mixer.set_buffer(99, tone(16000, amp=7000))    # чужой канал (не H.323)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+
+    with _stale_threshold():
+        time.sleep(0.005)
+        bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+
+    assert 1 not in mixer.participant_ids, "свой канал не убран"
+    assert 99 in mixer.participant_ids, (
+        "зачистка тронула чужой канал общего микшера — SIP/веб оглохли")
