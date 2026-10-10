@@ -284,7 +284,7 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 Python не перехватывает. Аудит согласованных кодеков (`_log_negotiated_codecs`)
 теперь читается ДО гарда: `mi.codecName` безопасен всегда, и диагностика
 «терминал соединился, но звука нет» (Sony/Polycom, Windows-wheel) возвращается.
-Регрессии — `tests/test_sip_engine_media_state.py` (9).
+Регрессии — `tests/test_sip_engine_media_state.py` (11).
 
 ### 3.13. Раннер обязан разбираться в том же API, что и тесты (исправлено)
 Раньше `tests/_runner.py` умел передавать только `tmp_path`, и тесты, принимавшие

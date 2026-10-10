@@ -223,6 +223,26 @@ def test_on_event_media_sets_codecs():
     assert p.video_codec == "H.264"
 
 
+def test_on_event_media_blank_codec_keeps_agreed_value():
+    """Пустой `codec` от хоста не имеет права затирать согласованный.
+
+    Хост шлёт `call.media` не всегда с заполненным полем; прежняя запись
+    `p.audio_codec = codec` вешала пустую строку поверх G.722, и панель (REST
+    -проекция участника) читала «кодека нет» при активном звонке. Отсутствие
+    данных — не значение: то же правило, что введено для rx_bitrate_kbps.
+    """
+    _, ep, _ = _make_endpoint(auto_answer=False)
+    ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))
+    p = ep.find_by_token("t1")
+    assert p is not None
+    ep.on_event(
+        H323dEvent("call.media", {"token": "t1", "kind": "audio", "codec": "G.722"})
+    )
+    ep.on_event(H323dEvent("call.media", {"token": "t1", "kind": "audio"}))
+
+    assert p.audio_codec == "G.722"
+
+
 def test_on_event_disconnected_removes():
     room, ep, _ = _make_endpoint()
     ep.on_event(H323dEvent("call.incoming", {"token": "t1", "alias": "a"}))

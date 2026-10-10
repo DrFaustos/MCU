@@ -1249,7 +1249,9 @@ class SipEngine:
             log.debug("_on_call_media_state: getInfo не удался: %s", exc)
             return
         # Аудит кодеков читаем до видеогарда: mi.codecName безопасен всегда.
-        self._log_negotiated_codecs(ci)
+        # Объект вызова передаём обязательно — по нему находится участник,
+        # которому пишутся согласованные кодеки.
+        self._log_negotiated_codecs(ci, call)
         # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
         # нативному access violation (Python-исключение его не ловит), поэтому
         # разбор видеопотоков оставляем под флагом _video_supported.
@@ -1275,11 +1277,17 @@ class SipEngine:
             except Exception:  # noqa: BLE001
                 log.debug("bind capture on media state failed", exc_info=True)
 
-    def _log_negotiated_codecs(self, ci) -> None:
-        """Залогировать фактические кодеки и, если не согласовались — почему."""
+    def _log_negotiated_codecs(self, ci, call=None) -> None:
+        """Применить кодеки к модели участника и залогировать разбор.
+
+        Раньше метод только логировал: ``active_codecs`` считалась здесь и
+        гибла в ``log.info``, поэтому ``Participant.audio_codec`` для SIP
+        оставался ``None`` навсегда — панель и тайл читали «кодека нет» при
+        активном звонке. Разбор (и запись в модель) принадлежит
+        ``CallManager``, журнал — движку.
+        """
         try:
-            from .call_manager import active_codecs  # noqa: PLC0415
-            codecs = active_codecs(getattr(ci, "media", None), _pj)
+            codecs = self._calls.apply_negotiated_codecs(ci, call) or {}
             log.info(
                 "Согласованные кодеки вызова: аудио=%s, видео=%s",
                 codecs.get("audio") or "-", codecs.get("video") or "-",
@@ -1295,8 +1303,13 @@ class SipEngine:
             log_codec_mismatch(
                 ci,
                 codecs,
-                supported_audio_from_config(self.config.audio_codecs()),
-                supported_video_from_config(self.config.video_codecs()),
+                # БЕЗ скобок: audio_codecs/video_codecs — property, отдающий
+                # List[str]. Вызов со скобками давал TypeError, который
+                # проглатывал except ниже, и весь разбор нестыконок (Этап 5
+                # ADR-0002 — «терминал соединился, но звука нет» для
+                # Sony/Polycom) не выполнялся ни разу.
+                supported_audio_from_config(self.config.audio_codecs),
+                supported_video_from_config(self.config.video_codecs),
             )
         except Exception:  # noqa: BLE001
             log.debug("active_codecs: ошибка", exc_info=True)

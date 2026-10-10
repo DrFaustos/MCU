@@ -417,10 +417,14 @@ class H323Endpoint:
             if p is not None:
                 kind = str(data.get("kind", "") or "").lower()
                 codec = str(data.get("codec", "") or "")
-                if kind == "audio":
-                    p.audio_codec = codec
-                elif kind == "video":
-                    p.video_codec = codec
+                # Пустое поле от хоста — «нет данных», а не «кодек пропал»:
+                # прежняя запись вешала '' поверх согласованного G.722, и
+                # панель читала «кодека нет» при активном звонке.
+                if codec:
+                    if kind == "audio":
+                        p.audio_codec = codec
+                    elif kind == "video":
+                        p.video_codec = codec
         elif name == "ready":
             try:
                 self._port = int(data.get("port", self._port))

@@ -7,7 +7,10 @@
   без `call` терял участника и дублировал `call.video`);
 * камера перебиншивается ОДИН раз на событие;
 * разбор видеопотоков остаётся под флагом поддержки видео (защита от
-  нативного access violation на сборках PJSIP без видео).
+  нативного access violation на сборках PJSIP без видео);
+* согласованные кодеки доходят до модели участника, а не остаются только в
+  журнале (панель и тайл UI читают модель), и объект вызова при этом
+  передаётся — по нему находится участник.
 
 pjsua2 не требуется: приватные collaborators подменяются вручную.
 """
@@ -21,23 +24,34 @@ from mcuclient.config import load_config
 
 
 class _Calls:
-    """Шпион CallManager: пишет аргументы apply_media_state."""
+    """Шпион CallManager: пишет аргументы apply_media_state и кодеков."""
 
     def __init__(self) -> None:
         self.calls: list = []
+        self.codecs: list = []
 
     def apply_media_state(self, call_info, call=None) -> None:
         self.calls.append((call_info, call))
 
+    def apply_negotiated_codecs(self, call_info, call=None) -> None:
+        self.codecs.append((call_info, call))
+
 
 class _CodecLog:
-    """Шпион аудита кодеков."""
+    """Шпион аудита кодеков.
+
+    Подпись обязана совпадать с боевой: аудит вызывается с объектом вызова,
+    потому что по нему `CallManager` находит участника, которому пишутся
+    согласованные кодеки.
+    """
 
     def __init__(self) -> None:
         self.infos: list = []
+        self.pairs: list = []
 
-    def __call__(self, ci) -> None:
+    def __call__(self, ci, call=None) -> None:
         self.infos.append(ci)
+        self.pairs.append((ci, call))
 
 
 class _Bind:
@@ -86,6 +100,22 @@ def test_media_state_applies_once_with_call_object():
     engine._on_call_media_state(call, None)
 
     assert engine._calls.calls == [(ci, call)], engine._calls.calls
+
+
+def test_codec_audit_receives_call_object():
+    """Аудит кодеков обязан получать объект вызова.
+
+    Без `call` у `CallManager` нет способа найти участника: `CallInfo.id` —
+    это id pjsua2, он не совпадает с `Participant.id`. Кодеки остались бы в
+    журнале и не дошли бы до модели, то есть до панели и тайла.
+    """
+    engine = _engine()
+    ci = SimpleNamespace(id=7, media=[])
+    call = _Call(info=ci)
+
+    engine._on_call_media_state(call, None)
+
+    assert engine._codec_log.pairs == [(ci, call)], engine._codec_log.pairs
 
 
 def test_codecs_audited_without_video_support():
@@ -174,3 +204,40 @@ def test_real_codec_helper_runs_without_pjsip():
     engine._log_negotiated_codecs(SimpleNamespace(id=1, media=[]))  # не бросает
     # Медиа нет вовсе — тоже не должно падать.
     engine._log_negotiated_codecs(SimpleNamespace(id=2, media=None))
+
+
+class _AudioMedia:
+    """Аудиопоток с согласованным кодеком — как `mi` в pjsua2."""
+
+    type = 0
+    codecName = "PCMU/8000"
+
+
+def test_codec_mismatch_audit_is_reachable():
+    """Диагностика «терминал соединился, но звука нет» обязана вызываться.
+
+    Замерено живьём до правки: `log_codec_mismatch` не вызывался НИ РАЗУ — ни
+    при пустом медиа, ни при согласованном кодеке. Причина: `self.config
+    .audio_codecs()` вызывало property (он отдаёт `List[str]`) со скобками,
+    `TypeError: 'list' object is not callable` проглатывался `except Exception`
+    рядом. Для Sony/Polycom (Этап 5 ADR-0002) это означало тихое «-» в журнале
+    вместо причины отказа кодека — ровно тот случай, ради которого ветка
+    сделана. Проверка без подмены самого движка: подменяется только журнал.
+    """
+    import mcuclient.codec_negotiation as cn
+
+    engine = se.SipEngine(load_config(None))
+    calls: list = []
+    original = cn.log_codec_mismatch
+    cn.log_codec_mismatch = lambda *a, **k: calls.append(a)
+    try:
+        engine._log_negotiated_codecs(SimpleNamespace(id=1, media=[_AudioMedia()]))
+    finally:
+        cn.log_codec_mismatch = original
+
+    assert len(calls) == 1, "разбор нестыковок не вызван — ветка мертва"
+    _ci, codecs, audio_supported, video_supported = calls[0]
+    assert codecs.get("audio") == "PCMU/8000"
+    # Список поддерживаемых обязан прийти настоящим: property читается БЕЗ скобок.
+    assert isinstance(audio_supported, list) and audio_supported
+    assert isinstance(video_supported, list)
