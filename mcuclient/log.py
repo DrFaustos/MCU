@@ -13,6 +13,12 @@
 * ``threading.excepthook`` — ловит исключения в фоновых потоках;
 * сброс буфера (flush) после каждой записи, чтобы лог не терялся при падении.
 
+Неполадки самого журнала (не открылся файл, откат в другую папку,
+не включился faulthandler, не сбросился буфер) обязаны быть видны:
+они печатаются в stderr и копятся в _STARTUP_NOTICES, откуда
+setup_logging() переливает их в лог. Молчаливый отказ журнала
+неотличим от «падений не было» — а именно за падениями сюда и приходят.
+
 ВАЖНО: faulthandler пишет в ТОТ ЖЕ файловый дескриптор, что и основной
 ``logging.FileHandler`` (а не открывает второй). Два независимых дескриптора
 на один файл на Windows приводят к конфликту записи из нативных потоков
@@ -33,6 +39,43 @@ LOG_FILENAME = "mcu-client.log"
 _log_fd = None          # dup файлового дескриптора для faulthandler
 _log_path: Path | None = None
 
+#: Заметки о неполадках самого журнала, собранные ДО настройки логгера.
+#: В windowed-сборке Windows stderr уходит в devnull, поэтому печатать
+#: туда бесполезно: заметка ждёт в списке, пока setup_logging() поставит
+#: файловый handler, и перельётся в лог.
+_STARTUP_NOTICES: list[str] = []
+
+
+def _startup_notice(message: str, via_log: bool = True) -> None:
+    """Сообщить о неполадке самого журнала — сразу, как только возможно.
+
+    До setup_logging() логгера нет: заметка печатается в stderr
+    (консоль/headless) и копится в _STARTUP_NOTICES, откуда
+    setup_logging() перельёт её в файл. ПОСЛЕ настройки заметка
+    пишется в лог немедленно: иначе отказ, случившийся в рантайме
+    (отвалился fd, не включился faulthandler), ждал бы следующего
+    вызова setup_logging(), которого не бывает.
+
+    via_log=False обязателен для ветки «flush не прошёл»: логгеру в
+    ней доверять нельзя — он пишет в тот же файл, который только что
+    отказался сбрасываться, и заметка утонула бы в той же ошибке
+    (logging проглатывает исключения handler-а). Сознательное
+    ограничение, а не молчание по незнанию: на windowed-сборке с
+    мёртвым stderr этот единственный факт остаётся необнаружимым,
+    зато он не притворяется записанным.
+    """
+    if _CONFIGURED and via_log:
+        logging.getLogger("mcuclient.log").warning("%s", message)
+        return
+    _STARTUP_NOTICES.append(message)
+    if sys.stderr is not None:
+        try:
+            print(f"[MCU] {message}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            # Печатать некуда: заметка уже в _STARTUP_NOTICES и
+            # дождётся лога. Сломанный stderr — тоже событие.
+            _STARTUP_NOTICES.append(f"stderr недоступен: {exc}")
+
 
 class _FlushingFileHandler(logging.FileHandler):
     """FileHandler, который сбрасывает буфер после каждой записи.
@@ -40,12 +83,32 @@ class _FlushingFileHandler(logging.FileHandler):
     Без этого при жёстком падении последние строки (самые важные) теряются.
     """
 
+    #: Сообщить об отказе flush только один раз.
+    _flush_reported = False
+
     def emit(self, record: logging.LogRecord) -> None:
+        # StreamHandler.emit сам зовёт flush(), поэтому ловить отказ
+        # здесь бессмысленно: он случился бы внутри super().emit() и
+        # ушёл в logging handleError (в windowed-сборке — в никуда).
+        # Весь разбор отказа живёт в flush().
         super().emit(record)
+        self.flush()
+
+    def flush(self) -> None:
+        # Теряются именно строки перед падением, поэтому молчать
+        # нельзя: иначе «лога нет» выглядит как «падения не было».
+        # Сообщаем один раз: битый flush залил бы и файл, и консоль.
+        # И мимо логгера (via_log=False) — он пишет в тот же файл,
+        # который только что отказался сбрасываться.
         try:
-            self.flush()
-        except Exception:  # noqa: BLE001
-            pass
+            super().flush()
+        except Exception as exc:  # noqa: BLE001
+            if not _FlushingFileHandler._flush_reported:
+                _FlushingFileHandler._flush_reported = True
+                _startup_notice(
+                    f"журнал не сброшен на диск: {exc}",
+                    via_log=False,
+                )
 
 
 def _app_dir() -> Path:
@@ -66,16 +129,29 @@ def _pick_log_path() -> Path:
         return _log_path
     candidates = [_app_dir()]
     candidates.append(Path.home() / ".mcu-client")
+    failures: list[str] = []
     for base in candidates:
         try:
             base.mkdir(parents=True, exist_ok=True)
             probe = base / LOG_FILENAME
             with open(probe, "a", encoding="utf-8"):
                 pass
+            if failures:
+                # Сам откат — штатный случай (README обещает
+                # ~/.mcu-client при нехватке прав), но оператору надо
+                # сказать, ГДЕ искать журнал: после отката рядом с .exe
+                # его уже не будет.
+                _startup_notice(
+                    f"журнал пишется в {probe}: "
+                    + "; ".join(failures))
             _log_path = probe
             return probe
-        except OSError:
+        except OSError as exc:
+            failures.append(f"{base}: {exc}")
             continue
+    _startup_notice(
+        "журнал не пишется ни в одну папку, пишем в текущую: "
+        + "; ".join(failures))
     _log_path = Path(LOG_FILENAME)
     return _log_path
 
@@ -91,41 +167,99 @@ def _make_file_handler() -> logging.FileHandler | None:
             )
         )
         return handler
-    except OSError:
+    except OSError as exc:
+        # Молчаливый None означал «логов нет, и почему — неизвестно».
+        _startup_notice(
+            f"файловый журнал не открыт: {exc} — "
+            f"ошибки видны только в консоли")
         return None
+
+
+def _try_enable(fd: int):
+    """Включить faulthandler на fd: None = успех, иначе причина отказа.
+
+    При отказе дескриптор закрывается здесь. Иначе он утекает, а
+    вызывающий оставил бы _log_fd выставленным: проверка «уже
+    включено» в начале _enable_faulthandler запретила бы любую
+    повторную попытку, и процесс остался бы без единственного
+    свидетеля segfault — молча. Так и было: _log_fd присваивался
+    ДО faulthandler.enable().
+    """
+    try:
+        faulthandler.enable(file=fd, all_threads=True)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            os.close(fd)
+        except OSError as close_exc:  # noqa: BLE001
+            _startup_notice(
+                f"не закрыт дескриптор faulthandler: {close_exc}")
+        return exc
+    return None
 
 
 def _enable_faulthandler(handler: logging.FileHandler | None) -> None:
     """Писать трассировку при фатальных сигналах в тот же лог-файл.
 
     faulthandler переживает segfault/abort в нативном коде (pjsua, Qt),
-    где обычный Python-обработчик исключений бессилен. Пишем в уже открытый
-    файловый дескриптор основного handler'а (dup), чтобы не открывать второй
-    дескриптор на тот же файл — иначе на Windows возможен конфликт записи.
+    где обычный Python-обработчик исключений бессилен. Пишем в уже
+    открытый файловый дескриптор основного handler-а (dup), чтобы не
+    открывать второй дескриптор на тот же файл — иначе на Windows
+    возможен конфликт записи.
+
+    Неудача каждой попытки называется в заметке: «отказ без текста» и
+    здесь означала бы «всё включено».
     """
     global _log_fd
     if _log_fd is not None:
         return
-    try:
-        if handler is not None:
+    reasons: list[str] = []
+    fd = None
+    if handler is not None:
+        try:
             stream = handler.stream
             if stream is not None:
-                # Дублируем fd файла handler'а, чтобы faulthandler писал в тот же файл.
-                _log_fd = os.dup(stream.fileno())
-                faulthandler.enable(file=_log_fd, all_threads=True)
-                return
-    except Exception:  # noqa: BLE001
-        pass
-    # Запасной путь: собственный дескриптор (или stderr, если файла нет).
+                fd = os.dup(stream.fileno())
+        except Exception as exc:  # noqa: BLE001
+            # Переход на отдельный fd штатный, но факт обязан быть
+            # виден: у двух дескрипторов на один файл разное поведение
+            # при конкурентной записи из нативных потоков (об этом
+            # docstring модуля).
+            reasons.append(f"дескриптор журнала недоступен: {exc}")
+    if fd is not None:
+        err = _try_enable(fd)
+        if err is None:
+            _log_fd = fd
+            return
+        reasons.append(f"дескриптор журнала: {err}")
     try:
         path = _pick_log_path()
-        _log_fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        faulthandler.enable(file=_log_fd, all_threads=True)
-    except Exception:  # noqa: BLE001
-        try:
-            faulthandler.enable(all_threads=True)
-        except Exception:  # noqa: BLE001
-            pass
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    except Exception as exc:  # noqa: BLE001
+        fd = None
+        reasons.append(f"отдельный fd не открыт: {exc}")
+    if fd is not None:
+        err = _try_enable(fd)
+        if err is None:
+            _log_fd = fd
+            return
+        reasons.append(f"отдельный fd: {err}")
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception as inner:  # noqa: BLE001
+        # Ни файл, ни stderr: единственный свидетель segfault потерян,
+        # и оператор обязан узнать об этом сейчас, а не постфактум по
+        # «пустому» логу после зависания.
+        reasons.append(f"stderr: {inner}")
+        _startup_notice(
+            "faulthandler НЕ включён: " + "; ".join(reasons)
+            + " — трассировка при аварийном завершении не попадёт "
+            + "ни в лог, ни в консоль")
+        return
+    # Включились только в stderr: файлы не подходят, но свидетель есть.
+    # Различать эти два состояния нужно: в windowed-сборке stderr мёртв,
+    # и «включено в stderr» там равно «не включено».
+    _startup_notice(
+        "faulthandler включён только в stderr: " + "; ".join(reasons))
 
 
 def _install_excepthooks() -> None:
@@ -197,6 +331,15 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
         _enable_faulthandler(file_handler)
         _CONFIGURED = True
 
+    # Заметки, собранные до появления writer-а (см. _startup_notice):
+    # в windowed-сборке это единственный канал, поэтому о них обязаны
+    # узнать даже если stderr был мёртв.
+    if _STARTUP_NOTICES:
+        notice_log = logging.getLogger("mcuclient.log")
+        for note in _STARTUP_NOTICES:
+            notice_log.warning("%s", note)
+        _STARTUP_NOTICES.clear()
+
     return logging.getLogger("mcuclient")
 
 
@@ -212,7 +355,14 @@ def report_fatal(message: str) -> None:
     пишем в stderr. Сама ошибка уже должна быть залогирована вызывающим.
     """
     log_path = log_file_path()
-    text = f"{message}\n\nПодробности в лог-файле:\n{log_path}"
+    if os.path.exists(log_path):
+        tail = f"Подробности в лог-файле:\n{log_path}"
+    else:
+        # Обещать путь, которого нет, — отправить оператора искать файл,
+        # который не создавался (README: «приложите mcu-client.log»).
+        tail = ("Файл журнала НЕ создан ({log_path}); "
+                "текст ошибки только в этом окне")
+    text = f"{message}\n\n{tail}"
     shown = False
     if sys.platform == "win32":
         try:  # pragma: no cover — зависит от Windows
@@ -222,13 +372,22 @@ def report_fatal(message: str) -> None:
                 0, text, "MCU Client — критическая ошибка", 0x10
             )
             shown = True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Отказ окна — не конец: текст уйдёт в stderr/лог. Но на
+            # windowed-сборке stderr мёртв, поэтому факт пишем в лог:
+            # иначе «окно не показалось» превратится в «ничего не было».
             shown = False
+            _startup_notice(
+                f"не удалось показать окно ошибки: {exc}")
     if not shown and sys.stderr is not None:
         try:  # pragma: no cover
             print(f"[MCU] КРИТИЧЕСКАЯ ОШИБКА: {text}", file=sys.stderr)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Ни окна, ни консоли: последняя надежда — лог, куда заметка
+            # уже добавлена, и код выхода процесса.
+            _startup_notice(
+                f"критическую ошибку не удалось показать: {exc}"
+                f"; текст: {message}")
 
 
 def log_file_path() -> str:

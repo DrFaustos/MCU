@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import inspect
 import socket
@@ -11,8 +10,19 @@ import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог tests/ нужен для общего помощника-сканера: tests/_runner.py
+# кладёт в sys.path только корень репозитория, см. заголовок
+# test_h323d_client.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcuclient import doctor  # noqa: E402
+
+from _silent_handlers import (  # noqa: E402
+    SELFTEST_EXPECTED,
+    SELFTEST_SOURCE,
+    scan_is_not_a_placeholder,
+    silent_handlers,
+)
 
 
 def test_check_ffmpeg_returns_status_tuple():
@@ -288,46 +298,24 @@ def test_check_media_reports_logconfig_failure():
 # повесить фильтр, который все обходят комментарием.
 
 
-def _silent_handlers(source):
-    # Молчаливым считается обработчик без единого вызова и без raise:
-    # pass и тихое присваивание (vcams = []) в этом смысле одинаковы -
-    # отказ проверки не долетает ни до отчёта, ни до лога. Так в HEAD
-    # прятались все шесть случаев.
-    silent = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.ExceptHandler):
-            continue
-        reports = any(isinstance(n, (ast.Call, ast.Raise))
-                      for n in ast.walk(node))
-        if not reports:
-            silent.append(node.lineno)
-    return silent
-
-
 def test_doctor_has_no_silent_except_handlers():
     # Тот же класс, что и вся правка: диагностика, которая молчит,
     # неотличима от диагностики, которая ничего не проверяла.
-    silent = _silent_handlers(inspect.getsource(doctor))
-    assert not silent, ("mcuclient/doctor.py: except без сообщения "        "об отказе; добавь WARN/FAIL с причиной, строки: " + str(silent))
+    # Сканер общий (tests/_silent_handlers.py): дубль на каждый страж
+    # расходится с братом незаметно, и зелёный прогон начинает значить
+    # разное в разных файлах.
+    silent = silent_handlers(inspect.getsource(doctor))
+    assert not silent, (
+        "mcuclient/doctor.py: except без сообщения об отказе - ",
+        "добавь WARN/FAIL с причиной, строки: " + str(silent),
+    )
 
 
 def test_silent_handler_scan_is_not_a_placeholder():
-    # Граница стража - часть контракта (как у стража документов). Без пробы
-    # сканер обязан находить подсов страж неотличим от выключенного:
+    # Граница стража - часть контракта (как у стража документов). Без
+    # пробы на подсове сломанный сканер неотличим от выключенного:
     # завтра его сломают, прогон останется зелёным, а молчание вернётся.
-    probe = chr(10).join([
-        "def f():",
-        "    try:",
-        "        g()",
-        "    except Exception:",
-        "        pass",
-        "    try:",
-        "        h()",
-        "    except Exception:",
-        "        devices = []",
-        "    try:",
-        "        k()",
-        "    except Exception as exc:",
-        "        report(str(exc))",
-    ])
-    assert _silent_handlers(probe) == [4, 8], _silent_handlers(probe)
+    assert scan_is_not_a_placeholder(), (
+        silent_handlers(SELFTEST_SOURCE), SELFTEST_EXPECTED,
+    )
+
