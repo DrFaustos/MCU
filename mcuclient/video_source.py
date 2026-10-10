@@ -45,25 +45,34 @@ log = get_logger("vsource")
 #: подвешивать интерфейс.
 _OPEN_TIMEOUT_S = 5.0
 
-#: Объявление типа ДО try. mypy 2.4 (блокирующий шаг CI: `mypy mcuclient`)
-#: иначе отвергает `np = None` в ветке ImportError: для него `np` — переменная
-#: типа Module из успешно импортнувшейся ветки. Голый `np: Any` выше `try`
-#: годится на обеих машинах: с numpy импорт просто переприсваивает переменную
-#: с типом Any, без numpy законно присваивание None. `# type: ignore` не годится:
-#: warn_unused_ignores включён, и на машине БЕЗ numpy такое игнорирование
-#: оказалось бы неиспользуемым — та же ошибка, только с другой стороны.
-np: Any
+#: numpy + заглушка к нему. Объявление и импорт разведены СОЗНАТЕЛЬНО, и обе
+#: формы отвергнуты по замеру в ДВУХ средах (их у mypy две, см. ниже):
+#:   1) `np = None` в ветке ImportError — ошибка в среде С numpy: присваивание
+#:      None в переменную типа Module (Incompatible types in assignment).
+#:   2) `np: Any` + `import numpy as np` — ошибка в среде БЕЗ numpy: mypy не
+#:      видит модуль и читает импорт как повторное определение имени
+#:      (no-redef: Name "np" already defined). Поймано блокирующим шагом CI
+#:      2026-10-10 по коммиту 270441e: локально с numpy тот же код зелёный.
+#: Итого: импорт без `as`, а в np — присваивание. Никакого `# type: ignore`:
+#: warn_unused_ignores включён, и в одной из сред игнор был бы неиспользуемым.
+#: Сверка обеих сред: `mypy mcuclient` против `mypy --no-site-packages mcuclient`.
+np: Any = None
+#: Есть ли numpy. Отметка ставится СРАЗУ после его импорта, а не вместе с
+#: _HAVE_CAM: импорты в одном try, и прежний порядок («обе отметки только
+#: после обоих») оставлял _HAVE_NUMPY = False при живом numpy (не установлен
+#: pyvirtualcam) — флаг противоречил собственному имени.
+_HAVE_NUMPY = False
 
 try:  # pragma: no cover
-    import numpy as np
+    import numpy
+
+    np = numpy
+    _HAVE_NUMPY = True
     import pyvirtualcam
 
     _HAVE_CAM = True
-    _HAVE_NUMPY = True
 except ImportError as exc:  # pragma: no cover
     _HAVE_CAM = False
-    _HAVE_NUMPY = False
-    np = None
     log.warning("Коммутатор видео недоступен: %s", exc)
 
 try:  # pragma: no cover
@@ -351,11 +360,10 @@ class VideoSourceSwitcher:
     def _make_colorbar(self):
         """Тест-таблица с бегущей полосой — видно, что поток живой."""
         if not _HAVE_NUMPY:
-            # Страховка: np заглушён None, обращение к нему дало бы
-            # AttributeError в потоке коммутатора. Сегодня недостижимо
-            # (numpy и pyvirtualcam импортируются в одном try, поэтому без
-            # numpy available() вообще False) — но поток не должен зависеть
-            # от порядка этих импортов.
+            # Страховка по месту: np — заглушка None, и без проверки здесь
+            # было бы AttributeError. Поток коммутатора от этого не зависит
+            # (available() требует ещё и pyvirtualcam) — но вызов не должен
+            # подразумевать порядок импортов в шапке модуля.
             return None
         img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         bars = 8

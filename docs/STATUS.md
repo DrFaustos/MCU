@@ -132,11 +132,34 @@ v4l2loopback`, `нет прав на /dev/video0`, `numpy`/`pyvirtualcam` не �
 следующем кадре поднимается новая).
 
 Заодно закрыта прежняя ошибка `mypy` в этом файле (`np = None` в переменную типа
-`Module`): добавлено голое объявление `np: Any` ДО `try`. Вариант с
-`np = cast(Any, None)` отброшен по замеру — он ломает вывод типа `np.zeros(...)`
-и добавляет новую ошибку `var-annotated`. `# type: ignore` не годится вдвойне:
-`warn_unused_ignores` включён, и на машине без numpy игнор стал бы
-«неиспользуемым».
+`Module`) — но с первой попытки НЕзакрыта, и это отдельный урок. Форм было
+испытано три, и каждая падает в СВОЕЙ среде, а сред у `mypy` здесь ДВЕ: CI-шаг
+`typecheck` ставит только `mypy==2.4.*`, без `requirements.txt`, поэтому там
+`import numpy` не разрешается в модуль (`--no-site-packages` это воспроизводит
+одной командой):
+
+* `np = None` в ветке `except ImportError` — краснеет в среде С numpy
+  (`Incompatible types in assignment`: `None` в переменную типа `Module`);
+* `np = cast(Any, None)` — та же среда добавляет `Need type annotation for "img"`:
+  `cast` обнуляет вывод типа `np.zeros(...)`;
+* голое `np: Any` до `try` + `import numpy as np` — зелёное локально и КРАСНОЕ в
+  CI: без модуля mypy читает импорт как повторное определение
+  (`no-redef: Name "np" already defined on line 55`). Поймано блокирующим шагом
+  по коммиту `270441e`: `Found 1 error in 1 file`, при том что локально тот же
+  коммит давал `Success` по этому файлу.
+
+Оставлена четвёртая форма: `np: Any = None` до `try`, а внутри — `import numpy`
+(без `as`) и `np = numpy`. Присваивание вместо импорта-с-переименованием, поэтому
+ни `assignment`, ни `no-redef` не возникают. `# type: ignore` не годилось ни в
+одной из форм: `warn_unused_ignores` включён, и в одной из сред игнор стал бы
+«неиспользуемым» — то есть гейт ругался бы в точности там, где раньше молчал.
+
+Попутно исправлен флаг `_HAVE_NUMPY`: он проставлялся вместе с `_HAVE_CAM` — уже
+ПОСЛЕ импорта `pyvirtualcam`, — поэтому на машине с numpy и без `pyvirtualcam`
+(боевая сборка этого стенда) флаг был `False` при живом `np`, то есть противоречил
+собственному имени. Теперь отметка ставается сразу после импорта numpy. Значение
+флага проверено боевым интерпретатором: `np = module`, `_HAVE_NUMPY = True`,
+`_HAVE_CAM = False`, `available() = False`.
 
 **Страж.** `tests/test_video_source.py` (14 кейсов, было 12): `start()` обязан
 вернуть отказ, если устройство не открылось (включая `_thread is None`, т.е.
@@ -171,10 +194,13 @@ passed, 0 failed, 0 skipped**, `--collect-only` = **1169**. Рабочее де�
 `test_video_source_service.py` 7→11) — чужие кейсы в число не попали. Паритет
 раннер↔pytest: 25 (14+11) и 3, расхождений нет. `ruff check . --select E,F,W
 --ignore E501` и `--select F821,F811,F841,E9` — All checks passed.
-`mypy mcuclient --ignore-missing-imports` = **4 ошибки** против **5 на HEAD**:
-прежняя `video_source.py:49` ушла, остались `audio_mixer.py:35` и
-`webrtc_sfu.py:29/221/228` (чужие, numpy-типизация); точечно
-`mypy mcuclient/video_source.py mcuclient/video_source_service.py` — Success.
+`mypy` сверен в ОБЕИХ средах, а не в одной: `mypy mcuclient
+--ignore-missing-imports` (с numpy, как у разработчика) = **4 ошибки** против **5
+на HEAD** — прежняя `video_source.py:49` ушла, остались `audio_mixer.py:35` и
+`webrtc_sfu.py:29/221/228` (чужие, numpy-типизация); `mypy --no-site-packages
+mcuclient` (среда CI-гейта) = **Success, no issues found in 62 source files**.
+Первый прогон CI по `270441e` на этом месте упал (`typecheck -> failure`,
+`Mypy — весь пакет (БЛОКИРУЕТ)`), правка выше — закрытие именно того падения.
 `E501` в `ui.py` (3 строки) предсуществующие: тот же набор в HEAD-версии, мой
 диф не добавил ни одной; CI-шаг идёт с `--ignore E501`.
 
@@ -185,7 +211,12 @@ passed, 0 failed, 0 skipped**, `--collect-only` = **1169**. Рабочее де�
 `media.vsource` не рисует: по SSE причина уходит, но `renderStatus()` её не
 читает — оператору она видна в GUI и журнале. `--doctor` проверяет наличие
 `/dev/video*` и модуля `v4l2loopback`, но не живость коммутатора.
-`_OPEN_TIMEOUT_S` — константа, а не настройка конфига.
+`_OPEN_TIMEOUT_S` — константа, а не настройка конфига. Итог по типам держится
+комментарием и ручной сверкой двух сред: автоматического стража, который гонял бы
+`mypy` в СРЕДЕ РАЗРАБОТЧИКА (с numpy), в CI нет — гейт по-прежнему проверяет код в
+среде, которой нет ни у кого, кто пишет код, и молчит на класс ошибок с
+типизацией numpy (`video_source.py:49` жил именно так, и `audio_mixer.py:35` с
+`webrtc_sfu.py` живут до сих пор).
 
 ### 2026-10-10 — адаптивный битрейт не видел джиттер: поля pjsua2 это MathStat, а не число
 
