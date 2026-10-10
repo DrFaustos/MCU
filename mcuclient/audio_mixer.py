@@ -124,6 +124,26 @@ def rms_level(pcm: bytes) -> float:
     return (acc / n) ** 0.5
 
 
+#: RMS, принимаемый за 100 % громкости (шкала ``Participant.volume_level``).
+#: Полная шкала int16 (32768) для речи недостижима: микрофонная речь после
+#: G.711-кодирования держит RMS единицы-тысячи, а тестовый тон амплитуды 8000
+#: (его гоняют стенды) даёт RMS 5657. На 4000 фоновый шорох остаётся нулём,
+#: громкая речь уходит в десятки процентов, стендовый тон — в сотню.
+LEVEL_FULL_RMS = 4000.0
+
+
+def rms_percent(rms: float, full_rms: float = LEVEL_FULL_RMS) -> int:
+    """RMS в проценты громкости 0..100 — единая шкала для ``volume_level``.
+
+    Шкала одна и она чистая: без неё каждый вызывающий выдумывал бы свою
+    (веб-панель показывает целое число, а GUI рисует столбики), и сравнить
+    уровни двух источников было бы нельзя.
+    """
+    if rms <= 0.0 or full_rms <= 0.0:
+        return 0
+    return min(100, int(round(rms * 100.0 / float(full_rms))))
+
+
 def _aligned_int16_sum(np_mod, buffers: Dict[ParticipantId, bytes],
                        ids: List[ParticipantId], dtype):
     """Sum int16 PCM buffers of DIFFERENT lengths (zero-padded to the longest).
@@ -196,6 +216,29 @@ class AudioMixer:
             if rms_level(pcm) >= self.config.silence_rms:
                 active.append(pid)
         return active
+
+    def channel_levels(self) -> Dict[ParticipantId, float]:
+        """RMS каждой ячейки одним снимком (пустой dict, если ячеек нет)."""
+        return {pid: rms_level(pcm) for pid, pcm in self._buffers.items()}
+
+    def active_speaker(self,
+                       levels: Optional[Dict[ParticipantId, float]] = None,
+                       ) -> Optional[ParticipantId]:
+        """Громчайшая ячейка выше ``silence_rms``; None, если тишина у всех.
+
+        ``levels`` — готовый снимок из :meth:`channel_levels`: индикатор
+        «говорит» чистит устаревшие ячейки до нуля и обязан выбирать
+        докладчика по уже очищенным уровням, а не пересчитывать RMS.
+
+        Порядок обхода — порядок ячеек, как в ``_mix_ids``, поэтому при равных
+        уровнях выбирается тот же участник, что и у микширования.
+        """
+        snapshot = self.channel_levels() if levels is None else levels
+        active = [pid for pid in self._buffers
+                  if snapshot.get(pid, 0.0) >= self.config.silence_rms]
+        if not active:
+            return None
+        return max(active, key=lambda pid: snapshot.get(pid, 0.0))
 
     def mix(self) -> MixResult:
         """Mixes current buffers and returns the common mix PCM."""

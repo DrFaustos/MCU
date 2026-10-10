@@ -73,6 +73,14 @@ class FakeEndpoint:
     def find_by_token(self, token: str):
         return self.by_token.get(token)
 
+    def find_by_id(self, participant_id: int):
+        # Как настоящий H323Endpoint: нужно мосту для каналов, уже снятых из
+        # _pids (forget) — участника ещё не убрали из комнаты.
+        for p in self.by_token.values():
+            if p.id == participant_id:
+                return p
+        return None
+
 
 def tone(rate: int, seconds: float = 0.02, amp: int = 8000, freq: float = 800.0) -> bytes:
     """Синус PCM16 mono заданной частоты (кадр по умолчанию — 20 мс)."""
@@ -452,3 +460,150 @@ def test_host_lost_does_not_unsubscribe_the_bridge():
 
     assert client.subscribers == [bridge.on_event], "мост отписался сам себя"
     assert bridge.enabled is True
+
+
+# --- индикатор «говорит»: volume_level / is_speaking -------------------------
+
+
+def test_loud_pcm_marks_participant_speaking():
+    """Мост обязан выставлять то, что читают панель, режим speaker и Room.
+
+    До 2026-10-10 эти поля только читались, а записывать их было некому: при
+    живом разговоре комната показывала «никто не говорит», а режим ``speaker``
+    всегда ставил главным первого по списку.
+    """
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+
+    assert p1.is_speaking is True
+    assert p1.volume_level == 100, "тон RMS 5657 при шкале 4000 обязан дать 100 %"
+
+
+def test_quiet_tone_gives_small_but_visible_level():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=400), 16000))
+
+    assert 0 < p1.volume_level < 50, p1.volume_level
+
+
+def test_silence_marks_nobody_speaking():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=0), 16000))
+
+    assert p1.is_speaking is False
+    assert p1.volume_level == 0
+    assert bridge.active_speaker() is None
+
+
+def test_speaker_is_the_loudest_not_the_first_to_talk():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    p2 = endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=800), 16000))
+    assert (p1.is_speaking, p2.is_speaking) == (True, False)
+
+    bridge.on_event(pcm_in("call-2", tone(16000, amp=8000), 16000))
+    assert (p1.is_speaking, p2.is_speaking) == (False, True)
+    assert bridge.active_speaker() == 2
+
+
+def test_channel_without_new_pcm_fades_to_silence():
+    """Буфер микшера живёт до forget, поэтому гаснуть надо по штампу кадра.
+
+    Иначе последний услышанный голос горел бы на участнике до конца вызова, а
+    режим ``speaker`` держал бы главный кадр у повесившей трубку стороны.
+    """
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+    assert p1.is_speaking is True
+
+    import mcuclient.h323_audio_bridge as mod
+
+    saved = mod.LEVEL_STALE_MS
+    mod.LEVEL_STALE_MS = -1.0          # любой канал считается устаревшим
+    try:
+        bridge.on_event(pcm_in("call-2", tone(16000, amp=0), 16000))
+    finally:
+        mod.LEVEL_STALE_MS = saved
+
+    assert p1.is_speaking is False
+    assert p1.volume_level == 0, "устаревший канал обязан отдать 0, а не последний RMS"
+
+
+def test_muted_speaker_is_not_marked_speaking():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1, muted=True)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+
+    assert p1.is_speaking is False
+    assert p1.volume_level == 0
+
+
+def test_disconnected_call_clears_speaking_flag():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+    assert p1.is_speaking is True
+
+    bridge.on_event(H323dEvent("call.disconnected", {"token": "call-1"}))
+
+    assert p1.is_speaking is False
+    assert p1.volume_level == 0, "завершённый вызов обязан погаснуть, а не гореть"
+
+
+def test_host_lost_clears_speaking_flags():
+    client, endpoint, bridge = _bridge()
+    p1 = endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+    assert p1.is_speaking is True
+
+    bridge.on_event(H323dEvent("connection.closed", {"reason": "eof"}))
+
+    assert (p1.is_speaking, p1.volume_level) == (False, 0)
+    assert bridge.active_speaker() is None
+
+
+def test_stats_report_active_speaker_and_levels():
+    client, endpoint, bridge = _bridge()
+    endpoint.add("call-1", 1)
+    endpoint.add("call-2", 2)
+    bridge.on_event(media("call-1", 16000))
+    bridge.on_event(media("call-2", 16000))
+    assert bridge.stats().speaker_pid is None
+
+    bridge.on_event(pcm_in("call-1", tone(16000, amp=8000), 16000))
+
+    assert bridge.stats().speaker_pid == 1
+    assert bridge.levels().get(1) == 100

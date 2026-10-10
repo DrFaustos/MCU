@@ -20,6 +20,12 @@ G.711 — 8 кГц, G.722 — 16 кГц. Микшер.operирует одной 
 16-кГц потоки, а терминал услышал бы замедленный/ускоренный голос **без единой
 ошибки в логах** — отсюда обязательный ``rate`` в ``pcm.in``.
 
+Тем же RMS-снимком мост выставляет участникам комнаты ``volume_level`` и
+``is_speaking``: до 2026-10-10 эти поля только читались (режим ``speaker`` в
+:meth:`~mcuclient.layout_service.LayoutService.visible_participants`, тайлы
+веб-панели, :meth:`~mcuclient.models.Room.active_speaker`), а выставлять их
+было некому — комната всегда считала, что никто не говорит.
+
 Модуль не тянет нативный стек: клиент (``pcm_out``/события) и движок
 ``mix_for`` внедряются, поэтому целиком тестируется фейками.
 """
@@ -28,10 +34,11 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .audio_mixer import AudioMixer, MixerConfig
+from .audio_mixer import AudioMixer, MixerConfig, rms_percent
 from .log import get_logger
 from .webrtc_sfu import resample_mono
 
@@ -41,6 +48,13 @@ log = get_logger("h323mix")
 #: интеропа с терминалами) приводит к 8 кГц без потерь, а 8-кГц микс не
 #: поднял бы бы G.722-вызов без артефактов.
 MIX_RATE_DEFAULT = 16000
+
+#: Сколько миллисекунд канал может не присылать ``pcm.in``, прежде чем
+#: индикатор «говорит» погаснет. Нужен именно порог, а не «пока буфер в
+#: микшере»: буфер микшера живёт до ``forget``, поэтому последний голос
+#: остался бы на участнике навсегда — панель показывала бы «говорит» у
+#: повесившей трубку стороны, а режим ``speaker`` держал бы её главной.
+LEVEL_STALE_MS = 120
 
 
 @dataclass
@@ -55,6 +69,7 @@ class BridgeStats:
     rx_bytes: int = 0
     tx_bytes: int = 0
     undecodable: int = 0
+    speaker_pid: Optional[int] = None
 
 
 class H323AudioBridge:
@@ -96,6 +111,11 @@ class H323AudioBridge:
         self._rx_bytes = 0
         self._tx_bytes = 0
         self._undecodable = 0
+        # pid -> время последнего pcm.in (по нему гаснет «говорит») и
+        # последний розданный уровень (по нему гаснут ушедшие каналы).
+        self._last_rx: Dict[int, float] = {}
+        self._last_levels: Dict[int, float] = {}
+        self._speaker: Optional[int] = None
 
     # --- состояние -----------------------------------------------------------
     @property
@@ -134,6 +154,7 @@ class H323AudioBridge:
                 rx_bytes=self._rx_bytes,
                 tx_bytes=self._tx_bytes,
                 undecodable=self._undecodable,
+                speaker_pid=self._speaker,
             )
 
     # --- жизненный цикл -----------------------------------------------------
@@ -161,6 +182,9 @@ class H323AudioBridge:
             self._rates.clear()
             self._codecs.clear()
             self._pids.clear()
+            self._last_rx.clear()
+            self._last_levels.clear()
+            self._speaker = None
         self._mixer.clear()
         self._enabled = False
 
@@ -248,12 +272,17 @@ class H323AudioBridge:
     def _mix_and_send(self, sender: str, pcm: bytes) -> None:
         """Кладёт голос ``sender`` в микшер и рассылает микс остальным."""
         sender_pid = self._pid(sender, create=True)
+        self._mark(sender)
         if _is_muted(self._participant(sender)):
             # Мьют обязан глушить и буфер: иначе голос уедет другим, как только
             # мьют снимут, а «сейчас» станет нечем отличить тихий голос от тишины.
             self._mixer.remove(sender_pid)
+            self._publish_levels()
             return
         self._mixer.set_buffer(sender_pid, pcm)
+        # Индикаторы обновляются на каждый кадр: панель и режим ``speaker``
+        # иначе показывали бы голос того, кто говорил первым.
+        self._publish_levels()
         with self._lock:
             # Частоту берём тем же снимком, что и список каналов: иначе между
             # снимком и чтением в словарь впишется call.media, и кадр уйдёт по
@@ -284,6 +313,78 @@ class H323AudioBridge:
             log.debug("H.323: pcm.out для %s не ушёл", token, exc_info=True)
             return False
 
+    # --- индикатор «говорит» ------------------------------------------------
+    def _mark(self, token: str) -> None:
+        """Отмечает живость канала: по штампу индикатор не гасит текущий голос."""
+        pid = self._pid(token, create=True)
+        with self._lock:
+            self._last_rx[pid] = time.monotonic()
+
+    def _publish_levels(self) -> None:
+        """Раздаёт уровни и докладчика участникам комнаты.
+
+        Мост — единственный владелец PCM H.323-вызовов, поэтому ``volume_level``
+        и ``is_speaking`` выставляет он: нигде больше этих полей касаться негде,
+        а читают их режим ``speaker``, тайлы панели и ``Room.active_speaker``.
+
+        Два затухания здесь не косметика:
+
+        * канал без ``pcm.in`` дольше ``LEVEL_STALE_MS`` отдаётся нулём — буфер
+          микшера живёт до ``forget``, поэтому последний услышанный голос горел
+          бы на участнике до конца вызова;
+        * каналы, исчезнувшие из микшера (мьют, ``forget``), получают явный
+          ноль, иначе замолчавший «продолжал бы говорить».
+        """
+        now = time.monotonic()
+        with self._lock:
+            stamps = dict(self._last_rx)
+            previous = dict(self._last_levels)
+            by_pid = {}
+            for token, pid in self._pids.items():
+                by_pid.setdefault(pid, token)
+        levels = self._mixer.channel_levels()
+        for pid in list(previous) + list(stamps):
+            levels.setdefault(pid, 0.0)
+        for pid in list(levels):
+            stamp = stamps.get(pid)
+            if stamp is None or (now - stamp) * 1000.0 > LEVEL_STALE_MS:
+                levels[pid] = 0.0
+        speaker = self._mixer.active_speaker(levels)
+        with self._lock:
+            self._speaker = speaker
+            self._last_levels = dict(levels)
+        for pid, rms in levels.items():
+            # Участник ищется по ТОКЕНУ: ``find_by_token`` — единственный
+            # контракт, который у эндпоинта есть всегда; поиск по id —
+            # только резерв для каналов, снятых из ``_pids`` (forget).
+            token = by_pid.get(pid)
+            participant = self._participant(token) if token else None
+            if participant is None:
+                participant = self._participant_by_id(pid)
+            if participant is None:
+                continue  # временный id: участника в комнате ещё нет
+            participant.volume_level = rms_percent(rms)
+            participant.is_speaking = speaker is not None and pid == speaker
+
+    def active_speaker(self) -> Optional[int]:
+        """Идентификатор комнаты громчайшего сейчас; None — тишина у всех."""
+        with self._lock:
+            return self._speaker
+
+    def levels(self) -> Dict[int, int]:
+        """Последние розданные уровни в процентах (0..100) по id комнаты."""
+        with self._lock:
+            return {pid: rms_percent(rms) for pid, rms in self._last_levels.items()}
+
+    def _participant_by_id(self, pid: int) -> Any:
+        find = getattr(self._endpoint, "find_by_id", None)
+        if not callable(find):
+            return None
+        try:
+            return find(pid)
+        except Exception:  # noqa: BLE001 — индикатор не имеет права ронять медиа
+            return None
+
     # --- участники ----------------------------------------------------------
     def forget(self, token: str) -> None:
         """Снимает канал вызова (по ``call.disconnected`` или вручную)."""
@@ -295,7 +396,9 @@ class H323AudioBridge:
             self._codecs.pop(token, None)
             if pid is None:
                 return
+            self._last_rx.pop(pid, None)
         self._mixer.remove(pid)
+        self._publish_levels()
         log.info("H.323: аудио-канал %s закрыт", token)
 
     def forget_all(self) -> None:
@@ -310,8 +413,12 @@ class H323AudioBridge:
             self._rates.clear()
             self._codecs.clear()
             self._pids.clear()
+            self._last_rx.clear()
         for pid in pids:
             self._mixer.remove(pid)
+        # Участники остаются в комнате (их снимает эндпоинт): индикатор
+        # гасим явно, иначе «говорит» горел бы на мёртвом хосте.
+        self._publish_levels()
 
     def _pid(self, token: str, *, create: bool = False) -> int:
         """Общий id участника комнаты для токена вызова.

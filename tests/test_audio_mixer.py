@@ -10,10 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcuclient.audio_mixer import (  # noqa: E402
+    LEVEL_FULL_RMS,
     AudioMixer,
     MixerConfig,
     MixStrategy,
     rms_level,
+    rms_percent,
 )
 
 
@@ -284,3 +286,65 @@ def test_mix_truncated_same_result_without_numpy():
         assert _unpack(mx2.mix().pcm) == expected
     finally:
         mod._np = saved
+
+
+# --- rms_percent: единая шкала громкости для volume_level --------------------
+
+
+def test_rms_percent_silence_is_zero():
+    assert rms_percent(0.0) == 0
+    assert rms_percent(-10.0) == 0
+
+
+def test_rms_percent_is_proportional():
+    assert rms_percent(LEVEL_FULL_RMS / 2.0) == 50
+    assert rms_percent(LEVEL_FULL_RMS) == 100
+
+
+def test_rms_percent_caps_at_hundred():
+    # Речь громче калибровочного уровня не должна отдавать панели 140 %.
+    assert rms_percent(LEVEL_FULL_RMS * 4.0) == 100
+
+
+def test_rms_percent_zero_scale_is_zero():
+    assert rms_percent(1000.0, full_rms=0.0) == 0
+
+
+# --- channel_levels / active_speaker ------------------------------------------
+
+
+def test_channel_levels_returns_rms_of_every_cell():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([100] * 8))
+    mx.set_buffer(2, _pcm([0] * 8))
+    levels = mx.channel_levels()
+    assert abs(levels[1] - 100.0) < 0.01
+    assert levels[2] == 0.0
+
+
+def test_active_speaker_picks_loudest_active_cell():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([0] * 8))
+    mx.set_buffer(2, _pcm([500] * 8))
+    mx.set_buffer(3, _pcm([50] * 8))
+    assert mx.active_speaker() == 2
+
+
+def test_active_speaker_none_when_everyone_silent():
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([0] * 8))
+    assert mx.active_speaker() is None
+
+
+def test_active_speaker_uses_given_snapshot_not_buffers():
+    """Индикатор «говорит» отдаёт устаревшие каналы нулём и обязан выбирать
+    докладчика по уже очищенному снимку, а не по буферам.
+
+    Иначе флаг оставался бы на том, кто говорил первым: ячейка микшера живёт
+    до remove(), а уровень в ней — с прошлого кадра.
+    """
+    mx = AudioMixer()
+    mx.set_buffer(1, _pcm([500] * 8))
+    mx.set_buffer(2, _pcm([0] * 8))
+    assert mx.active_speaker({1: 0.0, 2: 900.0}) == 2
+    assert mx.active_speaker({1: 0.0, 2: 0.0}) is None

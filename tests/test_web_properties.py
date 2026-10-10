@@ -119,3 +119,19 @@ def test_toggle_recording_reflects_in_status():
         assert s.toggle_recording(False)["recording"] is False
     finally:
         s.close()
+
+
+def test_participant_dict_carries_speaking_and_level():
+    """Панель берёт «говорит» и громкость из _participant_to_dict.
+
+    Поля выставляет аудио-мост H.323; если их переименовать здесь, тайлы
+    перестанут подсвечивать говорящего молча — без ошибки в логах.
+    """
+    from mcuclient.web_server import _participant_to_dict
+
+    p = Participant(id=7, remote_uri="h323:a@h", state=CallState.CONFIRMED)
+    p.is_speaking = True
+    p.volume_level = 42
+    d = _participant_to_dict(p)
+    assert d["speaking"] is True
+    assert d["volume_level"] == 42
