@@ -85,6 +85,11 @@ class SipBridgeService:
         self._tx = 0
         self._sip_frames = 0
         self._web_frames = 0
+        # Отказы кадров с портов: панель читает только stats() сервиса, поэтому
+        # честный счётчик порта обязан доезжать сюда, иначе он существует лишь
+        # в юнит-тестах.
+        self._frame_failures = 0
+        self._frame_errors: List[str] = []
 
     # -- жизненный цикл ---------------------------------------------------
     @property
@@ -322,21 +327,41 @@ class SipBridgeService:
                 log.debug("Тик аудио-моста SIP упал", exc_info=True)
 
     def _collect_counters(self) -> None:
-        """Суммировать счётчики кадров с портов (для диагностики панели)."""
+        """Суммировать счётчики кадров с портов (для диагностики панели).
+
+        ``frame_failures``/``last_error`` доезжают сюда из
+        :meth:`SipAudioPort.stats`: панель читает только ``stats()`` сервиса,
+        поэтому «порт поднят, а звука нет» обязано быть видно в
+        ``GET /api/status``. Суммируются только РЕАЛЬНО переданные кадры —
+        счётчик отказов с того же порта показывает, почему их мало.
+        """
         with self._lock:
             ports = list(self._ports)
-        rx = tx = 0
+        rx = tx = fails = 0
+        errors: List[str] = []
         for port in ports:
             data = _port_stats(port)
             rx += int(data.get("rx_frames") or 0)
             tx += int(data.get("tx_frames") or 0)
+            fails += int(data.get("frame_failures") or 0)
+            reason = str(data.get("last_error") or "")
+            if reason and reason not in errors:
+                errors.append(reason)
         self._rx, self._tx = rx, tx
+        self._frame_failures, self._frame_errors = fails, errors
 
     # -- диагностика -------------------------------------------------------
     def stats(self) -> Dict[str, Any]:
+        """Состояние моста для панели.
+
+        ``frame_failures`` — сколько кадров НЕ ушло/не пришло с портов,
+        ``frame_errors`` — причины этих отказов. Без них «вызов есть, звука
+        нет» в ``GET /api/status`` неотличимо от «все молчат добровольно».
+        """
         with self._lock:
             ports = len(self._ports)
             attached = len(self._attached)
+            frame_errors = list(self._frame_errors)
         return {
             "enabled": self._enabled,
             "clock_rate": self._rate,
@@ -346,6 +371,8 @@ class SipBridgeService:
             "tx_frames": self._tx,
             "sip_frames": self._sip_frames,
             "web_frames": self._web_frames,
+            "frame_failures": self._frame_failures,
+            "frame_errors": frame_errors,
         }
 
 
