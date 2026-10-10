@@ -10,6 +10,12 @@
 
 Модуль не падает при отсутствии зависимостей: каждая проверка обёрнута
 в try/except и возвращает статус ``OK`` / ``WARN`` / ``FAIL``.
+
+Отказ проверки обязан быть ВИДЕН: ни одна ветка не имеет права «пройти
+молча». Ветка ``except: pass`` здесь запрещена как класс — вместо неё
+WARN с причиной. Диагностика, которая молчит, неотличима от диагностики,
+которая ничего не проверяла (так и было: при недоступных DevManager-ах
+отчёт не содержал ни одной строки про PJSIP).
 """
 
 from __future__ import annotations
@@ -55,8 +61,11 @@ def check_pjsua2() -> List[Status]:
             cfg.logConfig.level = 0
             if hasattr(cfg.logConfig, "consoleLevel"):
                 cfg.logConfig.consoleLevel = 0
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Инициализации это не ломает, но и молчать нельзя:
+            # оператор получает болтливый лог PJSIP и должен видеть, что
+            # заглушить его не удалось.
+            out.append(_warn("PJSIP: лог не заглушен", str(exc)))
         ep.libCreate()
         ep.libInit(cfg)
         ep.libStart()
@@ -67,8 +76,11 @@ def check_pjsua2() -> List[Status]:
         if ep is not None:
             try:
                 ep.libDestroy()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                out.append(_warn(
+                    "PJSIP: libDestroy не завершился",
+                    str(exc),
+                ))
     return out
 
 
@@ -126,31 +138,52 @@ def check_media() -> List[Status]:
         cfg = pjsua2.EpConfig()
         try:
             cfg.logConfig.level = 0
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Тот же случай, что в check_pjsua2: опрос устройств это не
+            # ломает, но болтливый лог PJSIP — факт, о котором оператор
+            # должен узнать из отчёта, а не из молчания.
+            out.append(_warn(
+                "PJSIP (устройства): лог не заглушен", str(exc)))
         ep.libCreate()
         ep.libInit(cfg)
         ep.libStart()
+        vcams: List[str] = []
+        acaps: List[str] = []
+        pjsip_errors: List[str] = []
         try:
             vdm = ep.vidDevManager()
             vcams = [vdm.getDevInfo(i).name for i in range(vdm.getDevCount())]
-        except Exception:  # noqa: BLE001
-            vcams = []
+        except Exception as exc:  # noqa: BLE001
+            pjsip_errors.append(f"камеры: {exc}")
         try:
             adm = ep.audDevManager()
             acaps = [adm.enumDev2()[i].name for i in range(adm.enumDev2().__len__())]
-        except Exception:  # noqa: BLE001
-            acaps = []
+        except Exception as exc:  # noqa: BLE001
+            pjsip_errors.append(f"аудио: {exc}")
         if vcams:
             out.append(_ok(f"Камеры (PJSIP): {len(vcams)}", ", ".join(vcams[:5])))
         if acaps:
             out.append(_ok(f"Аудиоустройства (PJSIP): {len(acaps)}", ", ".join(acaps[:5])))
+        if pjsip_errors:
+            out.append(_warn(
+                "Устройства PJSIP: проверены не полностью",
+                "; ".join(pjsip_errors),
+            ))
         try:
             ep.libDestroy()
-        except Exception:  # noqa: BLE001
-            pass
-    except Exception:  # noqa: BLE001
-        pass
+        except Exception as exc:  # noqa: BLE001
+            # Отказ освобождения — другое событие, чем неполный опрос
+            # устройств: проверки-то прошли. Смешивать их под одним
+            # заголовком значит соврать оператору про причину.
+            out.append(_warn(
+                "Устройства PJSIP: libDestroy не завершился",
+                str(exc),
+            ))
+    except Exception as exc:  # noqa: BLE001
+        out.append(_warn(
+            "Устройства PJSIP: эндпоинт не поднят",
+            str(exc),
+        ))
 
     # 3. /dev/video* и v4l2loopback.
     try:
@@ -167,8 +200,8 @@ def check_media() -> List[Status]:
             out.append(_ok("v4l2loopback", "модуль загружен"))
         else:
             out.append(_warn("v4l2loopback", "не загружен (нужен для screen share / виртуальной камеры)"))
-    except OSError:
-        pass
+    except OSError as exc:
+        out.append(_warn("v4l2loopback", f"не удалось проверить модуль: {exc}"))
     return out
 
 
