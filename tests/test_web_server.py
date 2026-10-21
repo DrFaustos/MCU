@@ -686,6 +686,106 @@ def test_conference_rename_and_media():
         s.close()
 
 
+def test_conference_control_unknown_participant_is_404():
+    """Управлять несуществующим веб-участником — 404, а не 200 + ok:false.
+
+    Замерено 2026-10-21 (ветка h323) до правки: POST /api/conference/rename и
+    /api/conference/media на id, которого нет в комнате, отвечали **HTTP 200** с
+    ``{"ok": false}`` и без ``error``. Это был третий экземпляр той же дыры, что
+    ``/api/video_device`` (см. test_set_video_device_refusal_is_http_error):
+    панель читает тело ответа только ради error при !res.ok, значит отказ до
+    оператора не доезжал никогда.
+
+    Здесь 404 — именно правда, а не вежливость: ``rename``/``set_media``
+    (mcuclient/webrtc_sfu.py) возвращают False ТОЛЬКО когда участника нет в
+    словаре. Иного повода для False у этих двух маршрутов нет, в отличие от
+    ``conference/leave`` — см. test_conference_leave_repeat_is_not_an_error.
+    """
+    s, _ = _session()
+    try:
+        for name, kwargs in (("conference_rename", {"name": "X"}),
+                             ("conference_media", {"audio": False})):
+            try:
+                getattr(s, name)("нет-такого", **kwargs)
+            except ApiError as exc:
+                assert exc.status == 404, f"{name} -> {exc.status}, ожидали 404"
+                assert "нет-такого" in str(exc), "в причине обязан быть id"
+            else:
+                raise AssertionError(
+                    "ожидали ApiError: молчаливый 200 + ok:false — это дыра")
+    finally:
+        s.close()
+
+
+def test_conference_control_rejects_bad_request_with_400():
+    """Кривой запрос на управление участником — 400 с причиной.
+
+    Отдельно от 404, и это не педантизм: «участника нет» и «вы не указали, что
+    менять» — разные действия оператора (первый ищет закрытую вкладку, второй
+    просто добирает параметр).
+
+    Пустое имя стоит запереть особо: на уровне конференции ``rename`` молча
+    отбрасывает пустоту (``or p.name``) и возвращает True, поэтому до правки
+    ``rename(pid, "   ")`` давало ``{"ok": true}`` при НЕИЗМЕННОМ имени — ложь
+    того же маршрута, только помельче.
+    """
+    s, _ = _session()
+    try:
+        pid = s.conference_join("Аня")["participant"]["id"]
+
+        try:
+            s.conference_rename(pid, "   ")
+        except ApiError as exc:
+            assert exc.status == 400
+        else:
+            raise AssertionError("ожидали ApiError на пустое имя")
+        assert s.conference_participants()[0]["name"] == "Аня"
+
+        try:
+            s.conference_media(pid)          # ни video, ни audio
+        except ApiError as exc:
+            assert exc.status == 400
+        else:
+            raise AssertionError(
+                "ожидали ApiError: set_media на «ничего не менять» возвращал "
+                "ok:true, ничего не сделав")
+
+        for name, kwargs in (("conference_rename", {"name": "X"}),
+                             ("conference_media", {"audio": False})):
+            try:
+                getattr(s, name)("", **kwargs)
+            except ApiError as exc:
+                assert exc.status == 400
+            else:
+                raise AssertionError(f"ожидали ApiError на пустой id в {name}")
+    finally:
+        s.close()
+
+
+def test_conference_leave_repeat_is_not_an_error():
+    """Повторный выход — штатный ``ok: false``, а НЕ 404. Кейс-замок.
+
+    Тот же урок, что с ``/api/mediasoup/leave`` (заперт
+    tests/test_mediasoup_endpoints.py): прежде чем превращать ``ok: false`` в
+    HTTP-ошибку, надо найти места, где это ЛЕЖИТ. У выхода из комнаты отказ
+    «такого участника уже нет» — нормальный исход: вкладка закрывается,
+    sendBeacon дублирует запрос, оператор жмёт кнопку дважды. Поднять там 404
+    означало бы показать alert человеку, который добился желаемого.
+
+    Кейс существует именно как замок: следующая правка «пройтись по всем
+    ok:false» обязана покраснеть здесь и заставить автора читать этот абзац,
+    а не чинить идемпотентный маршрут.
+    """
+    s, _ = _session()
+    try:
+        pid = s.conference_join("Аня")["participant"]["id"]
+        assert s.conference_leave(pid)["ok"] is True
+        assert s.conference_leave(pid)["ok"] is False, (
+            "повторный выход перестал быть штатным ok:false — см. docstring")
+    finally:
+        s.close()
+
+
 def test_conference_capacity_limit():
     s, _ = _session()
     try:

@@ -161,9 +161,9 @@ POST (тело — JSON):
 | `/api/webrtc/close` | `{session}` | закрыть WebRTC-сессию панели; панель зовёт его при остановке публикации, отписке от участника и при закрытии вкладки — `sendBeacon`, токен в `?token=` |
 | `/api/web_recording` | `{enabled?}` | запись веб-конференции вкл/выкл/toggle (`WebRecorder`: кадры + аудио-микс) |
 | `/api/conference/join` | `{name, role?}` | войти в конференцию из браузера (`role`: participant/presenter) |
-| `/api/conference/leave` | `{id}` | выйти из конференции |
-| `/api/conference/rename` | `{id, name}` | переименовать участника |
-| `/api/conference/media` | `{id, video?, audio?}` | включить/выключить передачу медиа участнику |
+| `/api/conference/leave` | `{id}` | выйти из конференции. Повторный выход — **штатный** `{"ok": false}` с HTTP 200, а не 404: участник уже вышел, а `sendBeacon` при закрытии вкладки дублирует запрос; поднять там ошибку означало бы показать alert человеку, который добился желаемого. Заперто `test_conference_leave_repeat_is_not_an_error` |
+| `/api/conference/rename` | `{id, name}` | переименовать веб-участника. Нет такого id — **404 с причиной**, а не 200 + `{"ok": false}` (панель читает `error` только при `!res.ok`); пустое или пробельное `name` либо отсутствующий `id` — **400** |
+| `/api/conference/media` | `{id, video?, audio?}` | включить/выключить передачу медиа веб-участнику. Те же коды, что у `rename`: 404 на отсутствующего, 400 если не указано, что менять (оба `video` и `audio` опущены — менять нечего, а `ok: true` на пустом запросе было бы ложью) |
 | `/api/mediasoup/join` | `{participant}` | войти в комнату SFU-sidecar (mediasoup) |
 | `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU; закрывает `WebRtcTransport` на сайдкаре (панель зовёт его и при закрытии вкладки — `sendBeacon`, токен в `?token=`) |
 | `/api/mediasoup/signal` | `{action, participant, ...}` | сигнализация SFU (`createWebRtcTransport`, `connect`, `publish`, `subscribe` и т.п.) |

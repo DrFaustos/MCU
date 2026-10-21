@@ -822,10 +822,41 @@ class WebSession:
         return self.conference.participants()
 
     def conference_rename(self, pid: str, name: str) -> Dict[str, Any]:
-        return {"ok": self.conference.rename(str(pid), name)}
+        """Переименовать веб-участника; отказ — ошибка с HTTP-кодом.
+
+        ``rename`` возвращает False ТОЛЬКО когда участника нет в комнате
+        (mcuclient/webrtc_sfu.py:536-543), поэтому 404 здесь — правда, а не
+        вежливость. До правки маршрут отвечал 200 + ``{"ok": false}`` без
+        ``error``, и панель (mcuclient/webui) читает тело только при !res.ok —
+        оператор не увидел бы отказ никогда. Тот же класс дыры, что закрыт у
+        ``/api/video_device``.
+
+        Сознательно НЕ перенесено на ``conference_leave``: там ok:false наступает
+        при ПОВТОРНОМ выходе, т.е. является штатным идемпотентным исходом
+        (заперто test_conference_leave_repeat_is_not_an_error).
+        """
+        if not pid:
+            raise ApiError("Не указан id участника")
+        if not str(name).strip():
+            # Пустое имя молча отбрасывается на уровне конференции
+            # (``or p.name``) и возвращает True: до правки «ok: true» при
+            # неизменном имени было второй ложью того же маршрута.
+            raise ApiError("Имя участника не может быть пустым")
+        if not self.conference.rename(str(pid), str(name)):
+            raise ApiError(f"Веб-участника {pid} нет в комнате", status=404)
+        return {"ok": True, "id": str(pid)}
 
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
-        return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+        """Включить/выключить медиа веб-участнику; отказ — 404 с причиной."""
+        if not pid:
+            raise ApiError("Не указан id участника")
+        if video is None and audio is None:
+            # set_media на «ничего не менять» возвращает True, ничего не сделав:
+            # «ok» на пустом запрос — та же молчаливая ложь в миниатюре.
+            raise ApiError("Не указано, что менять: video или audio")
+        if not self.conference.set_media(str(pid), video=video, audio=audio):
+            raise ApiError(f"Веб-участника {pid} нет в комнате", status=404)
+        return {"ok": True, "id": str(pid)}
 
     def attach_sip_call_port(self, port) -> None:
         """Связать нативный SipAudioPort с мостом (SIP<->Web-аудио).
