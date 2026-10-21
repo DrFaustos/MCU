@@ -417,6 +417,50 @@ def test_set_audio_device_refusal_is_http_error():
         s.close()
 
 
+def test_device_routes_reject_bad_id_with_400():
+    """Кривой `device` — ApiError 400, а не сырой TypeError.
+
+    Замерено 2026-10-21 (ветка h323) до правки: POST `{}` и `{"device": "abc"}`
+    доходили до голого `int()` внутри `WebSession` и давали **HTTP 500** с
+    текстом `TypeError` в `error`, хотя docs/WEB_CONTROL.md обещает на такое
+    400. Это были единственные два POST-маршрута без валидации входа: остальные
+    либо берут `_opt_int`, либо зовут `_require_pid`.
+
+    Смысл не в вежливости. 500 от клиентской опечатки выглядит как поломка МСУ:
+    оператор идёт читать логи вместо того, чтобы просто выбрать устройство.
+    """
+    s, _ = _session()
+    try:
+        for bad in (None, "", "abc", []):
+            for name in ("set_video_device", "set_audio_device"):
+                try:
+                    getattr(s, name)(bad)
+                except ApiError as exc:
+                    assert exc.status == 400, (
+                        f"{name}({bad!r}) -> {exc.status}, ожидали 400")
+                else:
+                    raise AssertionError(f"ожидали ApiError для {name}({bad!r})")
+    finally:
+        s.close()
+
+
+def test_device_id_accepts_string_number():
+    """`"5"` — не ошибка: из браузера число приходит и строкой, и числом.
+
+    Проверка обязательна вместе с предыдущей, иначе «починка 500» лечится
+    отбраковкой всего, что не `int`, и выбор устройства перестаёт работать
+    вовсе. Именно поэтому в сервере отдельный `_require_dev`, а не `_opt_int`:
+    устройство обязано быть указано, но форма значения — любая целая.
+    """
+    s, eng = _session()
+    try:
+        assert s.set_video_device("5")["device"] == 5
+        assert eng.video_device_set == 5
+        assert s.set_audio_device("2")["device"] == 2
+    finally:
+        s.close()
+
+
 def test_devices_lists():
     s, _ = _session()
     try:

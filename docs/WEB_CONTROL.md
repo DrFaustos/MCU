@@ -116,8 +116,8 @@ GET:
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
 | `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`); панель читает их в журнал тонального автомата и обновляет по событию `dtmf.digits` |
-| `/api/devices/video` | `{devices:[{id,name,driver}]}` |
-| `/api/devices/audio` | `{devices:[...]}` |
+| `/api/devices/video` | `{devices:[{id,name,driver,inputs,outputs}]}` |
+| `/api/devices/audio` | `{devices:[{id,name,driver,inputs,outputs}]}` — панель показывает только устройства с `inputs > 0`: сервер отдаёт и динамики (`inputs=0, outputs>0`), а «микрофон», который ничего не захватывает, неотличим от сломанного МСУ; тот же фильтр держит нативный клиент (`mcuclient/ui.py`). Если поля `inputs` нет вовсе (часть сборок pjsua2 и тестовая фикстура), список остаётся полным — иначе панель показала бы «микрофонов нет» там, где они есть |
 | `/api/layouts` | `{layouts:[...]}` |
 | `/api/address` | адрес МСУ: `{uri, domain, host, host_source, port, dial_targets[], summary, ok, warnings[]}` — см. `docs/SIP_ADDRESSING.md` |
 | `/api/codecs` | `{audio:[...], video:[...]}` кодеки с приоритетом |
@@ -150,8 +150,8 @@ POST (тело — JSON):
 | `/api/video_send` | `{enabled}` | передача видео в эфир |
 | `/api/screen_share` | `{enabled}` | демонстрация экрана |
 | `/api/video_source` | `{kind, device?}` | источник: camera/screen/colorbar |
-| `/api/video_device` | `{device}` | выбрать камеру по id; если движок не смог применить — **409 с причиной**, а не 200 + `{"ok": false}`: панель читает `error` только при !res.ok, и молчаливый ok:false оператор не увидел бы никогда |
-| `/api/audio_device` | `{device}` | выбрать микрофон по id; отказ — 409 с причиной (то же правило, что у камеры) |
+| `/api/video_device` | `{device}` | выбрать камеру по id. `device` обязано быть целым (строка `"5"` допустима): `{"device": "abc"}` или отсутствующее поле — **400 с причиной**, а не 500 с текстом `TypeError`. Если движок не смог применить — **409 с причиной**, а не 200 + `{"ok": false}`: панель читает `error` только при !res.ok, и молчаливый ok:false оператор не увидел бы никогда |
+| `/api/audio_device` | `{device}` | выбрать микрофон по id; те же коды, что у камеры: 400 на кривой `device`, 409 на отказ движка. Панель зовёт его из селектора «Микрофоны…», список берёт из `GET /api/devices/audio` |
 | `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
 | `/api/codecs` | `{profile}` | профиль кодеков |
 | `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |

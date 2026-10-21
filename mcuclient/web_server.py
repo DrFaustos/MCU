@@ -795,14 +795,16 @@ class WebSession:
     # применился. Движок устройствами отказывает по-настоящему: null-аудио,
     # Windows-wheel без аудиоустройств, gscam-источник без камеры.
     def set_video_device(self, device: int) -> Dict[str, Any]:
-        if not self._call(lambda: bool(self._engine.set_video_device(int(device)))):
-            raise ApiError(f"Камера {int(device)} недоступна", status=409)
-        return {"ok": True, "device": int(device)}
+        dev = self._require_dev(device, "id камеры")
+        if not self._call(lambda: bool(self._engine.set_video_device(dev))):
+            raise ApiError(f"Камера {dev} недоступна", status=409)
+        return {"ok": True, "device": dev}
 
     def set_audio_device(self, device: int) -> Dict[str, Any]:
-        if not self._call(lambda: bool(self._engine.set_audio_device(int(device)))):
-            raise ApiError(f"Микрофон {int(device)} недоступен", status=409)
-        return {"ok": True, "device": int(device)}
+        dev = self._require_dev(device, "id микрофона")
+        if not self._call(lambda: bool(self._engine.set_audio_device(dev))):
+            raise ApiError(f"Микрофон {dev} недоступен", status=409)
+        return {"ok": True, "device": dev}
 
     # -- Конференция веб-участников ---------------------------------------
     def conference_join(self, name: str, role: str = "participant") -> Dict[str, Any]:
@@ -1238,6 +1240,30 @@ class WebSession:
         except (TypeError, ValueError) as exc:
             raise ApiError("Некорректный participant id") from exc
         return value
+
+    def _require_dev(self, dev: Any, what: str) -> int:
+        """Индекс устройства обязан быть целым — иначе 400, а не 500.
+
+        Тот же приём, что у ``_require_pid``. Разница с ``_opt_int`` здесь
+        принципиальна: устройство обязано быть указано (``None`` — это ошибка,
+        а не «не задано»), поэтому ``_opt_int`` для этих маршрутов не годится.
+
+        Замерено до правки: POST без ``device`` и ``{"device": "abc"}``
+        доходили до сырого ``int()`` и давали HTTP 500 с ``TypeError`` в
+        ``error``, хотя docs/WEB_CONTROL.md обещает 400. 500 от клиентской
+        опечатки хуже, чем кажется: он выглядит как поломка МСУ, и оператор
+        идёт читать логи вместо того, чтобы просто выбрать устройство.
+
+        :param what: название устройства в родительном падеже («id камеры»),
+            чтобы сообщение читалось по-русски: «Не указан id камеры».
+        """
+        if dev is None or dev == "":
+            raise ApiError(f"Не указан {what} (device)")
+        try:
+            return int(dev)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                f"Ожидался целый id устройства, получено {dev!r}") from exc
 
 
 # --- сериализация -----------------------------------------------------------

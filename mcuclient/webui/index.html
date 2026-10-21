@@ -113,6 +113,9 @@
         <select id="videoDevices"><option value="">Камеры…</option></select>
       </div>
       <div class="row" style="margin-top:6px">
+        <select id="audioDevices"><option value="">Микрофоны…</option></select>
+      </div>
+      <div class="row" style="margin-top:6px">
         <select id="videoSource">
           <option value="camera">Источник: камера</option>
           <option value="screen">Источник: экран</option>
@@ -486,9 +489,33 @@ async function refresh() {
 async function conferenceRefresh() { await refresh(); syncViewers(); }
 
 async function loadDevices() {
+  await Promise.all([loadVideoDevices(), loadAudioDevices()]);
+}
+
+// Каждый список грузится своим try: падение /devices/video не имеет права
+// обнулять список микрофонов (и наоборот) — иначе отказ одного устройства
+// выглядит перед оператором как «устройств нет вообще».
+async function loadVideoDevices() {
   try {
     const d = await api('/devices/video');
     $('videoDevices').innerHTML = '<option value="">Камеры…</option>' + (d.devices || []).map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+  } catch (e) { /* не критично */ }
+}
+
+async function loadAudioDevices() {
+  try {
+    const d = await api('/devices/audio');
+    const all = d.devices || [];
+    // Только устройства ВХОДА: сервер отдаёт и динамики (inputs=0, outputs>0),
+    // а выбор «микрофона», который ничего не захватывает, неотличим от
+    // сломанного МСУ. Тот же фильтр, что в нативном клиенте
+    // (mcuclient/ui.py::_populate_mics).
+    let mics = all.filter(x => x.inputs > 0);
+    // Часть сборок pjsua2 (и тестовая фикстура сервера) отдаёт устройства без
+    // поля inputs: без запасного варианта список был бы пуст на системе, где
+    // микрофон есть.
+    if (!mics.length) mics = all;
+    $('audioDevices').innerHTML = '<option value="">Микрофоны…</option>' + mics.map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
   } catch (e) { /* не критично */ }
 }
 
@@ -653,6 +680,10 @@ $('btnMuteAll').onclick = () => act(() => api('/mute_all', 'POST', { audio: true
 $('btnHangAll').onclick = () => act(async () => { for (const p of sipParticipants) { await api('/hangup', 'POST', { id: p.id }); } });
 $('layout').onchange = () => act(() => api('/layout', 'POST', { layout: $('layout').value }));
 $('videoDevices').onchange = () => { const v = $('videoDevices').value; if (v !== '') act(() => api('/video_device', 'POST', { device: Number(v) })); };
+// Пустой пункт («Микрофоны…») — не выбор: POST с пустым device сервер честно
+// отвергает 400, но alert про «Не указан id микрофона» при открытии страницы
+// был бы ложью: оператор ничего не менял.
+$('audioDevices').onchange = () => { const v = $('audioDevices').value; if (v !== '') act(() => api('/audio_device', 'POST', { device: Number(v) })); };
 $('videoSource').onchange = () => act(() => api('/video_source', 'POST', { kind: $('videoSource').value }));
 
 function sendChat() {
