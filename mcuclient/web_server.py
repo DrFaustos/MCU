@@ -787,13 +787,22 @@ class WebSession:
         self._call(lambda: self._engine.set_video_source(kind, device))
         return {"ok": True, "video_source": kind}
 
+    # Отказ движка обязан быть ошибкой с HTTP-кодом, а не 200 + {"ok": false}.
+    # Док уже определяет отказ как «{"ok": false, "error": "..."} с HTTP-кодом»
+    # (см. docs/WEB_CONTROL.md, раздел про ответы), а панель читает тело ответа
+    # только чтобы достать error при !res.ok: при ok:false без статуса alert не
+    # срабатывал вовсе, и UI показывал «переключено» на выбор, который не
+    # применился. Движок устройствами отказывает по-настоящему: null-аудио,
+    # Windows-wheel без аудиоустройств, gscam-источник без камеры.
     def set_video_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_video_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+        if not self._call(lambda: bool(self._engine.set_video_device(int(device)))):
+            raise ApiError(f"Камера {int(device)} недоступна", status=409)
+        return {"ok": True, "device": int(device)}
 
     def set_audio_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_audio_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+        if not self._call(lambda: bool(self._engine.set_audio_device(int(device)))):
+            raise ApiError(f"Микрофон {int(device)} недоступен", status=409)
+        return {"ok": True, "device": int(device)}
 
     # -- Конференция веб-участников ---------------------------------------
     def conference_join(self, name: str, role: str = "participant") -> Dict[str, Any]:

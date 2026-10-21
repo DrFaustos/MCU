@@ -376,6 +376,47 @@ def test_set_video_device():
         s.close()
 
 
+def test_set_video_device_refusal_is_http_error():
+    """Отказ движка — ApiError 409 с причиной, а не 200 + {"ok": false}.
+
+    Воспроизведено 2026-10-21 (ветка h323). Движок отказывает по-настоящему
+    (null-аудио, Windows-wheel без аудиоустройств, камеру выдернули), а
+    docs/WEB_CONTROL.md определяет отказ как «{"ok": false, "error": "..."} с
+    HTTP-кодом». Панельная api() читает тело ответа только ради error при
+    !res.ok: при 200 + ok:false alert не срабатывал, оператор видел
+    «переключено» на выбор, который не применился.
+    """
+    s, eng = _session()
+    try:
+        eng.set_video_device = lambda dev: False
+        try:
+            s.set_video_device(9)
+        except ApiError as exc:
+            assert exc.status == 409
+            assert "9" in str(exc), "в причине обязан быть id устройства"
+        else:
+            raise AssertionError(
+                "ожидали ApiError: молчаливый 200 + ok:false — это дыра")
+    finally:
+        s.close()
+
+
+def test_set_audio_device_refusal_is_http_error():
+    """Микрофон — тот же контракт, что камера (см. test выше)."""
+    s, eng = _session()
+    try:
+        eng.set_audio_device = lambda dev: False
+        try:
+            s.set_audio_device(4)
+        except ApiError as exc:
+            assert exc.status == 409
+            assert "4" in str(exc)
+        else:
+            raise AssertionError("ожидали ApiError")
+    finally:
+        s.close()
+
+
 def test_devices_lists():
     s, _ = _session()
     try:
@@ -456,6 +497,27 @@ def test_server_picks_real_port():
     try:
         assert srv.port != 0, "порт должен быть фактическим, а не 0"
         assert str(srv.port) in srv.url
+    finally:
+        srv.stop()
+
+
+def test_http_device_refusal_is_409_with_reason():
+    """Roundtrip: неприменившийся микрофон — 409 и error в теле, а не 200.
+
+    Юнит выше проверяет, что WebSession бросает ApiError; этот — что
+    развилка `_handle_api_post` превращает его в настоящий HTTP-код с
+    причиной. Смысл именно в паре (код + error): панель читает `error` из
+    тела только когда !res.ok, поэтому отказ без кода до оператора не
+    доезжает никогда.
+    """
+    eng = _FakeEngine()
+    eng.set_audio_device = lambda dev: False
+    srv = _start_server(eng)
+    try:
+        status, body = _http(srv, "POST", "/api/audio_device", {"device": 7})
+        assert status == 409, f"ожидали 409, получили {status}: {body}"
+        assert body["ok"] is False
+        assert "7" in body["error"], "причина обязана называть устройство"
     finally:
         srv.stop()
 

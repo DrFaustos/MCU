@@ -150,8 +150,8 @@ POST (тело — JSON):
 | `/api/video_send` | `{enabled}` | передача видео в эфир |
 | `/api/screen_share` | `{enabled}` | демонстрация экрана |
 | `/api/video_source` | `{kind, device?}` | источник: camera/screen/colorbar |
-| `/api/video_device` | `{device}` | выбрать камеру по id |
-| `/api/audio_device` | `{device}` | выбрать микрофон по id |
+| `/api/video_device` | `{device}` | выбрать камеру по id; если движок не смог применить — **409 с причиной**, а не 200 + `{"ok": false}`: панель читает `error` только при !res.ok, и молчаливый ok:false оператор не увидел бы никогда |
+| `/api/audio_device` | `{device}` | выбрать микрофон по id; отказ — 409 с причиной (то же правило, что у камеры) |
 | `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
 | `/api/codecs` | `{profile}` | профиль кодеков |
 | `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
