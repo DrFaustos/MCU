@@ -19,7 +19,13 @@
   * `call.media` доезжает до эндпоинта: у участников проставлен `audio_codec`
     (без строки в EVENT_MAP событие теряется молча);
   * после сброса вызова из микшера убирается канал — иначе «фантом» продолжает
-    попадать в микс оставшимся участникам.
+    попадать в микс оставшимся участникам;
+  * DTMF проходит сквозняком в обе стороны: набор терминала A появляется в
+    ОБЩЕМ журнале DTMF комнаты с id участника A, а тоны, отправленные из панели
+    (`endpoint.send_dtmf`), доходят до терминала A. Проверяется здесь, а не в
+    стенде двух хостов, потому что только тут работает боевой `H323Endpoint`:
+    у H.323-вызова нет pjsua2-колбэков, и без проводки журнал пуст при живом
+    звуке — панель молчала бы зелёной.
 
 Запуск (собранный хост обязателен):
     ./scripts/build_h323d.sh
@@ -54,14 +60,17 @@ from h323_native_two_hosts import (  # noqa: E402
     MEDIA_RMS_MIN,
     Checker,
     Collector,
+    is_subseq,
     make_workdir,
     pcm_rms,
     start_host,
     tail_log,
+    wait_dtmf,
 )
+from mcuclient.dtmf_service import DtmfService  # noqa: E402
 from mcuclient.h323_endpoint import H323Endpoint  # noqa: E402
 from mcuclient.h323d_client import H323dClient  # noqa: E402
-from mcuclient.models import Room  # noqa: E402
+from mcuclient.models import EventBus, Room  # noqa: E402
 
 #: Тон A: 800 Гц. Тон B — 300 Гц и тише, чтобы по RMS на A нельзя было
 #: перепутать «эхо собственного тона» с «голосом собеседника».
@@ -339,6 +348,20 @@ def main() -> int:
         ck.check(bool(mcu_stats0.get("enabled")),
                  "MCU: аудио-мост поднят вместе с эндпоинтом", str(mcu_stats0))
 
+        # --- общий журнал DTMF (ровно как его заводит run.py) ----------------
+        # run.py зовёт h323_native.set_dtmf_service(engine.dtmf_service): без
+        # этой строки принятый хостом тон остаётся только в его логе, и «набрал
+        # ли терминал PIN» по МСУ не проверяется вовсе. Стенд двух хостов этого
+        # увидеть не может — там боевого H323Endpoint нет вообще.
+        dtmf_events = EventBus()
+        bus_seen: list = []
+        dtmf_events.subscribe(
+            lambda name, payload: bus_seen.append((name, dict(payload))))
+        dtmf_svc = DtmfService(dtmf_events)
+        endpoint.set_dtmf_service(dtmf_svc)
+        ck.check(endpoint._dtmf is dtmf_svc,
+                 "MCU: журнал DTMF подключён к эндпоинту", "set_dtmf_service")
+
         # --- оба терминала звонят в MCU -------------------------------------
         tok_a = dial(clients["A"], collectors["A"], ck, "A",
                      f"127.0.0.1:{args.port_mcu}", args.wait)
@@ -496,6 +519,56 @@ def main() -> int:
                  f"speaker_pid={st_swap.get('speaker_pid')} "
                  f"ожидался={p_b and p_b.id}")
         pump_b.stop()
+
+        # --- фаза 4б: DTMF сквозняком (терминал ↔ журнал комнаты) ------------
+        # Терминал A набирает PIN. Правильный ответ MCU — не «звук есть», а
+        # запись в ОБЩЕМ журнале с id именно участника A: у H.323-вызова нет
+        # pjsua2-колбэков on_dtmf_event, и без проводки журнал пуст при живом
+        # звуке — панель молчала бы зелёной.
+        probe_in = "12#7"
+        ck.check(clients["A"].send_dtmf(tok_a, probe_in),
+                 f"A: dtmf.send({probe_in!r}) отправлен (набор на терминале)")
+        pid_a = p_a.id if p_a else -1
+        got_in = ""
+        deadline = time.time() + args.wait
+        while time.time() < deadline:
+            got_in = "".join(
+                e.digits for e in dtmf_svc.history
+                if e.direction == "in" and e.participant_id == pid_a
+            )
+            if is_subseq(got_in, probe_in):
+                break
+            time.sleep(0.1)
+        ck.check(is_subseq(got_in, probe_in),
+                 "MCU: набор A попал в общий журнал DTMF с id участника A",
+                 f"лента={got_in!r} ожидалось {probe_in!r}")
+        # Метод обязан быть H.323-ным: in-band RFC 4733 в форке неотличим от
+        # H.245 signal (оба идут в OnUserInputTone), и писать оператору
+        # «rfc2833» — значит врать про источник тона.
+        methods = sorted({e.method for e in dtmf_svc.history
+                          if e.direction == "in"})
+        ck.check(bool(methods) and all(
+                     m in ("h323", "h323-string") for m in methods),
+                 "MCU: метод тона помечен как H.323, а не rfc2833", str(methods))
+        ck.check(any(n == "dtmf.digits" for n, _ in bus_seen),
+                 "MCU: журнал публикует dtmf.digits (его слушает панель)",
+                 str([n for n, _ in bus_seen][:4]))
+
+        # Обратное направление — как это делает веб-панель (POST /api/dtmf →
+        # SipEngine.send_dtmf → native.handle_dtmf). Проверяем и то, что тон
+        # ушёл на терминал, и то, что исходящая посылка попала в ТОТ ЖЕ журнал.
+        probe_out = "*9"
+        ck.check(bool(p_a) and endpoint.send_dtmf(p_a, probe_out),
+                 f"MCU: send_dtmf(участник A, {probe_out!r}) — путь панели")
+        got_a = wait_dtmf(collectors["A"], tok_a, probe_out, args.wait)
+        ck.check(is_subseq(got_a, probe_out),
+                 "A: принял тоны, отправленные МСУ",
+                 f"ожидались {probe_out!r}, лента A: {got_a!r}")
+        sent_hist = "".join(e.digits for e in dtmf_svc.history
+                            if e.direction == "out")
+        ck.check(is_subseq(sent_hist, probe_out),
+                 "MCU: исходящая посылка записана в тот же журнал",
+                 f"лента={sent_hist!r}")
 
         # --- фаза 5: сброс вызова A — из микшера уходит канал ---------------
         mixer_ids_before = list(endpoint.audio.mixer.participant_ids) \
