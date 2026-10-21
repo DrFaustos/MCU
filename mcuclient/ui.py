@@ -40,6 +40,7 @@ if getattr(sys, 'frozen', False) and sys.platform.startswith('linux'):
 from . import call_proto
 from . import icons as _icons
 from .config import LAYOUT_LABELS, Config
+from .dtmf import DTMF_DIGITS, MAX_DIGITS_PER_SEND
 from .h323_gateway import H323Gateway
 from .log import get_logger
 from .sip_engine import CallState, Participant, SipEngine
@@ -597,6 +598,54 @@ if QT_AVAILABLE:
             mute_all_row.addWidget(self.mute_all_btn)
             mute_all_row.addStretch()
             right.addLayout(mute_all_row)
+
+            # --- Тоны набора (DTMF) ------------------------------------------
+            # Движок умел send_dtmf с SIP-времён, а в окне не было ни одной
+            # кнопки: оператор за нативным клиентом не мог набрать PIN в IVR.
+            right.addWidget(QtWidgets.QLabel("Тоны набора (DTMF)"))
+            self.dtmf_edit = QtWidgets.QLineEdit()
+            self.dtmf_edit.setPlaceholderText("PIN или тоны IVR (0-9, *, #, A-D)")
+            # Лимит — тот же, что у ядра и web-панели, иначе поле приняло бы
+            # строку, которую сервер отвергнет.
+            self.dtmf_edit.setMaxLength(MAX_DIGITS_PER_SEND)
+            self.dtmf_edit.returnPressed.connect(self._on_dtmf_send)
+            dtmf_row = QtWidgets.QHBoxLayout()
+            dtmf_row.addWidget(self.dtmf_edit, stretch=1)
+            dtmf_back_btn = QtWidgets.QPushButton("⌫")
+            dtmf_back_btn.setFixedWidth(40)
+            dtmf_back_btn.setToolTip("Стереть последний тон")
+            dtmf_back_btn.clicked.connect(self._on_dtmf_backspace)
+            dtmf_send_btn = QtWidgets.QPushButton("Отправить")
+            dtmf_send_btn.setToolTip(
+                "Тоны выбранному участнику; если никто не выбран — всем (PIN в IVR)"
+            )
+            dtmf_send_btn.clicked.connect(self._on_dtmf_send)
+            dtmf_row.addWidget(dtmf_back_btn)
+            dtmf_row.addWidget(dtmf_send_btn)
+            right.addLayout(dtmf_row)
+
+            # Раскладка строится ЦИКЛОМ по алфавиту ядра (mcuclient/dtmf.py), а
+            # не переписывается вручную: 12 кнопок «как на обычном телефоне»
+            # выглядели бы правдоподобно и молча отрезали бы буквенные тона
+            # A-D, которые шлют ISDN-шлюзы и старые Polycom.
+            dtmf_pad = QtWidgets.QGridLayout()
+            dtmf_pad.setSpacing(3)
+            for _i, _digit in enumerate(DTMF_DIGITS):
+                _key_btn = QtWidgets.QPushButton(_digit)
+                _key_btn.setFixedHeight(26)
+                # _checked — заглушка аргумента clicked(bool); тон обязан
+                # замкнуться значением (default), иначе все кнопки шлют
+                # последний символ алфавита.
+                _key_btn.clicked.connect(
+                    lambda _checked=False, _d=_digit: self._on_dtmf_key(_d))
+                dtmf_pad.addWidget(_key_btn, _i // 4, _i % 4)
+            right.addLayout(dtmf_pad)
+
+            self.dtmf_log = QtWidgets.QListWidget()
+            self.dtmf_log.setMaximumHeight(84)
+            self.dtmf_log.setStyleSheet("color:#7a8592; font-size:11px;")
+            right.addWidget(self.dtmf_log)
+            self._refresh_dtmf_log()
 
             right.addWidget(QtWidgets.QLabel("Участники"))
             self.participants_list = QtWidgets.QListWidget()
@@ -1603,6 +1652,59 @@ if QT_AVAILABLE:
             for pid in list(self.engine.room.participants):
                 self.engine.hangup(pid)
 
+        # --- Тоны набора (DTMF) ---------------------------------------------
+
+        def _on_dtmf_key(self, digit: str) -> None:
+            """Кнопка тонального автомата: тон кладётся в поле, НЕ отправляется.
+
+            Отправка каждого нажатия отдельной командой разорвала бы PIN на
+            отдельные последовательности: движок (и H.245 UserInput, и
+            RFC 2833) несёт строку тонов как одну посылку, а IVR терминалов
+            ждёт именно её.
+            """
+            text = self.dtmf_edit.text() + digit
+            self.dtmf_edit.setText(text[:MAX_DIGITS_PER_SEND])
+
+        def _on_dtmf_backspace(self) -> None:
+            """Стереть последний тон (физической Backspace здесь может не быть)."""
+            self.dtmf_edit.setText(self.dtmf_edit.text()[:-1])
+
+        def _on_dtmf_send(self) -> None:
+            """Тоны выбранному участнику; без выбора — всем активным вызовам.
+
+            Адресат берётся из списка: у H.323-участника нет pjsua2-вызова, и
+            только движок знает, роутить его на mcu_h323d (H.245 UserInput) или
+            слать SIP-тоны. «Всем» для GUI = та же строка тонов в каждый вызов.
+            """
+            digits = self.dtmf_edit.text().strip().upper()
+            if not digits:
+                self.statusBar().showMessage("Введите тоны (0-9, *, #, A-D)", 4000)
+                return
+            pid = self._current_id()
+            ok = self.engine.send_dtmf(digits, pid)
+            if ok:
+                self.dtmf_edit.clear()
+            self._refresh_dtmf_log()
+            target = "всем активным" if pid is None else f"участнику {pid}"
+            self.statusBar().showMessage(
+                f"Тоны {target}: {digits}" if ok
+                else f"Тоны не доставлены ({target}): нет активного вызова", 6000)
+
+        def _refresh_dtmf_log(self) -> None:
+            """Журнал тонов комнаты — ОДИН на SIP и H.323, последние сверху.
+
+            Читается из движка, а не ведётся локально: «набрал ли терминал PIN»
+            обязан иметь один ответ, иначе окно и web-панель показывали бы
+            разные истории одной комнаты.
+            """
+            self.dtmf_log.clear()
+            history = list(self.engine.dtmf_history or [])
+            for ev in reversed(history[-20:]):
+                arrow = "\u25c0" if ev.direction == "in" else "\u25b6"
+                who = ev.peer or (
+                    "все" if ev.participant_id is None else str(ev.participant_id))
+                self.dtmf_log.addItem(f"{arrow} {ev.digits}  {who}  [{ev.method}]")
+
         def _on_quality(self, name: str) -> None:
             w, h, fps = self.QUALITY_PRESETS[name]
             self.engine.set_video_quality(w, h, fps)
@@ -1736,6 +1838,12 @@ if QT_AVAILABLE:
                     self._refresh_participants_list()
                 elif event == "media.video_send":
                     self._sync_local_tile_send()
+                elif event == "dtmf.digits":
+                    # Тон принят от терминала (SIP RFC 2833 / SIP INFO либо
+                    # H.245 UserInput). Обновляем журнал сразу: без ветки PIN,
+                    # набранный аппаратом, был бы виден только после любого
+                    # другого события — или не виден вовсе.
+                    self._refresh_dtmf_log()
             except Exception as e:
                 log.exception("Ошибка в _handle_event для события %s: %s", event, e)
 
