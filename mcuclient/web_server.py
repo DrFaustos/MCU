@@ -339,6 +339,13 @@ class WebSession:
                                     bus=self.conference.bus,
                                     ice_servers=self._ice_servers,
                                     audio_mix=self.audio_mix)
+        # Связка «вышел участник → закрыты его WebRTC-сессии». Хук, а не вызов
+        # из conference_leave(): реестр выгоняет участников не только по HTTP
+        # (restart/shutdown идут циклом прямо по реестру), и без хука
+        # RTCPeerConnection выгнанного переживал и кнопку, и перезапуск панели.
+        # Присваиванием, а не аргументом: Conference нужен менеджеру (его
+        # шина), значит менеджер физически не может быть создан раньше.
+        self.conference.on_leave = self.webrtc.close_for_participant
         self.audio_mix.start()
         # Запись web-конференции: кадры FrameHub + смешанное аудио.
         self._web_recorder = WebRecorder(output_dir=self._recording_dir())

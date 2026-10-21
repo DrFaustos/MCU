@@ -429,6 +429,34 @@ class WebRTCManager:
             log.debug("Закрытие сессии %s с ошибкой", sid, exc_info=True)
         return True
 
+    def close_for_participant(self, pid: str) -> int:
+        """Закрыть ВСЕ сессии участника конференции; вернуть их число.
+
+        Связь «сессия ↔ участник» живёт в ``_MediaRelay.publish_id`` (её
+        задаёт ``handle_offer(participant=...)``), в ``SessionInfo`` поля нет —
+        поэтому поиск идёт по релеям, а сессии анонимных offer'ов (у которых
+        ``publish_id`` = id сессии, а не ``web-N``) сюда не попадают: чужое
+        пространство имён id трогать нельзя.
+
+        Без этого метода ``Conference.leave`` физически не мог точечно найти
+        сессии выгнанного: он знал только реестр и шину. Замер 2026-10-21:
+        после leave `RTCPeerConnection` был жив, релей тоже, и следующий
+        входящий трек воссоздавал убранный канал шины — выгнанный возвращался
+        в микс застывшим PCM (заперто tests/test_web_leave_closes_ingest.py).
+        """
+        if not pid:
+            return 0
+        with self._lock:
+            sids = [sid for sid, relay in self._relays.items()
+                    if relay.publish_id == pid]
+        closed = 0
+        for sid in sids:
+            if self.close_session(sid):
+                closed += 1
+        if closed:
+            log.info("Закрыто сессий %d: участник %s вышел", closed, pid)
+        return closed
+
     async def _close_session(self, sid: str) -> None:
         pc = self._pc.pop(sid, None)
         relay = self._relays.pop(sid, None)

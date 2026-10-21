@@ -489,12 +489,16 @@ class Conference:
     """Реестр веб-участников + шина медиа (одна комната)."""
 
     def __init__(self, bus: Optional[MediaBus] = None,
-                 on_change: Optional[Callable[[], None]] = None) -> None:
+                 on_change: Optional[Callable[[], None]] = None,
+                 on_leave: Optional[Callable[[str], None]] = None) -> None:
         self._lock = threading.Lock()
         self._participants: Dict[str, ConferenceParticipant] = {}
         self._counter = 0
         self.bus = bus or MediaBus()
         self._on_change = on_change
+        #: Публичный: web_server создаёт Conference ДО WebRTCManager (шина
+        #: нужна менеджеру), и связывает их присваиванием после.
+        self.on_leave = on_leave
 
     # -- участники ---------------------------------------------------------
     def join(self, name: str, role: str = "participant") -> ConferenceParticipant:
@@ -529,6 +533,16 @@ class Conference:
         if p is None:
             return False
         self.bus.drop(pid)
+        # Освобождение медиа — ХУКОМ, а не только из HTTP-метода: restart() и
+        # shutdown выгоняют участников циклом прямо по реестру, и без хука их
+        # RTCPeerConnection пережили бы и кнопку, и перезапуск.
+        cb = self.on_leave
+        if cb is not None:
+            try:
+                cb(pid)
+            except Exception:  # noqa: BLE001 — отказ чистки не отменяет выход
+                log.debug("on_leave конференции упал для %s", pid,
+                          exc_info=True)
         log.info("Web-участник вышел: %s (%s)", p.name, pid)
         self._changed()
         return True
