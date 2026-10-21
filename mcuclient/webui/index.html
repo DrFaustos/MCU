@@ -323,7 +323,23 @@ function rtcCloseSession(sid, viaBeacon) {
 // (aiortc), реле́й и канал шины медиа остаются жить до остановки панели.
 // Перебор viewerPCs обязателен: fan-out заводит отдельную серверную сессию на
 // каждого публикуемого, значит одна вкладка оставляет N сессий.
+//
+// Выход из комнаты идёт ПЕРВЫМ ДЕЛОМ и ДО раннего возврата ниже. Тот возврат
+// про медиа — «есть ли что закрывать», а участник живёт в реестре конференции и
+// без публикации: вошёл без камеры/микрофона, не нажимал «Опубликовать» — и
+// beacon, поставленный после условия, у него не ушёл бы никогда. Тайл висел бы
+// в комнате с state=connected неограниченно, убрать его нечем (кнопки «Сброс» у
+// веб-тайла нет). Закрытием серверной стороны по-прежнему правит on_leave
+// реестра: выход сам закрывает сессии и канал участника.
+// fetch при выгрузке не доживает, sendBeacon не умеет заголовок Authorization,
+// поэтому токен едет в query (qs) — сервер читает его и там.
 window.addEventListener('pagehide', () => {
+  if (me) {
+    try {
+      navigator.sendBeacon('/api/conference/leave' + qs,
+        new Blob([JSON.stringify({ id: me.id })], { type: 'application/json' }));
+    } catch (e) { /* браузер уже уходит, сделать больше нельзя */ }
+  }
   if (!_pubSession && !Object.keys(viewerPCs).length) return;
   rtcCloseSession(_pubSession, true);
   Object.keys(viewerPCs).forEach(k => rtcCloseSession(viewerPCs[k].session, true));
