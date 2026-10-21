@@ -11,7 +11,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _skip import skip  # noqa: E402
 from mcuclient.config import DEFAULT_CONFIG  # noqa: E402
 from mcuclient.dtmf import (  # noqa: E402
     DTMF_DIGITS,
@@ -120,10 +124,18 @@ def test_describe_dtmf_method_roundtrip():
 
 
 def test_real_pjsua2_has_both_methods():
+    """Методы DTMF сверяются с НАСТОЯЩИМИ константами pjsua2.
+
+    Без pjsua2 кейс обязан быть ПРОПУЩЕННЫМ: `except ImportError: return`
+    засчитывался pytest'ом как успех, и в CI (нативного стека нет) проверка
+    «мы берём имя константы, а не число» не исполнялась никогда.
+    """
     try:
         import pjsua2 as pj
     except ImportError:
-        return
+        pj = None
+    if pj is None:
+        skip("pjsua2 не установлен — константы PJ_DTMF_METHOD_* не с чем сверить")
     assert dtmf_method_value(pj, "rfc2833") is not None
     assert dtmf_method_value(pj, "sip-info") is not None
 

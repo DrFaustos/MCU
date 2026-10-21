@@ -22,6 +22,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _skip import skip  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tests" / "_runner.py"
 
@@ -244,8 +248,7 @@ def test_runner_covers_every_case_pytest_collects(tmp_path):
         [sys.executable, "-m", "pytest", "--version"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     if probe.returncode != 0:
-        print("pytest недоступен — сверка покрытия пропущена")
-        return
+        skip("pytest недоступен — сверять покрытие раннера не с чем")
     pytest_run = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
         "-o", "addopts=", "--collect-only", "-q", str(ROOT / "tests")],

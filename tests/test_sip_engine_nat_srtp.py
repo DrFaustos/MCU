@@ -18,7 +18,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _skip import skip  # noqa: E402
 from mcuclient.config import DEFAULT_CONFIG, Config  # noqa: E402
 from mcuclient.sip_engine import (  # noqa: E402
     SipEngine,
@@ -193,10 +197,24 @@ def _pjsua2():
         return None
 
 
-def test_account_nat_reaches_real_pjsua2_fields():
+def _require_pjsua2():
+    """pjsua2 обязан быть: без него кейс ПРОПУСКАЕТСЯ, а не проходит молча.
+
+    Пять real-pjsua2 кейсов этого файла были ложнопозелёнными в CI: форма
+    `pj = _pjsua2(); if pj is None: return` при отсутствии нативного биндинга
+    выходила из функции ДО первого assert, pytest писал `passed`, а
+    tests/_runner.py — `PASS`. Именно этот тест и ловил когда-то баг «движок
+    пишет строку в uaConfig.stunServer — TypeError», и в CI он его не ловил.
+    Страж формы — tests/test_honest_skips.py.
+    """
     pj = _pjsua2()
     if pj is None:
-        return
+        skip("pjsua2 не установлен — прошивка natConfig/uaConfig нечем проверить")
+    return pj
+
+
+def test_account_nat_reaches_real_pjsua2_fields():
+    pj = _require_pjsua2()
     eng = _engine(_cfg(
         sip_patch={"stun": {"server": "", "enable_ice": True}},
         nat_patch={
@@ -226,9 +244,7 @@ def test_account_nat_reaches_real_pjsua2_fields():
 
 
 def test_account_nat_turn_off_when_server_empty():
-    pj = _pjsua2()
-    if pj is None:
-        return
+    pj = _require_pjsua2()
     eng = _engine(_cfg(nat_patch={"turn_server": "", "ice_trickle": "off"}))
     acc_cfg = pj.AccountConfig()
     eng._configure_account_nat(acc_cfg)
@@ -238,9 +254,7 @@ def test_account_nat_turn_off_when_server_empty():
 
 
 def test_srtp_real_binding_matches_config_mode():
-    pj = _pjsua2()
-    if pj is None:
-        return
+    pj = _require_pjsua2()
     expected = {
         "off": pj.PJMEDIA_SRTP_DISABLED,
         "optional": pj.PJMEDIA_SRTP_OPTIONAL,
@@ -256,9 +270,7 @@ def test_ua_config_ice_field_contract():
     Если будущий pjsua2 вернёт enableIce в UaConfig — тест напомнит, что
     настройку надо пересмотреть (дублировать её в двух местах нельзя).
     """
-    pj = _pjsua2()
-    if pj is None:
-        return
+    pj = _require_pjsua2()
     ua = pj.EpConfig().uaConfig
     assert hasattr(ua, "maxCalls"), "UaConfig.maxCalls обязал быть"
     assert not hasattr(ua, "enableIce"), "enableIce вернулся: NAT-настройки пересмотреть"
@@ -297,9 +309,7 @@ def test_configure_nat_real_pjsua2_stun_is_vector():
     в _start_pjsip, и вся настройка NAT (STUN, ICE, потолок вызовов) молча
     не применялась.
     """
-    pj = _pjsua2()
-    if pj is None:
-        return
+    pj = _require_pjsua2()
     eng = _engine(_cfg(sip_patch={
         "max_calls": 12,
         "stun": {"server": "stun:stun.l.google.com:19302", "enable_ice": True},

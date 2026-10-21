@@ -10,8 +10,16 @@ from __future__ import annotations
 import shutil
 import ssl
 import subprocess
+import sys
+from pathlib import Path
 
-from mcuclient.config import DEFAULT_CONFIG, _deep_merge, load_config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _skip import skip  # noqa: E402
+from mcuclient.config import DEFAULT_CONFIG, _deep_merge, load_config  # noqa: E402
 from mcuclient.tls_utils import (
     default_cert_dir,
     ensure_self_signed,
@@ -123,7 +131,7 @@ def test_default_cert_dir_is_platform_path():
 
 def test_ensure_self_signed_generates(tmp_path):
     if not openssl_available():
-        return  # окружение без openssl — пропускаем
+        skip("openssl недоступен — генерацию сертификата проверять нечем")
     cert, key = ensure_self_signed(cert_dir=tmp_path, host="localhost")
     assert cert.is_file() and key.is_file()
     # Повторный вызов возвращает те же файлы (без перегенерации).
@@ -133,7 +141,7 @@ def test_ensure_self_signed_generates(tmp_path):
 
 def test_make_ssl_context(tmp_path):
     if not openssl_available():
-        return
+        skip("openssl недоступен — сертификат не создан, SSLContext строить не из чего")
     cert, key = ensure_self_signed(cert_dir=tmp_path, host="localhost")
     ctx = make_ssl_context(cert, key)
     assert isinstance(ctx, ssl.SSLContext)
