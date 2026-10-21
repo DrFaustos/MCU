@@ -451,6 +451,7 @@ function renderTiles() {
           <button data-act="waudio" data-id="${esc(p.id)}">${p.muted ? 'Вкл звук' : 'Мут'}</button>
           <button data-act="wvideo" data-id="${esc(p.id)}">${p.video_muted ? 'Вкл видео' : 'Выкл видео'}</button>
           <button data-act="wrename" data-id="${esc(p.id)}">Имя</button>
+          <button class="danger" data-act="wkick" data-id="${esc(p.id)}">Убрать</button>
         </div>`}
       </div>`;
     }
@@ -750,6 +751,16 @@ $('grid').addEventListener('click', (e) => {
       if (name === null) return;
       await api('/conference/rename', 'POST', { id: sid, name: name });
     },
+    // Выдворение зависшего браузера. id — СТРОКОВЫЙ sid, как у waudio/wrename:
+    // числовой id в этой же карте построен через Number(sid) и для веб-участника
+    // равен NaN, т.е. в JSON ушёл бы null и сервер ответил 400.
+    // Подтверждения (confirm) нет сознательно: в этой панели confirm не
+    // используется НИ РАЗУ, а необратимое действие уже имеет конвенцию —
+    // class="danger" у SIP-сброса; вводить второй стиль было бы дороже.
+    // Сервер принимает чужой id (заперто тестом
+    // test_conference_leave_accepts_someone_elses_id), а освобождением медиа
+    // правит хук on_leave реестра: панель не знает и не должна знать id сессий.
+    wkick: () => api('/conference/leave', 'POST', { id: sid }),
   };
   act(map[action]);
 });
