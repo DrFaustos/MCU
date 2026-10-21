@@ -118,6 +118,31 @@ class DtmfService:
     def clear_history(self) -> None:
         self._history.clear()
 
+    def record_external(self, *, digits: str, direction: str,
+                        participant_id: Optional[int] = None, peer: str = "",
+                        method: str = "h245") -> DtmfEvent:
+        """Записать тоны, принятые/отправленные НЕ через pjsua2 (контур H.323).
+
+        Нужен ветке ``mcu_h323d``: нативные тон-колбэки pjsua2
+        (``on_dtmf_event`` / ``on_dtmf_digit``) для таких участников не
+        вызываются вовсе — у них нет объекта ``Call``, а ``_peer_of`` построен
+        именно на нём. При этом журнал комнаты обязан оставаться ОДНИМ: заведи
+        мы второй список в :mod:`mcuclient.h323_endpoint`, оператор увидел бы
+        два расходящихся журнала «МСУ принял тоны», — ровно та болезнь, против
+        которой ``LevelsIndicator`` держат одной копией для web-микшера и
+        H.323-моста.
+
+        Событие уходит под тем же именем ``dtmf.digits`` и в том же формате
+        (:meth:`DtmfEvent.as_dict`), поэтому для панели оба протокола выглядят
+        одинаково.
+        """
+        event = self._history.add(DtmfEvent(
+            digits=digits, direction=direction, participant_id=participant_id,
+            peer=peer, method=method,
+        ))
+        self._events.emit("dtmf.digits", **event.as_dict())
+        return event
+
     # ------------------------------------------------------------- отправка
 
     def send_dtmf(self, participant_id: Optional[int], digits, method: str = "auto") -> bool:

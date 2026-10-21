@@ -195,6 +195,21 @@ class H323dClient:
             "pcm.out", token=token, data=base64.b64encode(data).decode("ascii")
         )
 
+    def send_dtmf(self, token: str, digits: str) -> bool:
+        """Передать тоны в вызов (H.245 UserInputIndication, команда dtmf.send).
+
+        Строку на отдельные тоны разбивает САМ хост: ``SendUserInput`` в режиме
+        ``SendUserInputAsTone`` итерирует по символам (h323.cxx, ветка
+        SendUserInputAsTone), поэтому здесь ровно одна команда на строку. Это
+        отличие от pjsua2 принципиально: там каждый тон надо слать отдельно и
+        прокачивать цикл событий (:meth:`DtmfService._send_tones`), иначе
+        адресат обрезает всё кроме первого символа; у H.245 общего event-кольца
+        нет, PDU пишется сразу.
+        """
+        if not token or not digits:
+            return False
+        return self.send_command("dtmf.send", token=token, digits=digits)
+
     def shutdown(self) -> bool:
         return self.send_command("shutdown")
 

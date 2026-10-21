@@ -281,6 +281,39 @@ void emit_media_event(H323Connection *conn, const char *direction,
   b.add("codec", codec);
   g_server->send(b.str());
 }
+
+// ``dtmf.in``: тон (или строка), которые удалённый терминал передал нам как
+// H.245 UserInputIndication либо in-band RFC 4733. Историю тонов хост НЕ
+// ведает: единый список живёт в Python (mcuclient/dtmf.py::DtmfHistory),
+// иначе у оператора было бы два расходящихся журнала — «МСУ принял» и пусто в
+// панели (тот же принцип, что у LevelsIndicator: одна копия логики, а не две).
+//
+// Поле называется ``via``, а не ``method``, и это не аккуратность формулировки:
+// различить H.245-signal и in-band RFC 4733 в форке НЕЛЬЗЯ — оба стекаются в
+// H323Connection::OnUserInputTone (e_signal — h323.cxx:5525, RFC 4733 —
+// h323.cxx:5565) с одинаковой сигнатурой. Писать в событии «rfc2833», когда
+// тон мог прийти по H.245, значит оставить в логе утверждение, которое ничем
+// не подтверждено.
+void emit_dtmf_event(H323Connection &conn, const PString &digits,
+                     const char *via, unsigned duration) {
+  if (!g_server) return;
+  std::string token;
+  {
+    std::lock_guard<std::mutex> lk(g_calls_mu);
+    auto it = g_by_conn.find(&conn);
+    if (it != g_by_conn.end()) token = it->second;
+  }
+  if (token.empty()) token = to_std(conn.GetCallToken());
+  mcu_json::Builder b;
+  b.add("event", "dtmf.in");
+  b.add("token", token);
+  b.add("digits", to_std(digits));
+  b.add("via", via);
+  b.add_int("duration_ms", static_cast<long long>(duration));
+  g_server->send(b.str());
+  log_verbose("DTMF: \"" + to_std(digits) + "\" via " + std::string(via) +
+              " token=" + token);
+}
 } // namespace
 
 // --- Forward declarations ----------------------------------------------------
@@ -302,6 +335,19 @@ PBoolean OpenAudioChannel(H323Connection &connection,
                           PBoolean isEncoding,
                           unsigned bufferSize,
                           H323AudioCodec &codec) override;
+
+ // --- DTMF / H.245 UserInput -------------------------------------------------
+ // Переопределены ОБА колбэка, а не один, — и не для симметрии:
+ //  * OnUserInputTone даёт длительность тона, но базовая реализация
+ //    (h323ep.cxx:3195) выбрасывает её и разворачивает тон в строку;
+ //  * OnUserInputString ловит H.245 alphanumeric, который в Tone никогда не
+ //    превращается (терминал вправе слать набор строкой).
+ // Если переопределить только строку, оператор потерял бы длительность; если
+ // только тон — набор, пришедший alphanumeric, пропал бы молча.
+ void OnUserInputTone(H323Connection &connection, char tone, unsigned duration,
+                      unsigned logicalChannel, unsigned rtpTimestamp) override;
+ void OnUserInputString(H323Connection &connection,
+                        const PString &value) override;
 };
 
 // --- H323Connection ----------------------------------------------------------
@@ -467,6 +513,35 @@ PBoolean McuEndPoint::OpenAudioChannel(H323Connection &connection,
   return TRUE;
 }
 
+// --- DTMF / H.245 UserInput --------------------------------------------------
+// Форк сводит ВСЕ пути набора к этим двум колбэкам:
+//   * H.245 UserInputIndication(signal) -> H323Connection::OnUserInputTone
+//     (h323.cxx:5525) -> endpoint.OnUserInputTone (наш);
+//   * in-band RFC 4733 -> H323Connection::OnUserInputInlineRFC2833
+//     (h323.cxx:5565) -> тот же OnUserInputTone;
+//   * H.245 alphanumeric -> OnUserInputString (h323.cxx:5519) -> наш.
+// Поэтому переопределения EndPoint покрывают и терминал, который шлёт тоны, и
+// терминал, который шлёт набор строкой (Polycom так умеет по умолчанию).
+void McuEndPoint::OnUserInputTone(H323Connection &connection, char tone,
+                                  unsigned duration, unsigned /*logicalChannel*/,
+                                  unsigned /*rtpTimestamp*/) {
+  // e_signalUpdate приходит как ТОН ПРОБЕЛА (h323.cxx:5535): это «текущий тон
+  // ещё идёт», обновление длительности, а не новый набор. Базовая реализация
+  // фильтрует его сама; мы базовую не зовём (см. ниже), поэтому фильтр обязан
+  // быть здесь — иначе на одном нажатии в историю пойдёт дублирующая запись.
+  if (tone == ' ') return;
+  emit_dtmf_event(connection, PString(tone), "tone", duration);
+  // БАЗОВУЮ реализацию (h323ep.cxx:3195) не зовём осознанно: она выбрасывает
+  // duration и разворачивает тон в OnUserInputString, т.е. тот же тон ушёл бы
+  // в Python ВТОРЫМ событием с потерей длительности.
+}
+
+void McuEndPoint::OnUserInputString(H323Connection &connection,
+                                    const PString &value) {
+  if (value.IsEmpty()) return;
+  emit_dtmf_event(connection, value, "string", 0);
+}
+
 namespace {
 
 // --- Команды из Python -------------------------------------------------------
@@ -599,6 +674,52 @@ if (cmd == "pcm.out") {
   if (bytes.empty()) return;
   if (!pcm_send(token, bytes.data(), bytes.size()))
     emit_error("pcm.out: нет encoder-канала для " + token);
+  return;
+}
+if (cmd == "dtmf.send") {
+  // DTMF в вызов. Строку по тонам раздаёт САМА H323Plus: SendUserInput в
+  // режиме AsTone итерирует по символам и шлёт каждый отдельным H.245 signal
+  // (h323.cxx, ветка SendUserInputAsTone), поэтому свой цикл с таймингами тут
+  // только навредил бы (PJSIP-практика «по тону + pump» здесь не нужна: у
+  // H.245 нет общего event-кольца, PDU пишется сразу).
+  const std::string digits = msg.count("digits") ? msg["digits"] : "";
+  if (digits.empty()) {
+    emit_error("dtmf.send: пустые digits");
+    return;
+  }
+  // Тот же алфавит, что у Python (mcuclient/dtmf.py::DTMF_DIGITS). Профиль
+  // терминала допускает и буквенные тона A-D, их и принимаем; всё остальное —
+  // ошибка, а не «тихо пропущенный символ»: оператор должен видеть, что МСУ
+  // набор не принял, а не молча недобрал часть PIN.
+  static const std::string kDigits = "0123456789*#ABCD";
+  for (char c : digits) {
+    if (kDigits.find(c) == std::string::npos) {
+      emit_error(std::string("dtmf.send: недопустимый тон '") + c + "'");
+      return;
+    }
+  }
+  if (g_ep == nullptr) {
+    emit_error("dtmf.send: эндпоинт не поднят");
+    return;
+  }
+  const std::string h323_token = h323_token_of(token);
+  if (h323_token.empty()) {
+    emit_error("dtmf.send: неизвестный токен " + token);
+    return;
+  }
+  // Эталонный путь (samples/simple/main.cxx:283-285): FindConnectionWithLock →
+  // SendUserInput → Unlock. SendUserInput НЕ лоит само соединение (в отличие
+  // от AnsweringCall, где мы зовём напрямую именно из-за самодедлока), а лок
+  // держит соединение живым на время записи PDU — голый указатель из реестра
+  // здесь мог бы стать висящим, если вызов очищается параллельно.
+  H323Connection *conn = g_ep->FindConnectionWithLock(to_pstr(h323_token));
+  if (conn == nullptr) {
+    emit_error("dtmf.send: соединение не найдено: " + token);
+    return;
+  }
+  conn->SendUserInput(to_pstr(digits));
+  conn->Unlock();
+  log_verbose("DTMF: отправлено \"" + digits + "\" token=" + token);
   return;
 }
 emit_error("неизвестная команда: " + cmd);
@@ -738,6 +859,30 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
   endpoint.AddAllCapabilities(0, P_MAX_INDEX, "*");
   endpoint.RemoveCapability(H323Capability::e_ExtendVideo);
   endpoint.RemoveCapability(H323Capability::e_Video);
+
+  // --- DTMF: возможности UserInput и режим отправки --------------------------
+  // Wildcard "*" возможностей UserInput НЕ объявляет:
+  // H323Capabilities::AddAllCapabilities (h323caps.cxx:3362) перебирает ключи
+  // фабрики МЕДИА-ФОРМАТОВ, а набор тонов описывает отдельный класс
+  // H323_UserInputCapability; его AddAllCapabilities (h323caps.cxx:3148:
+  // hookflash, basicString, SignalToneH245, SignalToneRFC2833) вызывается
+  // ТОЛЬКО из H323EndPoint::AddAllUserInputCapabilities (h323ep.cxx:1184), а её
+  // внутри библиотеки не зовёт никто (проверено grep по h323*.cxx форка
+  // v1_28_0). Связка OnSetLocalUserInputCapabilities (h323.cxx:4287) ничего не
+  // добавляет, а лишь снимает RFC2833/H.249. Итого без этой строки мы выходим
+  // в TCS БЕЗ UserInput, и терминал по спецификации вправе не слать
+  // UserInputIndication вообще — DTMF не появится ни при каких настройках.
+  // Эталон samples/simple/main.cxx:457 делает ровно этот вызов.
+  endpoint.AddAllUserInputCapabilities(0, P_MAX_INDEX);
+
+  // Режим отправки. Дефолт форка — SendUserInputAsString (h323ep.cxx:767):
+  // любой наш набор ушёл бы как H.245 alphanumeric, тогда как IVR и терминалы
+  // (Polycom по умолчанию) ждут signal — DTMF-тон. Ставим AsTone явно;
+  // GetRealSendUserInputMode (h323.cxx:5238) при пире, который тоны не
+  // понимает, САМ деградирует Tone -> String, т.е. переключение безопасно для
+  // старых собеседников. Принятый набор при этом не зависит от нашего
+  // «режима отправки» — приём см. McuEndPoint::OnUserInputTone/String.
+  endpoint.SetSendUserInputMode(H323Connection::SendUserInputAsTone);
 
   // Широкополосное аудио — в начало таблицы, НО с фильтром по реальному
   // размеру кадра. Plugin-G.722 в апстриме объявляет кадр в 1 мс

@@ -123,6 +123,13 @@ class Collector:
             time.sleep(0.05)
         return None
 
+    def all_of(self, name: str) -> List[Dict[str, Any]]:
+        """Все события с именем name. DTMF-строка приходит ПО ОДНОМУ тону за
+        раз (SendUserInputAsTone раздаёт её по символам), поэтому для сверки
+        набора нужен список, а не первое совпадение."""
+        with self._lock:
+            return [dict(d) for n, d in self._events if n == name]
+
     def dump(self) -> str:
         with self._lock:
             return " | ".join(f"{n}{d}" for n, d in self._events)
@@ -233,6 +240,41 @@ def pump_tone(client: H323dClient, token: str, seconds: float) -> bool:
         if off >= prefill:
             time.sleep(MEDIA_FRAME_MS * 0.75 / 1000.0)
     return True
+
+
+def dtmf_digits(col: Collector, token: str) -> str:
+    """Склейка принятых тонов токена.
+
+    Строка приходит НЕ одним событием: SendUserInput в режиме AsTone раздаёт её
+    по символам (h323.cxx), и каждый символ — отдельный UserInputIndication,
+    т.е. отдельное ``dtmf.in``. Сверять «первое совпадение» было бы ошибкой.
+    """
+    return "".join(
+        str(d.get("digits", "")) for d in col.all_of("dtmf.in")
+        if str(d.get("token", "")) == token
+    )
+
+
+def is_subseq(hay: str, needle: str) -> bool:
+    """Символы needle идут в hay в том же порядке (дубли между ними допустимы).
+
+    Подстрока требовалась бы зря: между наборами пир вправе прислать что-то
+    ещё, а часть событий дублируется (длящийся тон). Порядок — единственная
+    смысловая инвариантность DTMF-посылки (PIN «1234» ≠ «4321»).
+    """
+    it = iter(hay)
+    return all(ch in it for ch in needle)
+
+
+def wait_dtmf(col: Collector, token: str, expect: str, timeout: float) -> str:
+    """Ждёт все символы expect в ленте dtmf.in; возвращает ленту целиком."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        got = dtmf_digits(col, token)
+        if is_subseq(got, expect):
+            return got
+        time.sleep(0.1)
+    return dtmf_digits(col, token)
 
 
 def wait_wav(path: Path, timeout: float = 8.0):
@@ -402,6 +444,44 @@ def main() -> int:
             rms_b >= MEDIA_RMS_MIN,
             "B: тон доехал по RTP (RMS pcm.in)",
             "rms=" + format(rms_b, ".0f") + " (мин " + format(MEDIA_RMS_MIN, ".0f") + ")",
+        )
+
+        # --- DTMF: H.245 UserInput в живом вызове ---------------------------
+        # Юниты tests/test_h323_dtmf.py доказывают разбор и проводку, но не
+        # то, что UserInputIndication реально улетает PDU и принимается пиром.
+        # Это видно только в звонке: без AddAllUserInputCapabilities пир по
+        # спецификации вправе не слать набор вовсе, и панель осталась бы пустой
+        # при зелёных юнитах.
+        #
+        # Проверка намерена на подпоследовательности и принимает и via=tone
+        # (H.245 signal), и via=string (alphanumeric): конкретный транспорт
+        # выбирает GetRealSendUserInputMode по возможностям ДРУГОЙ стороны, а
+        # нам важно, что набранный набор доехал целиком и в правильном порядке.
+        probe = "12#7"
+        ck.check(clients["A"].send_dtmf(tok_a, probe),
+                 f"A: dtmf.send({probe!r}) отправлен")
+        got_b = wait_dtmf(collectors["B"], tok_b, probe, args.wait)
+        ck.check(
+            is_subseq(got_b, probe),
+            "B: приняты тоны, набранные на A (H.245 UserInput)",
+            f"ожидались {probe!r}, лента B: {got_b!r}",
+        )
+        evs_b = [d for d in collectors["B"].all_of("dtmf.in")
+                 if str(d.get("token", "")) == tok_b]
+        ck.check(
+            bool(evs_b) and all(str(d.get("via", "")) in ("tone", "string")
+                                for d in evs_b),
+            "B: каждое dtmf.in несёт via (tone|string)",
+            ",".join(sorted({str(d.get("via", "")) for d in evs_b})) or "пусто",
+        )
+        # Обратное направление обязательно: терминалы шлют signal и alphanumeric
+        # по-разному, поэтому «работает в одну сторону» совместимостью не является.
+        ck.check(clients["B"].send_dtmf(tok_b, "*9"), "B: dtmf.send('*9') отправлен")
+        got_a = wait_dtmf(collectors["A"], tok_a, "*9", args.wait)
+        ck.check(
+            is_subseq(got_a, "*9"),
+            "A: приняты тоны, набранные на B",
+            f"ожидались '*9', лента A: {got_a!r}",
         )
 
         # --- сброс ---

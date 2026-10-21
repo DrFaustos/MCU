@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
 from .call_registry import CallRegistry
+from .dtmf import normalize_digits
 from .h323d_client import H323dClient, H323dEvent
 from .log import get_logger
 from .models import CallState, EventBus, Participant, Room
@@ -153,6 +154,11 @@ class H323Endpoint:
         self._audio: Optional[Any] = None
         self._audio_mix = bool(audio_mix)
         self._mix_rate = int(mix_sample_rate) if mix_sample_rate else None
+        #: Журнал DTMF комнаты (:class:`~mcuclient.dtmf_service.DtmfService`).
+        #: Ставится из run.py через :meth:`set_dtmf_service`. Он НЕ заводится
+        #: здесь: журнал обязан быть один на SIP и H.323, а его владелец —
+        #: SIP-движок (см. docstring :meth:`DtmfService.record_external`).
+        self._dtmf: Optional[Any] = None
 
     # --- комната (через реестр, а не сохранённой ссылкой) ---
     @property
@@ -295,6 +301,85 @@ class H323Endpoint:
             log.warning("H.323: не удалось отправить команду вызова на %s", address)
         return ok
 
+    def set_dtmf_service(self, service: Any) -> None:
+        """Подключить журнал DTMF комнаты (вызывает run.py).
+
+        Без него принятые хостом тоны остаются только в его логе: оператор в
+        панели видит H.323-участника в комнате, но не видит, что тот набрал PIN
+        в IVR. Сервис намеренно НЕ создаётся здесь — журнал обязан быть один на
+        SIP и H.323, а его владелец :class:`~mcuclient.sip_engine.SipEngine`
+        (см. :meth:`~mcuclient.dtmf_service.DtmfService.record_external`).
+        """
+        self._dtmf = service
+
+    def send_dtmf(self, participant: Participant, digits: str) -> bool:
+        """Передать тоны в H.323-вызов (команда хосту ``dtmf.send``).
+
+        Отправка отличается от pjsua2: строка уходит ОДНОЙ командой, а на
+        отдельные тоны её разбивает хост (``SendUserInput`` в режиме AsTone,
+        h323.cxx). Прокачивать цикл событий не нужно — у H.245 нет общего
+        event-кольца, PDU пишется сразу.
+
+        False — если тонов нет, хост не подключён или команда не доставлена.
+        Последнее важно: ``record_external`` вызывается только ПОСЛЕ доставки,
+        иначе в журнале появилась бы отправка, которой не было (тот же порядок,
+        что у ``hangup``/``answer``, где недоставленность пишется в WARNING).
+        """
+        tones = normalize_digits(digits)
+        if not tones:
+            log.warning("H.323: участнику %s отправлять нечего (пустые тоны)",
+                        participant.id)
+            return False
+        token = self.token_of(participant)
+        if self._client is None or not token:
+            log.warning(
+                "H.323: тоны участнику %s не отправлены — хост mcu_h323d не "
+                "подключён (сокет %s)",
+                participant.id, self._socket_path,
+            )
+            return False
+        if not self._client.send_dtmf(token, tones):
+            log.warning("H.323: dtmf.send не доставлен (участник %s, токен %s)",
+                        participant.id, token)
+            return False
+        if self._dtmf is not None:
+            self._dtmf.record_external(
+                digits=tones, direction="out", participant_id=participant.id,
+                peer=getattr(participant, "remote_uri", "") or "",
+                method="h323",
+            )
+        log.info("H.323: тоны \"%s\" отправлены участнику %s", tones, participant.id)
+        return True
+
+    def handle_dtmf(self, participant_id: int, digits: str) -> bool:
+        """Точка входа для SIP-движка: тоны в H.323-вызов по id участника.
+
+        Пары к :meth:`handle_call_op`. Возвращает False, если участник не наш,
+        — тогда движок зовёт SIP-путь (тот же контракт, что у accept/reject).
+        """
+        participant = self.find_by_id(participant_id)
+        if participant is None:
+            return False
+        return self.send_dtmf(participant, digits)
+
+    def send_dtmf_all(self, digits: str) -> int:
+        """Тоны во ВСЕ активные H.323-вызовы (сценарий «PIN на весь зал»).
+
+        Возвращает число вызовов, получивших тоны, а не bool: вызывающий
+        (``SipEngine.send_dtmf``) складывает результат с SIP-рассылкой, и ему
+        важно, что H.323-плечо вообще дало шанс на «True», а не молча вернуло
+        False при пустом списке.
+        """
+        tones = normalize_digits(digits)
+        if not tones:
+            return 0
+        sent = 0
+        # Копируем список: участник может отключиться во время обхода.
+        for p in list(self._calls.values()):
+            if self.send_dtmf(p, tones):
+                sent += 1
+        return sent
+
     def token_of(self, participant: Participant) -> str:
         """Токен хоста для участника (пустая строка, если заведён без токена)."""
         for token, p in self._calls.items():
@@ -425,6 +510,40 @@ class H323Endpoint:
                         p.audio_codec = codec
                     elif kind == "video":
                         p.video_codec = codec
+        elif name == "dtmf.in":
+            token = str(data.get("token", "") or "")
+            digits = str(data.get("digits", "") or "")
+            if not digits:
+                # Пустая строка от хоста — «данных нет», писать в журнал нечего
+                # (то же правило, что введено для пустого codec в call.media).
+                return
+            p = self._calls.get(token)
+            via = str(data.get("via", "") or "").lower()
+            # method различает два способа набора: "h323" — тон (H.245 signal
+            # либо in-band RFC 4733, см. emit_dtmf_event), "h323-string" —
+            # строкой (H.245 alphanumeric). Для оператора это не украшение:
+            # Polycom по умолчанию шлёт alphanumeric, и по журналу видно, КАК
+            # терминал передал набор — иначе два разных терминала выглядели бы
+            # одинаково при разном поведении IVR.
+            method = "h323-string" if via == "string" else "h323"
+            if self._dtmf is None:
+                # Тон принят, но в журнал не попал. Пишем WARNING, а не молчим:
+                # «терминал набрал PIN, а журнал пуст» иначе выглядит как
+                # потерянный DTMF в стеке H.323, а не как незаполненная проводка.
+                log.warning(
+                    "H.323: тон %r принят (токен %s), но журнал DTMF не "
+                    "подключён — вызов set_dtmf_service не выполнен",
+                    digits, token,
+                )
+            else:
+                self._dtmf.record_external(
+                    digits=digits, direction="in",
+                    participant_id=getattr(p, "id", None),
+                    peer=getattr(p, "remote_uri", "") or str(
+                        data.get("alias", "") or ""),
+                    method=method,
+                )
+            log.info("H.323: принят набор %r (токен %s, %s)", digits, token, via or "?")
         elif name == "ready":
             try:
                 self._port = int(data.get("port", self._port))

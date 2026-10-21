@@ -44,6 +44,12 @@ EVENT_MAP: dict[str, str] = {
     "call.connected": "call.state",
     "call.disconnected": "call.state",
     "call.media": "call.media",
+    # Тон/строка, принятые хостом (H.245 UserInputIndication либо in-band
+    # RFC 4733). В шину уходит под СВОИМ именем, а не под "dtmf.digits":
+    # ``dtmf.digits`` — формат журнала комнаты (mcuclient/dtmf.py), и владеть
+    # им обязан владелец журнала (DtmfService). Иначе у панели появляются два
+    # источника одних и тех же тонов с разными наборами полей.
+    "dtmf.in": "h323.dtmf",
 }
 
 
@@ -67,6 +73,16 @@ class HostEvent:
     codec: str = ""
     sample_rate: int = 0
     direction: str = ""
+    #: --- принятые тоны (событие ``dtmf.in``) --------------------------------
+    #: набранный тон или строка целиком (для H.245 alphanumeric)
+    digits: str = ""
+    #: ``tone`` (H.245 signal либо in-band RFC 4733 — различить в форке нельзя,
+    #: оба стекаются в H323Connection::OnUserInputTone) либо ``string``
+    #: (H.245 alphanumeric). Поле называется via, а не method: см.
+    #: emit_dtmf_event в tools/h323d/main.cpp.
+    via: str = ""
+    #: длительность тона, мс (0 — не передана)
+    duration_ms: int = 0
 
 
 @dataclass
@@ -110,6 +126,13 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         sample_rate = int(obj.get("rate", 0) or 0)
     except (TypeError, ValueError):
         sample_rate = 0
+    # Длительность тона (dtmf.in). Для H.245 alphanumeric её не бывает вовсе,
+    # поэтому 0 означает «не передана», а не «тон нулевой». Битое значение —
+    # тоже 0: разбор событий не имеет права ронять читателя IPC.
+    try:
+        duration_ms = int(obj.get("duration_ms", 0) or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
     return HostEvent(
         kind=kind,
         token=str(obj.get("token", "") or ""),
@@ -124,6 +147,9 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         codec=str(obj.get("codec", "") or ""),
         sample_rate=sample_rate,
         direction=str(obj.get("direction", "") or ""),
+        digits=str(obj.get("digits", "") or ""),
+        via=str(obj.get("via", "") or ""),
+        duration_ms=duration_ms,
     )
 
 
@@ -155,6 +181,16 @@ def event_to_bus_payload(ev: HostEvent) -> dict[str, Any]:
         payload["rate"] = ev.sample_rate
     if ev.direction:
         payload["direction"] = ev.direction
+    # Принятые тоны (dtmf.in). Пустые поля опускаем: «тон не набран» обязан
+    # отличаться от «набран тон» (то же правило, что введено для codec).
+    # duration_ms == 0 в payload не едет — у H.245 alphanumeric длительности
+    # не бывает вовсе, 0 здесь означает «данных нет», а не «нулевой тон».
+    if ev.digits:
+        payload["digits"] = ev.digits
+    if ev.via:
+        payload["via"] = ev.via
+    if ev.duration_ms:
+        payload["duration_ms"] = ev.duration_ms
     return payload
 
 

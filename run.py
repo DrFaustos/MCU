@@ -303,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
         # Чтобы accept/reject/hangup из UI/web доезжали до H.323-хоста
         # (у этих участников нет pjsua2-объекта, CallService их не видит).
         engine.set_h323_native(h323_native)
+        # А чтобы тоны, набранные аппаратным терминалом, попадали в ОБЩИЙ журнал
+        # DTMF комнаты: у H.323-вызова нет pjsua2-колбэков on_dtmf_event, тон
+        # приходит событием хоста dtmf.in. Без этой строки журнал H.323-вызова
+        # пуст, и «набрал ли терминал PIN» по МСУ не проверяется вовсе.
+        h323_native.set_dtmf_service(engine.dtmf_service)
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         report_fatal("Ошибка инициализации движка (SIP/медиа).")

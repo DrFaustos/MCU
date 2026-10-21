@@ -2124,13 +2124,45 @@ class SipEngine:
         """Последние DTMF-посылки комнаты (входящие и исходящие)."""
         return self._dtmf.history
 
+    @property
+    def dtmf_service(self):
+        """Сервис DTMF комнаты.
+
+        Отдаётся наружу (run.py) не для отправки, а чтобы нативный H.323-контур
+        записывал свои тоны в ТОТ ЖЕ журнал: у H.323-участников нет объекта
+        pjsua2 ``Call``, поэтому их тоны в ``on_dtmf_event`` не приходят вовсе.
+        Второй журнал заводить нельзя — расходящиеся списки «МСУ принял» хуже
+        одного с пробелом (см. ``DtmfService.record_external``).
+        """
+        return self._dtmf
+
     def send_dtmf(self, digits, participant_id=None, method: str = "auto") -> bool:
         """Отправить DTMF-тоны: конкретному участнику или всем (IVR/PIN).
 
         :param method: ``auto`` — RFC 2833 с откатом на SIP INFO; можно
             задать ``rfc2833`` или ``sip-info`` явно.
+        :returns: True, если тоны переданы хотя бы одному вызову.
+
+        H.323-участники роутятся на ``mcu_h323d`` (там H.245 UserInput, а не
+        RTP telephone-event). Без роутинга ``_targets`` не нашёл бы у такого
+        участника ``_call`` и вернул бы «нет активного вызова»: панель показала
+        бы ошибку для ЗВОНЯЩЕГО терминала, а не для адресата.
         """
-        return self._dtmf.send_dtmf(participant_id, digits, method)
+        native = self._h323_native
+        if participant_id is not None:
+            if native is not None and native.owns(participant_id):
+                return bool(native.handle_dtmf(participant_id, digits))
+            return self._dtmf.send_dtmf(participant_id, digits, method)
+        # «Всем» (PIN в IVR на весь зал): SIP-вызовы и H.323-вызовы — это разные
+        # транспорты, поэтому обход одного второй не заменяет. Берём OR: тоны
+        # считаются доставленными, если их принял хоть один адресат.
+        ok = self._dtmf.send_dtmf(None, digits, method)
+        if native is not None:
+            try:
+                ok = bool(native.send_dtmf_all(digits)) or ok
+            except Exception:  # noqa: BLE001 — H.323 не роняет SIP-рассылку
+                log.exception("H.323: рассылка тонов в H.323-вызовы не выполнена")
+        return ok
 
     def _on_dtmf_digit(self, call, prm) -> None:  # pragma: no cover
         """Входящий DTMF-тон (onDtmfDigit)."""
