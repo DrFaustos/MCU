@@ -431,6 +431,11 @@ function renderTiles() {
         <div class="avatar" style="${p.isMe ? '' : 'display:none'}">${esc((p.label || '?').slice(0, 1).toUpperCase())}</div>
         <div class="name">${esc(p.label)}${p.isMe ? ' (вы)' : ''}</div>
         <div class="kind">браузер</div>
+        ${p.isMe ? '' : `<div class="btns" style="position:absolute;right:8px;bottom:8px;z-index:2">
+          <button data-act="waudio" data-id="${esc(p.id)}">${p.muted ? 'Вкл звук' : 'Мут'}</button>
+          <button data-act="wvideo" data-id="${esc(p.id)}">${p.video_muted ? 'Вкл видео' : 'Выкл видео'}</button>
+          <button data-act="wrename" data-id="${esc(p.id)}">Имя</button>
+        </div>`}
       </div>`;
     }
     return `
@@ -697,9 +702,40 @@ $('chatText').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat
 $('grid').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
-  const id = Number(btn.dataset.id);
-  const map = { accept: () => api('/accept', 'POST', { id }), reject: () => api('/reject', 'POST', { id }), hangup: () => api('/hangup', 'POST', { id }), mute: () => api('/mute', 'POST', { id, audio: !(sipParticipants.find(p => p.id === id) || {}).muted }) };
-  act(map[btn.dataset.act]);
+  // id у двух народов тайлов РАЗНОЙ формы: у SIP-вызова он числовой, у
+  // веб-участника — строка вида 'web-1'. Единый Number(...) на обоих превращал
+  // браузерный id в NaN, а в JSON — в null; сервер честно отвечал 400
+  // «Некорректный participant id», и кнопка выглядела бы сломанной навсегда.
+  // Поэтому id читается как есть, а число берётся только для SIP-действий.
+  const action = btn.dataset.act;
+  const sid = btn.dataset.id;
+  const id = Number(sid);
+  // Поля берутся СЫРЫМИ из статуса (audio_enabled/video_enabled/name), а не
+  // muted/video_muted/label: те существуют только в локальном маппинге внутри
+  // renderTiles и досюда не видны. Ошибка стоила бы вечно неверного подписанного
+  // состояния: undefined в `!!web.muted` дал бы «включить» даже при включённом
+  // звуке, т.е. панель врала бы до всякого запроса.
+  const web = webParticipants.find(p => p.id === sid) || {};
+  const map = {
+    accept: () => api('/accept', 'POST', { id }),
+    reject: () => api('/reject', 'POST', { id }),
+    hangup: () => api('/hangup', 'POST', { id }),
+    mute: () => api('/mute', 'POST', { id, audio: !(sipParticipants.find(p => p.id === id) || {}).muted }),
+    // Веб-участник: id строкой и обязательно названо, ЧТО менять — сервер
+    // отвечает 400, если опущены и audio, и video («успех, которого не было»
+    // был дырой ровно того же класса).
+    waudio: () => api('/conference/media', 'POST', { id: sid, audio: web.audio_enabled !== true }),
+    wvideo: () => api('/conference/media', 'POST', { id: sid, video: web.video_enabled !== true }),
+    wrename: async () => {
+      const name = prompt('Новое имя участника', web.name || '');
+      // Отмена диалога — НЕ попытка переименовать: prompt() на «Отмену» даёт
+      // null, а пустое имя сервер отвергает 400. Без этого отказа оператор
+      // получил бы alert за действие, которого не совершал.
+      if (name === null) return;
+      await api('/conference/rename', 'POST', { id: sid, name: name });
+    },
+  };
+  act(map[action]);
 });
 
 renderDtmfKeys(); refresh(); loadDevices(); loadChat(); loadDtmf(); connectEvents();
