@@ -47,7 +47,7 @@
 | Запрос | Что показывает |
 |--------|----------------|
 | `GET /api/conference` | список веб-участников (`kind=web`) |
-| `GET /api/webrtc/sessions` | активные сессии и их `role` |
+| `GET /api/webrtc/sessions` | активные сессии, их `role` и `participant` (`null` — анонимный offer) |
 | `GET /api/status` | поля `webrtc_available`, `webrtc_sessions`, `conference_participants` |
 | лог сервера (`mcu-client.log`) | строки `mcuclient.webrtc`, `mcuclient.sfu` |
 

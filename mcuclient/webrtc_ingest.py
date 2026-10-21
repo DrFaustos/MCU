@@ -58,7 +58,19 @@ class SessionInfo:
     video_frames: int = 0
     audio_frames: int = 0
     created_at: float = field(default_factory=time.time)
-    remote: str = ""
+    #: id участника конференции, к которому относится сессия, либо ``None`` для
+    #: анонимного offer'а. Отдельное поле, а НЕ ``_MediaRelay.publish_id``: у
+    #: анонима publish_id равен id СЕССИИ (`webrtc-<N>`) ровно затем, чтобы он не
+    #: занял канал живого участника, — наружу такой «участник» отдавать нельзя:
+    #: оператор вызвал бы выдворение с id, которого нет в реестре конференции, и
+    #: получил бы штатное ok:false (заперто tests/test_webrtc_ingest.py).
+    #:
+    #: Поле `remote` здесь жило с первого коммита WebRTC-ingest (b972884) и за
+    #: всю историю проекта не было присвоено НИ РАЗУ: наружу оно уходило вечно
+    #: пустой строкой, т.е. «адрес неизвестен» выглядело штатным значением.
+    #: Убрано вместо «до лучших времён»: настоящее значение из aiortc отсюда не
+    #: добывается, а вечно-пустое поле — это обещание API, которое никто не держит.
+    participant: Optional[str] = None
 
 
 def _default_aiortc() -> Any:
@@ -310,6 +322,8 @@ class WebRTCManager:
         sid = f"webrtc-{self._counter}"
         info = SessionInfo(id=sid)
         info.role = role
+        # Исходный participant, а НЕ publish_id релея: см. docstring SessionInfo.
+        info.participant = participant
         pc = mod.RTCPeerConnection(self._pc_config())
         # publish_id — id участника конференции (совпадает с тем, на
         # который подписываются зрители); иначе id сессии.
@@ -415,7 +429,7 @@ class WebRTCManager:
                 {
                     "id": s.id, "state": s.state, "role": s.role,
                     "video_frames": s.video_frames, "audio_frames": s.audio_frames,
-                    "created_at": s.created_at, "remote": s.remote,
+                    "created_at": s.created_at, "participant": s.participant,
                 }
                 for s in self._sessions.values()
             ]

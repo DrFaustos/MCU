@@ -127,7 +127,7 @@ GET:
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
 | `/api/video.mjpeg` | MJPEG-поток (501, если нет кодировщика JPEG) |
 | `/api/conference` | `{participants:[{id,name,kind,video,audio}], webrtc:bool}` — конференция и доступен ли WebRTC |
-| `/api/webrtc/sessions` | `{sessions:[...], webrtc:bool}` — живые WebRTC-сессии панели |
+| `/api/webrtc/sessions` | `{sessions:[...], webrtc:bool}` — живые WebRTC-сессии панели. Каждая сессия: `id`, `state`, `role`, счётчики кадров и **`participant`** — id участника конференции, которому она принадлежит, либо `null` для анонимного offer'а. Поле сознательно **не** взято из `publish_id` релея: у анонима тот равен id сессии (`webrtc-<N>`), и отдать его наружу означало бы показать «участника», которого нет в реестре, — выдворение с таким id вернуло бы штатное `{"ok": false}` (те же пространства имён id, что разведены в `/api/webrtc/offer`). Раньше вместо этого отдавалось поле `remote`, которое не присваивалось ни разу за всю историю модуля: наружу оно уходило вечно пустой строкой, т.е. «адрес неизвестен» выглядело штатным значением. Заперто `tests/test_webrtc_ingest.py` |
 | `/api/web_recording` | статус записи веб-конференции (`{recording, file?}`) |
 | `/api/mediasoup` | `{available, stats}` — состояние SFU-sidecar (`null`-статистика, если не поднят) |
 

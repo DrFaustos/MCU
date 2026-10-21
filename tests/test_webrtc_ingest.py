@@ -403,3 +403,128 @@ def test_anonymous_publisher_is_still_heard_by_participants():
     item = mix.mixed_for(alice.id)
     assert item is not None and _amp(item[1]) > 0, (
         "анонимный публикатор пропал из микса участника")
+
+
+# --- сводка обязана называть участника: без этого сессию не опознать --------
+
+
+def test_session_summary_names_the_participant_it_carries():
+    """`GET /api/webrtc/sessions` обязан показывать, ЧЬЯ это сессия.
+
+    Поля сводки (`id`, `state`, `role`, счётчики) не отвечают оператору на
+    вопрос «чья». Связь «сессия ↔ участник» существовала, но жила внутри
+    `_MediaRelay.publish_id`, т.е. была видна только механизму закрытия
+    (`close_for_participant`) и наружу не отдавалась нигде. Замер 2026-10-21:
+    в `sessions()[0]` нет ни `participant`, ни чего-либо подобного. Цена:
+    оператор видит сессию, пережившую обрыв или выдворение, и не может сказать,
+    чья она, — точечно закрыть её нечем.
+    """
+    bus = MediaBus()
+    conf = Conference(bus=bus)
+    alice = conf.join("Алиса")
+
+    fake = _FakeAiortc()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    m.handle_offer("v=0", role="publish", participant=alice.id)
+
+    summary = m.sessions()[0]
+    assert summary.get("participant") == alice.id, (
+        "сводка сессии не называет участника: оператор не видит, какая сессия "
+        "чья, и не может закрыть её точечно")
+
+
+def test_anonymous_session_does_not_claim_its_own_id_as_participant():
+    """Анонимная сессия обязана показывать «участника нет», а не свой id.
+
+    Ловушка, из-за которой кейс существует. Соблазн взять уже готовое
+    `publish_id` релея — и оно врал бы для анонима: у offer'а без `participant`
+    `publish_id` = id СЕССИИ (`webrtc-<N>`) ровно затем, чтобы аноним не занял
+    канал живого участника (см.
+    `test_anonymous_session_does_not_borrow_participant_channel`). Оператор
+    увидел бы «участника webrtc-1», выдворение ушло бы с этим id на
+    `/api/conference/leave` и вернуло штатное `ok: false` — ложь о составе
+    комнаты в том самом пространстве имён id, которое разводят этим тестом.
+    """
+    m = WebRTCManager(bus=MediaBus(), aiortc_module=_FakeAiortc())
+    sid = m.handle_offer("v=0", role="publish")["session"]
+
+    summary = m.sessions()[0]
+    assert "participant" in summary, (
+        f"у сводки нет поля participant (есть {sorted(summary)}): анонима "
+        "нечем отличить от сессии участника")
+    assert summary["participant"] is None, (
+        "анонимная сессия выдала участником свой id "
+        f"{summary['participant']!r}: id сессии {sid!r} не бывает id "
+        "участника конференции")
+
+
+def test_viewer_session_names_the_participant_it_serves():
+    """Зрительская сессия — того же человека, что и его публикация.
+
+    Иначе браузер одного участника выглядит как две посторонние сессии, и
+    разбираться с залипшим браузером приходится гаданием.
+    """
+    bus = MediaBus()
+    conf = Conference(bus=bus)
+    bob = conf.join("Боб")
+
+    m = WebRTCManager(bus=bus, aiortc_module=_FakeAiortc())
+    m.handle_offer("v=0", role="publish", participant=bob.id)
+    m.handle_offer("v=0", role="viewer", participant=bob.id, subscribe=[])
+
+    got = sorted(s.get("participant") or "?" for s in m.sessions())
+    assert got == [bob.id, bob.id], (
+        f"публикация и просмотр одного человека не помечены его id: {got}")
+
+
+def test_summary_and_close_by_participant_agree():
+    """Сводка и закрытие по участнику обязаны смотреть в одну связь.
+
+    `participant` в сводке — ВТОРАЯ копия истины о том, какая сессия чья;
+    первая — `_MediaRelay.publish_id`, по которой ищет `close_for_participant`.
+    Копии обязаны сходиться: закрыто ровно то, что показано. Разъезд ловится
+    здесь, а не превращается в «оператор закрыл не того».
+    """
+    bus = MediaBus()
+    conf = Conference(bus=bus)
+    a = conf.join("А").id
+    b = conf.join("Б").id
+
+    fake = _FakeAiortc()
+    m = WebRTCManager(bus=bus, aiortc_module=fake)
+    m.handle_offer("v=0", role="publish", participant=a)
+    m.handle_offer("v=0", role="publish")            # аноним
+    m.handle_offer("v=0", role="publish", participant=b)
+
+    shown = [s["id"] for s in m.sessions() if s.get("participant") == b]
+    assert len(shown) == 1, f"по сводке сессий участника Б — {shown}"
+    closed = m.close_for_participant(b)
+    assert closed == len(shown), (
+        f"сводка показала {shown}, закрыто {closed}: две копии связи «сессия ↔ "
+        "участник» разошлись")
+    left = [(s["id"], s.get("participant")) for s in m.sessions()]
+    assert all(pid != b for _sid, pid in left), (
+        f"после закрытия по сводке у оставшихся сессий остался id Б: {left}")
+
+
+def test_summary_does_not_advertise_fields_nothing_fills():
+    """Сводка не имеет права обещать поле, которое никто не заполняет.
+
+    `remote` живёт в `SessionInfo` с первого же коммита WebRTC-ingest
+    (`b972884`) и за всю историю проекта не был присвоен НИ РАЗУ: греп по
+    модулю даёт объявление `remote: str = ""` и его же выдачу в `sessions()`.
+    Читателей у поля нет — панель его не читает, тесты не сверяют, docs не
+    обещают, — но наружу он уходил всегда как `""`, т.е. «адрес удалённой
+    стороны неизвестен» выглядел штатным значением. Настоящее значение из
+    aiortc отсюда не добывается, поэтому поле убрано, а не оставлено «до
+    лучших времён»: замок не даёт заводить новые вечно-пустые поля.
+    """
+    m = WebRTCManager(aiortc_module=_FakeAiortc())
+    m.handle_offer("v=0")
+
+    summary = m.sessions()[0]
+    assert "remote" not in summary, (
+        "сводка снова отдаёт `remote` — поле, которое менеджер никогда не "
+        "заполняет: пустая строка читается клиентом как настоящее значение")
+    assert "participant" in summary, (
+        "из сводки исчезло `participant` — см. кейсы выше")
