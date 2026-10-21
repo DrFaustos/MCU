@@ -654,7 +654,20 @@ int main(int argc, char **argv) {
  if (!parse_args(argc, argv, g_opts)) return 2;
 
  // PTLib: создаём процесс до H323EndPoint.
- auto *process = new HostProcess("MCU", "mcu_h323d");
+ //
+ // ОБЯЗАТЕЛЬНО статическим объектом, а не `new`: PTLib разбирает свои
+ // фабрики (PFactoryBase::FactoryMap) в статическом деструкторе libpt,
+ // который крутится в __cxa_finalize. Порядок разрушения — по стеку
+ // __cxa_atexit, поэтому владелец PProcess обязан отработать ДО выгрузки
+ // libpt. У heap-ного PProcess деструктор не вызывается никогда, и на
+ // остановке процесса PFactory<H323VideoCapability>::DestroySingletons()
+ // падает в SIGSEGV. Замерено 2026-10-20 на стенд-копии main(): с
+ // `new HostProcess` остановка хоста = exit=139 при загруженных
+ // video-кодеках (h263-1998, openh264), со static — exit=0; аудио-плагины
+ // проходили и так (у H323AudioCapability-фабрики синглтонов нет).
+ // Каноническая форма — макрос PCREATE_PROCESS, но он объявляет main() и
+ // несовместим с нашим разбором argv до старта PProcess.
+ static HostProcess process("MCU", "mcu_h323d");
  (void)process;
 
  g_server = std::make_unique<mcu_ipc::Server>(g_opts.socket_path, handle_command);
@@ -691,8 +704,91 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
   // samples/simple/main.cxx:449 этот вызов есть; берём ту же форму.
   // Видео снимаем сразу: нативного видео-канала у хоста нет, а «предложить»
   // его в соглашении — риск, что пир выберет то, что мы не обслуживаем.
+  //
+  // Приоритет кодеков = ПОРЯДОК таблицы возможностей. Штатный рычаг —
+  // H323EndPoint::ReorderCapabilities(preferenceOrder) (h323ep.h:311 ->
+  // H323Capabilities::Reorder, h323caps.cxx:4143: table.InsertAt/RemoveAt +
+  // перестройка set), а H323Connection::SelectDefaultLogicalChannel
+  // (h323.cxx:4494) перебирает localCapabilities СТРОГО в порядке таблицы и
+  // открывает первую совпавшую (break). Без reorder первым стоит G.711:
+  // AddAllCapabilities (h323caps.cxx:3362) проходит по ключам фабрики, а обход
+  // идёт по алфавиту, поэтому при 25 возможностях Polycom RealPresence соглашал
+  // узкополосный G.711. Замер зондом cap_probe4 (2026-10-21, audio-плагины,
+  // 25 записей): до — [0] G.711-ALaw-64k, [2] G.722-64k{sw}; после reorder
+  // "G.722.1*,G.722-64k*,G.711*" — [0] G.722.1-24k{sw}, [1] G.722.1-32k{sw},
+  // [2] G.722-64k{sw}, [3] G.711-ALaw-64k, exit=0.
+  //
+  // Вызов AddAllCapabilities ровно ОДИН ("*"). Второй вызов (именно он раньше
+  // задавал приоритет) с уложенными VIDEO-плагинами рвётся в SIGSEGV внутри
+  // H323Plus: AddAllCapabilities -> FindCapability -> PrintOn ->
+  // H323CodecExtendedVideoCapability::GetFormatName печатает extCapabilities по
+  // указателю на уже удалённую возможность (замер 2026-10-20: exit=139; с
+  // audio-деревом — exit=0). Reorder второй вызов делает не нужным, а снятие
+  // видео ставим ДО reorder, чтобы Reorder не дёргал GetFormatName на
+  // video-записях.
+  //
+  // Снимаем ОБЕ видео-группы. RemoveCapability(e_Video) намеренно НЕ трогает
+  // extended video (h323caps.cxx:3947: для e_Video берутся только записи с
+  // GetSubType() != e_extendedVideoCapability), а H.239 — это как раз
+  // extendedVideoCapability. Замер зондом cap_probe4 на дереве audio+video:
+  // 35 записей -> после e_Video осталось 28, и среди них «H.239(H.263-720)»,
+  // «H.239(H.264)», «H.239 Control». Нативного видео- и контент-канала у хоста
+  // нет, поэтому оставить их в соглашении — значит разрешить пиру открыть
+  // канал, который хост не обслуживает.
   endpoint.AddAllCapabilities(0, P_MAX_INDEX, "*");
+  endpoint.RemoveCapability(H323Capability::e_ExtendVideo);
   endpoint.RemoveCapability(H323Capability::e_Video);
+
+  // Широкополосное аудио — в начало таблицы, НО с фильтром по реальному
+  // размеру кадра. Plugin-G.722 в апстриме объявляет кадр в 1 мс
+  // (#define FRAME_TIME 1000 в plugins/audio/G722/g722codec.c), и H323Plus
+  // строит по этому числу и media format (h323pluginmgr.cxx:2910:
+  // frameTime = usPerFrame/1000), и размер вызова кодека
+  // (h323pluginmgr.cxx:1144: fromLen = samplesPerFrame*2). Итог: PCM-кадр 32
+  // байта (samplesPerFrame = GetFrameTime()*GetTimeUnits(), codecs.cxx:507; лог
+  // хоста «rate=16000 buf=32»; у G.722.1-24k/32k — 20 мс, 320 сэмплов, 640) и
+  // 1000 RTP-пакетов/с = 1000 IPC-событий pcm.in/с на канал. Python-конвейер
+  // (JSON+base64+микшер) столько не тянет, PCM в encoder-кольце обсыхает, и на
+  // стенде трёх хостов тон в MCU превращался в тишину (rms 1..12 при минимуме
+  // 800, levels={1:0,2:0}, speaker=None; тот же стенд на G.711 с 20 мс — зелёный:
+  // rms 4523, докладчик определяется). У G.726-* те же 1 мс. Честные 20 мс у
+  // plugin-G.722 появляются только после правки ОПРЕДЕЛЕНИЯ плагина (её ставит
+  // scripts/install_h323plus.sh), поэтому фильтр смотрит на фактический media
+  // format, а не на имя кодека: с пропатченным плагином G.722 идёт первым, с
+  // апстримным — не поднимается и остаётся ниже G.711.
+  // Поднимать ptime постфактум через OpalMediaFormat::SetFrameTime НЕЛЬЗЯ
+  // (проверено и откачено 2026-10-20): plugin-кодек кодирует ровно свои
+  // bytesPerFrame из определения, таблица и кодек расходятся, RMS на приёмном
+  // конце просел 3767 -> 844 при формально верном темпе кадров (buf 640,
+  // rx_frames 11493 -> 554).
+  static const char * const kPreferredAudio[] = { "G.722-64k", "G.722.1", "G.711" };
+  const H323Capabilities & caps = endpoint.GetCapabilities();
+  PString preferred;
+  for (PINDEX k = 0; k < sizeof(kPreferredAudio)/sizeof(kPreferredAudio[0]); ++k) {
+    const PCaselessString want(kPreferredAudio[k]);
+    for (PINDEX i = 0; i < caps.GetSize(); ++i) {
+      const H323Capability & cap = caps[i];
+      if (cap.GetMainType() != H323Capability::e_Audio)
+        continue;
+      const PCaselessString name(cap.GetFormatName());
+      if (PCaselessString(name.Left(want.GetLength())) != want)
+        continue;
+      // Кадр < 10 мс в приоритет нельзя — см. абзац выше (GetFrameTime() в мс,
+      // т.к. GetTimeUnits() = sampleRate/1000).
+      if (cap.GetMediaFormat().GetFrameTime() < 10)
+        continue;
+      if (!preferred.IsEmpty())
+        preferred += ',';
+      preferred += name;
+    }
+  }
+  if (!preferred.IsEmpty()) {
+    endpoint.ReorderCapabilities(preferred.Tokenise(',', FALSE));
+    log_info("приоритет аудио-кодеков: " + preferred);
+  } else {
+    log_info("приоритет аудио-кодеков не менялся: широкополосных с кадром "
+             ">= 10 мс в таблице нет (останется G.711)");
+  }
   log_info("возможностей в таблице: " +
            std::to_string(endpoint.GetCapabilities().GetSize()));
 

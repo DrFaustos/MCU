@@ -252,8 +252,18 @@ def main() -> int:
         return 1
     logdir = workdir / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
-    pcm_dir = workdir / "pcm"
+    # --dump-pcm на КАЖДЫЙ хост в свой каталог: имена дампов совпадают
+    # (call-1.mic.wav / call-1.spk.wav — токен выдаёт каждый хост из своего
+    # счётчика), в общем каталоге три хоста перезаписывали бы друг друга, и
+    # цепь A→MCU→B по дампам не разложить (замер 2026-10-20: call-1.mic.wav
+    # с RMS 5059 оказался дампом терминала A, а не MCU).
+    pcm_dir = workdir / "pcm" / "MCU"
     pcm_dir.mkdir(parents=True, exist_ok=True)
+    pcm_dirs = {"MCU": pcm_dir,
+                "A": workdir / "pcm" / "A",
+                "B": workdir / "pcm" / "B"}
+    for d in pcm_dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
 
     procs: dict[str, "subprocess.Popen"] = {}
     clients: dict[str, H323dClient] = {}
@@ -268,10 +278,12 @@ def main() -> int:
         # --- три хоста -------------------------------------------------------
         # MCU отвечает сам: он принимает участников в комнату, как настоящий MCU.
         procs["MCU"] = start_host(binary, "MCU", args.port_mcu, workdir, logdir,
-                                 pcm_dir, auto_answer=True)[0]
+                                  pcm_dirs["MCU"], auto_answer=True)[0]
         # Терминалы — с ручным ответом: они лишь доживают до connected.
-        procs["A"] = start_host(binary, "A", args.port_a, workdir, logdir, pcm_dir)[0]
-        procs["B"] = start_host(binary, "B", args.port_b, workdir, logdir, pcm_dir)[0]
+        procs["A"] = start_host(binary, "A", args.port_a, workdir, logdir,
+                                pcm_dirs["A"])[0]
+        procs["B"] = start_host(binary, "B", args.port_b, workdir, logdir,
+                                pcm_dirs["B"])[0]
 
         for name in ("MCU", "A", "B"):
             sock = sock_for(name)
