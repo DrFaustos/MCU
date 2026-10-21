@@ -115,7 +115,7 @@ GET:
 | `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
-| `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`) |
+| `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`); панель читает их в журнал тонального автомата и обновляет по событию `dtmf.digits` |
 | `/api/devices/video` | `{devices:[{id,name,driver}]}` |
 | `/api/devices/audio` | `{devices:[...]}` |
 | `/api/layouts` | `{layouts:[...]}` |
@@ -144,7 +144,7 @@ POST (тело — JSON):
 | `/api/layout` | `{layout}` | сменить раскладку |
 | `/api/recording` | `{enabled?}` | запись вкл/выкл/toggle |
 | `/api/chat` | `{text, id?}` | сообщение всем или участнику |
-| `/api/dtmf` | `{digits, id?, method?}` | DTMF: участнику или всем (`id` не указывать); `method`: `auto`/`rfc2833`/`sip-info` |
+| `/api/dtmf` | `{digits, id?, method?}` | DTMF: участнику или всем (`id` не указывать); `method`: `auto`/`rfc2833`/`sip-info`. Панель зовёт его из тонального автомата (секция «Тоны набора»): адресат — список вызовов, «Всем активным» = пустой `id` |
 | `/api/camera` | `{enabled}` | камера вкл/выкл |
 | `/api/microphone` | `{enabled}` | микрофон вкл/выкл |
 | `/api/video_send` | `{enabled}` | передача видео в эфир |
@@ -375,9 +375,24 @@ LAN. TURN-сервер поднимается отдельно (coturn и т.п.
   историю, отдаётся `GET /api/dtmf`;
 * отправка: `POST /api/dtmf` или `engine.send_dtmf(digits, id=None)`.
   Без `id` тоны идут всем активным вызовам — так правильно «набрать PIN
-  в IVR для всего зала».
+  в IVR для всего зала»;
+* в панели для этого есть **тональный автомат** (секция «Тоны набора»):
+  16 кнопок (0–9, `*`, `#`, A–D — буквенные тона шлют ISDN-шлюзы и старые
+  Polycom), выбор адресата из списка вызовов и журнал последних посылок.
+  Веб-участник в адресаты не попадает: у него нет вызова, сервер ответил бы
+  409 «нет активного вызова».
+
+Значения `method` зависят от протокола вызова, а не от настройки:
+`rfc2833` / `sip-info` — SIP, `h323` / `h323-string` — H.323 (H.245 UserInput,
+см. `docs/H323_STATUS.md`). Для H.323-участника `method` панели не нужен:
+`engine.send_dtmf` роутит его на хост `mcu_h323d` сам, потому что объекта
+pjsua2-вызова у него нет и SIP-путь для него бессмыслен.
 
 Метод по умолчанию `auto`: RFC 2833, при ошибке SIP INFO. Только
 RFC 2833 — и старый шлюз не услышит тоны; только SIP INFO — не услышит
 половину парка Polycom.
+
+Журнал комнаты — ОДИН на оба протокола (`DtmfService`): принятый с аппаратного
+терминала PIN виден там же, где и тон, набранный SIP-телефоном. Второй журнал
+для H.323 означал бы два расходящихся списка «МСУ принял тоны».
 

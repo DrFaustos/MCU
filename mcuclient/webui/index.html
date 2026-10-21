@@ -53,6 +53,10 @@
   #joinCard input { text-align:center; font-size:15px; padding:12px; margin-bottom:10px; }
   #joinCard button { width:100%; padding:12px; font-size:15px; }
   #joinHint { color:var(--muted); font-size:11px; margin-top:10px; min-height:14px; }
+  /* Тональный автомат: 4 колонки, кнопки крупнее обычных — по ним тычут. */
+  .dialpad { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:8px; }
+  .dialpad button { padding:10px 0; font-size:15px; text-align:center; }
+  #dtmfLog { margin-top:8px; max-height:120px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
 </style>
 </head>
 <body>
@@ -169,6 +173,24 @@
         <button id="btnMuteAll">Заглушить всех</button>
         <button id="btnHangAll">Сбросить всех</button>
       </div>
+    </div>
+
+    <div class="section">
+      <h2>Тоны набора (DTMF)</h2>
+      <div class="row">
+        <select id="dtmfTarget"><option value="">Всем активным (PIN в зал)</option></select>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input id="dtmfDigits" placeholder="тоны…" autocomplete="off" maxlength="32">
+        <button class="primary" id="btnDtmfSend">Отправить</button>
+      </div>
+      <div class="dialpad" id="dialpad"></div>
+      <div class="btns" style="margin-top:6px">
+        <button id="btnDtmfBack">⌫ Стереть</button>
+        <button id="btnDtmfClear">Очистить</button>
+      </div>
+      <div id="dtmfLog"></div>
+      <div id="dtmfHint" style="color:var(--muted);font-size:11px;margin-top:6px">SIP: RFC 2833/INFO · H.323: H.245 UserInput</div>
     </div>
 
     <div class="section" style="flex:1; display:flex; flex-direction:column; min-height:0">
@@ -457,7 +479,7 @@ async function refresh() {
       const still = webParticipants.find(p => p.id === me.id);
       if (!still) { me = null; $('meBadge').style.display = 'none'; $('joinOverlay').style.display = 'flex'; }
     }
-    renderStatus(); renderTiles();
+    renderStatus(); renderTiles(); renderDtmfTargets();
   } catch (e) { console.warn('Нет связи: ' + e.message); }
 }
 
@@ -477,11 +499,75 @@ async function loadChat() {
   } catch (e) { /* не критично */ }
 }
 
+// --- Тоны набора (DTMF) ----------------------------------------------------
+// POST /api/dtmf на сервере был с самого начала и теперь доезжает до H.323
+// (H.245 UserInput), но НИ ОДНА строка панели его не дёргала: оператору было
+// нечем набрать PIN в IVR. Тот же класс дыры, что /api/webrtc/close до
+// 2026-10-10 (tests/test_webrtc_panel_close.py) — мёртвый маршрут выглядит
+// живым, пока не понадобится человек.
+const DTMF_KEYS = ['1','2','3','4','5','6','7','8','9','*','0','#','A','B','C','D'];
+// Предел строки — тот же, что у ядра (mcuclient/dtmf.py::MAX_DIGITS_PER_SEND):
+// вводить больше бессмысленно, сервер их не примет.
+const DTMF_MAX = 32;
+
+function renderDtmfKeys() {
+  $('dialpad').innerHTML = DTMF_KEYS.map(k => `<button data-dtmf="${k}">${k}</button>`).join('');
+}
+
+function renderDtmfTargets() {
+  const sel = $('dtmfTarget');
+  const keep = sel.value;
+  // Только SIP/H.323-участники: у веб-участника нет вызова, ему тоны слать
+  // некуда (сервер ответил бы 409 «нет активного вызова»).
+  sel.innerHTML = '<option value="">Всем активным (PIN в зал)</option>'
+    + sipParticipants.map(p => `<option value="${p.id}">${esc(p.uri || ('#' + p.id))}</option>`).join('');
+  if (keep && sel.querySelector(`option[value="${CSS.escape(keep)}"]`)) sel.value = keep;
+}
+
+function dtmfLine(e) {
+  const who = e.peer || (e.participant_id === undefined || e.participant_id === null ? '' : '#' + e.participant_id);
+  const dir = e.direction === 'out' ? '→ МСУ отправил' : '← МСУ принял';
+  return `<div class="msg ${e.direction === 'out' ? 'me' : ''}">${dir} ${esc(e.digits || '')}`
+    + (who ? ` <span style="color:var(--muted)">${esc(who)}</span>` : '')
+    + ` <span style="color:var(--muted)">${esc(e.method || '')}</span></div>`;
+}
+
+async function loadDtmf() {
+  try {
+    const d = await api('/dtmf');
+    const evs = (d.events || []).slice(-8).reverse();
+    $('dtmfLog').innerHTML = evs.length
+      ? evs.map(dtmfLine).join('')
+      : '<div class="empty">Тонов ещё не было</div>';
+  } catch (e) { /* не критично */ }
+}
+
+$('dialpad').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-dtmf]');
+  if (!btn) return;
+  const el = $('dtmfDigits');
+  if (el.value.length < DTMF_MAX) el.value += btn.dataset.dtmf;
+});
+$('btnDtmfBack').onclick = () => { const el = $('dtmfDigits'); el.value = el.value.slice(0, -1); };
+$('btnDtmfClear').onclick = () => { $('dtmfDigits').value = ''; };
+$('btnDtmfSend').onclick = () => act(async () => {
+  const digits = $('dtmfDigits').value.trim();
+  // id:'' сервер разбирает как None = «всем активным» (_opt_int) — так же,
+  // как это делает engine.send_dtmf(digits, id=None).
+  await api('/dtmf', 'POST', { digits, id: $('dtmfTarget').value });
+  $('dtmfDigits').value = '';
+  await loadDtmf();
+});
+$('dtmfDigits').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnDtmfSend').click(); });
+
 function connectEvents() {
   const es = new EventSource('/api/events' + qs);
   es.onmessage = (ev) => {
     try {
       const { event } = JSON.parse(ev.data);
+      // dtmf.digits — по нему панель обновляет журнал тонов: без этой строки
+      // «терминал набрал PIN» стало бы видно только после следующего refresh.
+      if (event === 'dtmf.digits') { loadDtmf(); return; }
       if (event && (event.startsWith('call.') || event.startsWith('chat.') || event.startsWith('layout.') || event.startsWith('engine.'))) {
         refresh();
         if (event.startsWith('chat.')) loadChat();
@@ -574,7 +660,7 @@ $('grid').addEventListener('click', (e) => {
   act(map[btn.dataset.act]);
 });
 
-refresh(); loadDevices(); loadChat(); connectEvents();
+renderDtmfKeys(); refresh(); loadDevices(); loadChat(); loadDtmf(); connectEvents();
 setInterval(() => { refresh(); }, 3000);
 setInterval(() => { if (me) syncViewers(); }, 4000);
 </script>
