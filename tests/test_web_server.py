@@ -1074,11 +1074,10 @@ def test_both_routes_agree_on_dropped_state():
 
 # --- счётчики кадров в ряду участника --------------------------------------
 #
-# Ряд веб-участника несёт `video_frames`/`audio_frames`, но пишет их только
-# `Conference.on_frame`, боевого вызова которого не было никогда: ряд отдавал
-# ноль при живом медиа. Считать их обязана шина медиа — тот же источник, из
-# которого микшер берёт состав публикаторов и признак «говорит»
-# (`AudioMixSession.tick`), а не третья копия истины о кадрах.
+# Ряд веб-участника несёт `video_frames`/`audio_frames`; раньше их увеличивал
+# только `Conference.on_frame`, боевого вызова которого не было никогда, из-за
+# чего ряд отдавал ноль при живом медиа. Ныне полей реестра нет вовсе: счётчики
+# рождаются в обогащении (здесь), а не перекрывают заглушку.
 
 
 def _feed_frames(manager, pc, audio: int = 0, video: int = 0) -> None:
@@ -1119,11 +1118,12 @@ def test_participant_row_shows_frames_published_to_the_room():
 
     Замер 2026-10-22 (ветка h323) перед правкой: участник опубликовал 4
     аудио-кадра, сводка сессий под тем же участником показала 4, ряд
-    участника — `audio_frames=0`. Причина в том, что `video_frames`/
-    `audio_frames` ряда увеличивает только `Conference.on_frame`, а боевого
+    участника — `audio_frames=0`. Причина была в том, что `video_frames`/
+    `audio_frames` ряда увеличивал только `Conference.on_frame`, а боевого
     вызова этого метода не было НИКОГДА (`git log -S conference.on_frame` —
-    пусто; единственный вызов живёт в tests/test_webrtc_sfu.py). Поле-обманка
-    того же класса, что `remote` у сессий и `state` у реестра.
+    пусто; единственный вызов жил в tests/test_webrtc_sfu.py). Поля и метод
+    удалены следующим срезом: поле-обманка того же класса, что `remote` у
+    сессий и `state` у реестра.
     """
     s, _ = _session()
     try:
@@ -1284,6 +1284,49 @@ def test_sip_participant_rows_do_not_carry_web_frame_counters():
         for row in rows:
             assert not row.get("audio_frames"), (
                 f"SIP-ряд получил веб-счётчики: {row}")
+    finally:
+        s.close()
+
+
+def test_join_answer_has_no_dead_frame_counters():
+    """`POST /api/conference/join` не обязан отдавать мёртвые клавиши счётчиков.
+
+    Ответ join — это `to_dict()` участника реестра ЦЕЛИКОМ, т.е. пока реестр нёс
+    `video_frames`/`audio_frames`, их вечные нули уезжали наружу и этим маршрутом
+    (не только рядом `/api/conference`). Живой замер перед правкой: 5 публикаций в
+    шину, ответ join — `audio_frames=0`. Правка убирает клавиши из слоя, где их
+    нечем наполнить; живой ряд `/api/conference` и `/status` их сохраняет, потому
+    что там счётчик считает шина (следующий кейс).
+    """
+    s, _ = _session()
+    try:
+        joined = s.conference_join("Аня")["participant"]
+        for key in ("video_frames", "audio_frames"):
+            assert key not in joined, (
+                f"ответ join нёс мёртвую клавишу {key}={joined[key]!r}")
+    finally:
+        s.close()
+
+
+def test_public_row_keeps_frame_counter_keys_after_registry_cleanup():
+    """Публичный ряд обязан СОХРАНИТЬ обе клавиши: их считает шина (замок).
+
+    Кейс зелёный и до правки, и после: он фиксирует ФОРМУ решения — удаление
+    мёртвых полей из реестра не имеет права лишить оператора живых счётчиков в
+    `/api/conference` и `/status`. Значения проверяют кейсы этого же блока выше.
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pid = s.conference_join("Публикует")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=2)
+
+        for rows, where in ((s.conference_participants(), "/api/conference"),
+                            (s.status()["conference_participants"], "/status")):
+            row = {r["id"]: r for r in rows}[pid]
+            for key in ("video_frames", "audio_frames"):
+                assert key in row, f"{where} потерял живую клавишу {key}: {row}"
     finally:
         s.close()
 

@@ -42,19 +42,6 @@ class ConferenceParticipant:
     joined_at: float = field(default_factory=time.time)
     video_enabled: bool = True
     audio_enabled: bool = True
-    #: Счётчики КАДРОВ. Увеличивает их только :meth:`Conference.on_frame`,
-    #: боевого вызова которого не было никогда (единственный вызов — в
-    #: tests/test_webrtc_sfu.py), т.е. сами по себе эти поля всегда нули и
-    #: никакого отношения к живому медиа не имеют. Наружу в публичном ряду
-    #: они НЕ едут: `WebSession.conference_participants` перекрывает их
-    #: номерами версий каналов шины медиа — тем же источником, из которого
-    #: `AudioMixSession.tick` берёт живость (заперто
-    #: tests/test_web_server.py). Поля и метод оставлены как есть: `to_dict`
-    #: — контракт набора клавиш ряда, а их удаление было бы правкой через
-    #: поломку чужих кейсов; мёртвый писатель безвреден, пока ряд считает
-    #: шина. Убрать писателя — отдельный срез.
-    video_frames: int = 0
-    audio_frames: int = 0
     #: «Вошёл в комнату» — НЕ «connected». У реестра нет ни доступа к
     #: WebRTC-сессиям, ни источника истины о них (шина нужна ``WebRTCManager``
     #: и реестр создаётся раньше), т.е. прежнее значение ``"connected"`` было
@@ -85,8 +72,15 @@ class ConferenceParticipant:
             "joined_at": self.joined_at,
             "video_enabled": self.video_enabled,
             "audio_enabled": self.audio_enabled,
-            "video_frames": self.video_frames,
-            "audio_frames": self.audio_frames,
+            # Клавиш счётчиков кадров здесь НЕТ сознательно. Раньше ряд нёс
+            # `video_frames`/`audio_frames`, которые увеличивал только
+            # `Conference.on_frame` — метод, боевого вызова которого не было
+            # никогда, т.е. наружу (в т.ч. в ответ `POST /api/conference/join`)
+            # уезжали вечные нули: «этот участник не даёт медиа» при живой
+            # публикации. Живые счётчики живут в публичном ряду и считаются
+            # шине медиа в `WebSession.conference_participants` — там, где есть
+            # источник истины (заперто tests/test_webrtc_sfu.py и
+            # tests/test_web_server.py). Возвращать сюда поля-заглуки нельзя.
             "state": self.state,
             "kind": "web",
             "volume_level": self.volume_level,
@@ -593,17 +587,6 @@ class Conference:
                 p.audio_enabled = bool(audio)
         self._changed()
         return True
-
-    def on_frame(self, pid: str, kind: str) -> None:
-        """Отметить полученный кадр (счётчики для статистики)."""
-        with self._lock:
-            p = self._participants.get(pid)
-            if p is None:
-                return
-            if kind == "video":
-                p.video_frames += 1
-            else:
-                p.audio_frames += 1
 
     def update_levels(self, levels: Dict[str, int],
                       speaker: Optional[str] = None) -> int:
