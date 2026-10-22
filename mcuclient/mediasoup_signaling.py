@@ -267,6 +267,22 @@ class MediasoupSignaling:
             raise SignalingError(f"set-layers не удался: {exc}") from exc
         return {"ok": True, "preferredLayers": resp.get("preferredLayers")}
 
+    def participant_ids(self) -> List[str]:
+        """Id участников, у которых есть транспорт на сайдкаре.
+
+        Нужно ``WebSession.conference_participants``: состояние «подключён»
+        нельзя считать только по aiortc-сессиям, потому что
+        ``mcuclient/webui/ms-conference.js`` зовёт ``POST /api/mediasoup/join``
+        с ``participant: me.id`` и у такого браузера сессий aiortc нет вообще.
+        Без этого метода сводка показала бы «вошёл» живому человеку — т.е.
+        починка одной лжи завела бы вторую в том же поле.
+
+        ``stats()`` для этого не годится: он отдаёт ЧИСЛО участников, а по
+        числу нельзя сказать, КТО из реестра жив.
+        """
+        with self._lock:
+            return list(self._participants)
+
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             return {

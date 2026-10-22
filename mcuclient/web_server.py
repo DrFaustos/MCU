@@ -472,7 +472,10 @@ class WebSession:
             "video_jpeg": self.frame_hub.jpeg_available,
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
-            "conference_participants": self.conference.participants(),
+            # Через conference_participants(), а не реестр напрямую: иначе
+            # состояние соединения считалось бы в одном маршруте и вралось в
+            # другом, а панель читает именно /status.
+            "conference_participants": self.conference_participants(),
             "mediasoup_rtp": self._ms_rtp_display(),
             "sip_bridge": self.sip_bridge_stats(),
             "registration": _registration_dict(eng),
@@ -826,7 +829,52 @@ class WebSession:
         return {"ok": self.conference.leave(str(pid))}
 
     def conference_participants(self) -> List[Dict[str, Any]]:
-        return self.conference.participants()
+        """Ряды веб-участников для оператора: реестр + состояние соединения.
+
+        ЕДИНСТВЕННОЕ место, где ``state`` становится правдой. Реестр
+        ``Conference`` про WebRTC-сессии не знает физически (шина нужна
+        ``WebRTCManager``, реестр создаётся раньше), поэтому его собственное
+        значение — ``joined``: «вошёл», про соединение оно молчит. Здесь сводка
+        обогащается по ДВУМ медиа-путям, и второй обязателен:
+
+        * сессии aiortc-менеджера — ``sessions()`` знает ``participant`` с
+          2026-10-21 (``tests/test_webrtc_ingest.py``);
+        * транспорты на mediasoup-sidecar — ``ms-conference.js`` зовёт
+          ``POST /api/mediasoup/join`` с ``participant: me.id``, и у такого
+          браузера aiortc-сессий нет вообще. Считать живость только по
+          ``sessions()`` означало бы показать «вошёл» живому человеку, т.е.
+          починкой одной лжи завести вторую в том же поле (заперто
+          ``test_mediasoup_participant_without_aiortc_is_connected``).
+
+        Состояние ВЫЧИСЛЯЕТСЯ при отдаче, а не пишется в реестр: запись
+        пришлось бы продублировать на каждый путь закрытия (``close_session``,
+        ``close_all``, ``close_for_participant``, обрыв по
+        ``connectionstatechange``), и пропущенный путь снова дал бы вечно
+        неверный ``state`` — тот же класс, что «у публикации нет парного drop».
+
+        Оба маршрута — ``GET /api/status`` и ``GET /api/conference`` — обязаны
+        идти ЧЕРЕЗ этот метод. До правки ``status()`` звал
+        ``self.conference.participants()`` напрямую, и обогащение, положенное
+        только сюда, до панели не доехало бы: панель берёт участников из
+        ``/status`` (заперто ``test_both_participant_routes_agree_on_state``).
+
+        ``close()`` (evict) и ``_mix_recipients()`` читают реестр напрямую
+        СОЗНАТЕЛЬНО: им нужны только id, а звать сюда ленивую фабрику
+        mediasoup-сигналинга ради них — второй источник истины без нужды.
+        """
+        rows = self.conference.participants()
+        live = {s.get("participant") for s in self.webrtc.sessions()}
+        sig = self.mediasoup_signaling()
+        if sig is not None:
+            try:
+                live.update(sig.participant_ids())
+            except Exception:  # noqa: BLE001 — сводка не имеет права падать
+                log.debug("mediasoup participant_ids не получены", exc_info=True)
+        live.discard(None)          # анонимные offer'а участниками не являются
+        for row in rows:
+            if row["id"] in live:
+                row["state"] = "connected"
+        return rows
 
     def conference_rename(self, pid: str, name: str) -> Dict[str, Any]:
         """Переименовать веб-участника; отказ — ошибка с HTTP-кодом.

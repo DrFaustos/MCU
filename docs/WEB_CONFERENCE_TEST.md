@@ -46,7 +46,7 @@
 
 | Запрос | Что показывает |
 |--------|----------------|
-| `GET /api/conference` | список веб-участников (`kind=web`) |
+| `GET /api/conference` | список веб-участников (`kind=web`) и их `state`: `joined` — вошёл, живой медиа-сессии нет; `connected` — есть (aiortc-сессия или транспорт sidecar) |
 | `GET /api/webrtc/sessions` | активные сессии, их `role` и `participant` (`null` — анонимный offer) |
 | `GET /api/status` | поля `webrtc_available`, `webrtc_sessions`, `conference_participants` |
 | лог сервера (`mcu-client.log`) | строки `mcuclient.webrtc`, `mcuclient.sfu` |
@@ -59,7 +59,12 @@
 * соединение за NAT без STUN/TURN — настройте `features.web.ice_servers`
   (см. [WEB_CONTROL.md](WEB_CONTROL.md), §7b);
 * участник не публикует — проверьте, что нажата кнопка публикации и в
-  `/api/webrtc/sessions` есть сессия с `role=publish`.
+  `/api/webrtc/sessions` есть сессия с `role=publish`;
+* участник в `/api/conference` показан как `joined`, а не `connected` — браузер
+  вошёл в комнату, но медиа не отправляет: публикация не начата, либо транспорт
+  mediasoup не создан (смотрите `GET /api/mediasoup` — `available`). `joined` —
+  это НЕ ошибка соединения: человек в комнате и слышит микс, просто у него нет
+  ни входящих, ни исходящих треков.
 
 ---
 

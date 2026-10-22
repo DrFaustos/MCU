@@ -8,10 +8,17 @@
 
 Замер 2026-10-21 (проба на живом asyncio-цикле менеджера): после `close_session`
 (ровно то, что делает beacon) — `sessions() == []`, `publishers() == []`, а
-`conference.participants()` по-прежнему отдаёт участника с `state ==
+`conference.participants()` по-прежнему отдаёт участника — тогда с `state ==
 "connected"`. Панель рисует этот state в `<div class="state">`, то есть
 оператор с МСУ видит тайл человека, у которого нет ни соединения, ни канала, и
 не видит НИЧЕГО, чем можно его убрать (кнопки «Сброс» у веб-тайла нет).
+
+Формулировку про `connected` держу исторической, а не правлю под нынешний код:
+тем же днём состояние перестало врать (`state` у реестра теперь `joined`, а
+`connected` выставлает `WebSession.conference_participants` — см.
+tests/test_web_server.py). Суть этого кейса от этого не изменилась: beacon
+выводит человека из РЕЕСТРА, и без него тайл остаётся навсегда — с любым
+`state`.
 
 Почему это именно beacon, а не fetch: см. `test_webrtc_panel_close.py` — при
 выгрузке страницы fetch не доживает, а `sendBeacon` не умеет заголовок
@@ -59,7 +66,8 @@ def test_pagehide_leaves_the_room_over_beacon():
     handler = _pagehide_handler()
     assert "sendBeacon('/api/conference/leave" in handler, (
         "pagehide не выводит из комнаты: RTCPeerConnection закрывается, а "
-        "участник остаётся в реестре с state=connected навсегда")
+        "участник остаётся в реестре навсегда — оператор видит тайл человека, "
+        "у которого не осталось ни соединения, ни канала")
 
 
 def test_leave_beacon_carries_the_participant_id():

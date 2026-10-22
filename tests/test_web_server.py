@@ -786,6 +786,167 @@ def test_conference_leave_repeat_is_not_an_error():
         s.close()
 
 
+# --- состояние веб-участника: реестр не имеет права врать про соединение ----
+
+
+def _fake_aiortc(s):
+    """Подмена aiortc на ЖИВОМ менеджере (паттерн test_web_leave_closes_ingest).
+
+    Заменять `s.webrtc` целиком нельзя: боевой хук `on_leave` замкнут на
+    менеджер из конструктора, и правка ушла бы по пустому старому объекту —
+    ложно-красный кейс, краснеющий при правильном коде.
+    """
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from test_webrtc_ingest import _FakeAiortc
+
+    fake = _FakeAiortc()
+    s.webrtc._aiortc = fake
+    return fake
+
+
+def test_participant_state_distinguishes_media_liveness():
+    """У вошедшего без медиа НЕ может быть state == "connected".
+
+    Замер 2026-10-21 (ветка h323) перед правкой: `web-1` с двумя живыми
+    WebRTC-сессиями и `web-2`, у которого сессий нет вообще, отдавали
+    одинаковый `connected`. Причина: `ConferenceParticipant.state` объявлен
+    значением "connected" и за всю историю модуля не присваивался НИ РАЗУ
+    (ни `=`, ни `+=`; для сравнения, в ingest его пишут дважды — из
+    `connectionState` и при закрытии). Панель рисует это поле в
+    `<div class="state">`, т.е. оператору показывали «подключён» у человека, о
+    соединении которого реестр не знает ничего: у реестра `Conference` нет ни
+    доступа к сессиям, ни источника истины о них.
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        with_media = s.conference_join("С публикацией")["participant"]["id"]
+        without = s.conference_join("Вошёл без медиа")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=with_media)
+
+        rows = {p["id"]: p["state"] for p in s.conference_participants()}
+        assert rows[with_media] == "connected", (
+            f"у участника с живой WebRTC-сессией state={rows[with_media]!r}")
+        assert rows[without] != "connected", (
+            f"у вошедшего без единой сессии state={rows[without]!r}: сводка "
+            "не различает «есть соединение» и «просто вошёл в комнату»")
+    finally:
+        s.close()
+
+
+def test_viewer_only_participant_is_connected():
+    """Зритель без публикации подключён: состояние про сессию, а не про медиа.
+
+    Иначе «починка» свелась бы к «публикует ли», и зритель, которого оператор
+    тоже обязан видеть живым, получил бы «не подключён».
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        pid = s.conference_join("Зритель")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="viewer", participant=pid,
+                              subscribe=[])
+        assert not s.conference.bus.publishers(), "зритель не публикует"
+
+        row = s.conference_participants()[0]
+        assert row["state"] == "connected", (
+            f"зритель с живой сессией показан как {row['state']!r}")
+    finally:
+        s.close()
+
+
+def test_mediasoup_participant_without_aiortc_is_connected():
+    """Живой через сайдкар обязан быть подключён, даже не имея aiortc-сессий.
+
+    Кейс существует из-за собственной ошибки, найденной ДО правки. Первая
+    редакция обогащения смотрела только в `webrtc.sessions()` — и показала бы
+    `joined` человеку, чья комната живёт в mediasoup-sidecar: `ms-conference.js`
+    зовёт `POST /api/mediasoup/join` с `participant: me.id`, и у такого
+    участника aiortc-сессий нет вообще. То есть починка одной лжи завела бы
+    вторую, ровно в том же поле. Проверено: сигнализация хранит участников в
+    `_participants[pid]`, но наружу отдаёт только `len()` — потому источник
+    «жив через сайдкар» требует отдельного метода, а не догадки по счётчику.
+    """
+    class _FakeSig:
+        def __init__(self, pids):
+            self._pids = list(pids)
+
+        def participant_ids(self):
+            return list(self._pids)
+
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        via_aiortc = s.conference_join("Через aiortc")["participant"]["id"]
+        via_sidecar = s.conference_join("Через сайдкар")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=via_aiortc)
+        # Кэш ленивой фабрики (web_server: `if self._ms_signaling is not None`).
+        s._ms_signaling = _FakeSig([via_sidecar])
+
+        rows = {p["id"]: p["state"] for p in s.conference_participants()}
+        assert rows[via_sidecar] == "connected", (
+            f"участник mediasoup показан как {rows[via_sidecar]!r}: состояние "
+            "считано только по aiortc-сессиям, а у него их нет по устройству")
+        assert rows[via_aiortc] == "connected"
+    finally:
+        s.close()
+
+
+def test_both_participant_routes_agree_on_state():
+    """`/api/status` и `/api/conference` обязаны отдавать ОДНИ ряды.
+
+    Замерено до правки: `status()` зовёт `self.conference.participants()`
+    НАПРЯМУЮ (строка ~475), а `GET /api/conference` — через
+    `WebSession.conference_participants()`. Сейчас они совпадают, потому что
+    оба читают реестр, но обогащение, положенное только в метод, до панели не
+    доехало бы: панель берёт участников из `/status`. Это тот же класс «две
+    копии истины», что заперт в tests/test_webrtc_ingest.py на связке сводки
+    сессий и закрытия по участнику.
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        pid = s.conference_join("Проверяемый")["participant"]["id"]
+        s.conference_join("Сосед")
+
+        via_status = s.status()["conference_participants"]
+        via_route = s.conference_participants()
+        assert via_status == via_route, (
+            "маршруты разошлись: /status — "
+            f"{[(p['id'], p['state']) for p in via_status]}, /conference — "
+            f"{[(p['id'], p['state']) for p in via_route]}")
+        assert [p["state"] for p in via_status] == ["joined", "joined"], (
+            "оба маршрута врут про соединение одинаково — сверка ниже не "
+            f"помогает: {[p['state'] for p in via_status]}")
+        assert pid
+    finally:
+        s.close()
+
+
+def test_registry_alone_never_claims_a_connection():
+    """Реестр не имеет права присваивать себе знание о соединении.
+
+    Отдельный кейс на сам `ConferenceParticipant`: поле `state` с дефолтом
+    "connected" было присвоенным себе утверждением, которое ни один код не
+    подтверждал. `Conference` про WebRTC-сессии не знает физически (шина нужна
+    WebRTCManager'у, реестр создаётся раньше), значит честное значение слоя —
+    «вошёл», а про подключение решает тот, кто видит сессии.
+    """
+    s, _ = _session()
+    try:
+        p = s.conference.join("Только реестр")
+        assert p.state != "connected", (
+            f"реестр сам себе выставил state={p.state!r} без какого-либо "
+            "свидетельства соединения")
+        assert p.to_dict()["state"] == p.state, (
+            "to_dict расходится с полем: ряд наружу собирается не из него")
+    finally:
+        s.close()
+
+
 def test_conference_leave_accepts_someone_elses_id():
     """Выдворение: ``leave`` принимает ЛЮБОЙ id, и панель на это опирается.
 

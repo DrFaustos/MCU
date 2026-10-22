@@ -371,3 +371,40 @@ def test_close_falls_back_to_transports_when_room_close_fails():
     s.close()
     assert [x[2] for x in _closed(c)] == ["tr-1", "tr-2"]
     assert s.stats()["participants"] == 0
+
+
+def test_participant_ids_tracks_transports_in_and_out():
+    """`participant_ids` — источник «жив через сайдкар» для сводки участников.
+
+    `WebSession.conference_participants` не имеет права считать состояние
+    «подключён» только по aiortc-сессиям: `mcuclient/webui/ms-conference.js`
+    зовёт `POST /api/mediasoup/join` с `participant: me.id`, и у такого браузера
+    сессий aiortc нет вообще (замер 2026-10-21: `stats()` отдавал ЧИСЛО
+    участников, а не их id, поэтому сказать, КТО из реестра жив, было нечем).
+
+    Кейс обязателен на НАСТОЯЩЕМ сигналингаторе. В tests/test_web_server.py тот
+    же метод подменяется заглушкой `_FakeSig`, и без этого файла живой
+    `participant_ids` мог бы не существовать вовсе — заглушка осталась бы
+    зелёной, а участник mediasoup получил бы «вошёл» в панели.
+
+    Обратная половина важнее первой: `leave` и `close` обязаны убирать id, иначе
+    состояние «подключён» переживёт выход человека — тот же класс «у
+    публикации нет парного drop», что закрывали в шине медиа.
+    """
+    c = _FakeClient()
+    s = MediasoupSignaling(c)
+    assert s.participant_ids() == [], "пустая комната не имеет права кого-то показывать"
+
+    s.join("web-1")
+    s.join("web-2")
+    assert sorted(s.participant_ids()) == ["web-1", "web-2"], (
+        "сводка участников не видит тех, кто живёт через сайдкар")
+
+    assert s.leave("web-1") is True
+    assert s.participant_ids() == ["web-2"], (
+        "вышедший остался в списке: «подключён» пережил выход")
+
+    s.close()
+    assert s.participant_ids() == [], (
+        "close() очистил транспорты, но список участников остался — вечно "
+        "подключённые зомби после перезапуска панели")

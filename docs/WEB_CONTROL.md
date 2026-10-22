@@ -112,7 +112,7 @@ GET:
 
 | Путь | Ответ |
 |------|-------|
-| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports` |
+| `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports`, `webrtc_sessions`, `conference_participants[]`. `conference_participants` отдаётся **тем же методом**, что и `GET /api/conference`, а не реестром напрямую: иначе состояние соединения считалось бы в одном маршруте и вралось в другом, а панель берёт участников именно отсюда (заперто `test_both_participant_routes_agree_on_state`) |
 | `/api/participants` | `{participants:[...]}` |
 | `/api/chat` | `{messages:[...]}` |
 | `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`); панель читает их в журнал тонального автомата и обновляет по событию `dtmf.digits` |
@@ -126,7 +126,7 @@ GET:
 | `/api/frame.png` | последний кадр источника, PNG (404, если кадров нет) |
 | `/api/frame.jpg` | то же в JPEG (если есть cv2) |
 | `/api/video.mjpeg` | MJPEG-поток (501, если нет кодировщика JPEG) |
-| `/api/conference` | `{participants:[{id,name,kind,video,audio}], webrtc:bool}` — конференция и доступен ли WebRTC |
+| `/api/conference` | `{participants:[{id,name,kind,video,audio}], webrtc:bool}` — конференция и доступен ли WebRTC. Ряды веб-участников (`kind=web`) несут `state`: **`joined`** — вошёл в комнату, но ни одной живой медиа-сессии; **`connected`** — живая сессия есть (aiortc-публикация, просмотр или транспорт на mediasoup-sidecar). Значение вычисляет `WebSession.conference_participants`, а НЕ хранит реестр: `Conference` про WebRTC-сессии не знает физически (шина нужна `WebRTCManager`, реестр создаётся раньше), и прежнее `connected` было присвоенным себе утверждением, которое ни один код не подтверждал — `state` не присваивался ни разу за всю историю модуля (для сравнения: `role` и `volume_level` пишут). Заперто `tests/test_web_server.py` |
 | `/api/webrtc/sessions` | `{sessions:[...], webrtc:bool}` — живые WebRTC-сессии панели. Каждая сессия: `id`, `state`, `role`, счётчики кадров и **`participant`** — id участника конференции, которому она принадлежит, либо `null` для анонимного offer'а. Поле сознательно **не** взято из `publish_id` релея: у анонима тот равен id сессии (`webrtc-<N>`), и отдать его наружу означало бы показать «участника», которого нет в реестре, — выдворение с таким id вернуло бы штатное `{"ok": false}` (те же пространства имён id, что разведены в `/api/webrtc/offer`). Раньше вместо этого отдавалось поле `remote`, которое не присваивалось ни разу за всю историю модуля: наружу оно уходило вечно пустой строкой, т.е. «адрес неизвестен» выглядело штатным значением. Заперто `tests/test_webrtc_ingest.py` |
 | `/api/web_recording` | статус записи веб-конференции (`{recording, file?}`) |
 | `/api/mediasoup` | `{available, stats}` — состояние SFU-sidecar (`null`-статистика, если не поднят) |
