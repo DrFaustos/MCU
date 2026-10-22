@@ -304,7 +304,7 @@ numpy/mss/pyvirtualcam/opencv-python-headless + pyinstaller).
 принадлежит УЧАСТНИКУ, а не сессии: под одним `publish_id` могут стоять
 публикация и просмотр одного человека, поэтому `drop` происходит только когда под
 этим id не публикует больше никто живой. Регрессия —
-`tests/test_webrtc_ingest.py` (21).
+`tests/test_webrtc_ingest.py` (25).
 
 Третья половина того же контракта — УБРАТЬСЯ самой сессией, когда браузер ничего
 не прислал. `pc.on("connectionstatechange")`

@@ -947,6 +947,131 @@ def test_registry_alone_never_claims_a_connection():
         s.close()
 
 
+# --- «отвалился» против «не публикует»: третье значение состояния -----------
+
+
+def test_dropped_participant_is_not_the_one_who_never_published():
+    """У отвалившегося НЕ может быть тот же state, что у вошедшего без медиа.
+
+    Замер после предыдущего среза:
+
+        ОТВАЛИВСЯ   : joined
+        НЕ ПУБЛИКУЕТ: joined
+        НЕРАЗЛИЧИМЫ : True
+
+    Предыдущий срез убрал ложь («connected у всех»), но оставил два разных
+    факта в одном значении. Для оператора это не косметика: «вошёл и не включил
+    камеру» — человек, которого ждём; «была живая сессия и её нет» — человек,
+    которого надо выгнать или которого уже нет. Авто-выдворение по таймауту
+    сознательно НЕ делаем: у панели нет reconnect'а (`onconnectionstatechange`
+    только пишет подсказку, `joinConference` вызывается из одного места),
+    поэтому reap выгнал бы браузер после короткого обрыва молча и навсегда —
+    это опаснее фантомного тайла. Различать — можно, выгонять — пока нельзя.
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        dropped = s.conference_join("Был жив, отвалился")["participant"]["id"]
+        shy = s.conference_join("Вошёл, камеру не включил")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=dropped)
+
+        for x in list(s.webrtc.sessions()):
+            s.webrtc.close_session(x["id"])
+
+        rows = {p["id"]: p["state"] for p in s.conference_participants()}
+        assert rows[dropped] != rows[shy], (
+            f"оба ряда = {rows[dropped]!r}: оператор не видит, кого ждём, а "
+            "кого надо убирать")
+        assert rows[dropped] == "dropped", (
+            f"отвалившийся показан как {rows[dropped]!r}")
+        assert rows[shy] == "joined", (
+            f"вошедший без медиа показан как {rows[shy]!r}")
+    finally:
+        s.close()
+
+
+def test_reconnected_participant_is_connected_again():
+    """Переподключение возвращает `connected`, а не `dropped`.
+
+    Без этой половины правка дала бы новое вранье: человек сидит с живым
+    соединением, а рядом с его тайлом висит «отвалился».
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        pid = s.conference_join("Прыгнул и вернулся")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        for x in list(s.webrtc.sessions()):
+            s.webrtc.close_session(x["id"])
+        assert s.conference_participants()[0]["state"] == "dropped", (
+            "промежуточная проверка: след не проставился")
+
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+
+        row = s.conference_participants()[0]
+        assert row["state"] == "connected", (
+            f"живой участник показан как {row['state']!r}: состояние строится "
+            "по истории вместо текущего положения дел")
+    finally:
+        s.close()
+
+
+def test_live_sidecar_beats_the_close_trace():
+    """Живой через сайдкар — `connected`, даже если aiortc-сессия умирала.
+
+    Приоритет обязан быть именно такой: иначе «отвалился» победил бы живое
+    соединение, и это была бы ложь того же класса, что я чиню, только наоборот.
+    """
+    class _Sig:
+        def participant_ids(self):
+            return ["web-1"]
+
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        pid = s.conference_join("Mediasoup после обрыва aiortc")["participant"]["id"]
+        assert pid == "web-1", f"id уехал: {pid}"
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        for x in list(s.webrtc.sessions()):
+            s.webrtc.close_session(x["id"])
+        s._ms_signaling = _Sig()
+
+        row = s.conference_participants()[0]
+        assert row["state"] == "connected", (
+            f"живой через сайдкар показан как {row['state']!r}: след закрытия "
+            "пересилил живое соединение")
+    finally:
+        s.close()
+
+
+def test_both_routes_agree_on_dropped_state():
+    """`/status` и `/api/conference` обязаны одинаково показывать `dropped`.
+
+    Продолжение замка на «две копии истины»: обогащение живёт в одном методе,
+    но это проверяется на КАЖДОМ значении, иначе новый случай мог бы уехать в
+    один маршрут.
+    """
+    s, _ = _session()
+    try:
+        _fake_aiortc(s)
+        pid = s.conference_join("Отвалившийся")["participant"]["id"]
+        s.conference_join("Сосед без медиа")
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        for x in list(s.webrtc.sessions()):
+            s.webrtc.close_session(x["id"])
+
+        via_status = [(p["id"], p["state"])
+                      for p in s.status()["conference_participants"]]
+        via_route = [(p["id"], p["state"]) for p in s.conference_participants()]
+        assert via_status == via_route, (
+            f"маршруты разошлись на dropped: /status {via_status}, "
+            f"/conference {via_route}")
+        assert dict(via_status)[pid] == "dropped", (
+            f"в обоих маршрутах {dict(via_status)}")
+    finally:
+        s.close()
+
+
 def test_conference_leave_accepts_someone_elses_id():
     """Выдворение: ``leave`` принимает ЛЮБОЙ id, и панель на это опирается.
 

@@ -29,7 +29,7 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .log import get_logger
 
@@ -42,6 +42,14 @@ try:  # pragma: no cover — зависит от окружения
 except Exception:  # noqa: BLE001 — aiortc опционален
     aiortc = None  # type: ignore
     WEBRTC_AVAILABLE = False
+
+
+#: Максимум записей в следе закрытых участников (:meth:`WebRTCManager.closed_participants`). Ограничение ОБЯЗАТЕЛЬНО: обрыв сессии — штатное
+#: событие (у панели нет reconnect'а, `onconnectionstatechange` лишь
+#: пишет подсказку), а след живёт в памяти процесса, т.е. без лимита это
+#: медленная утечка. Вытесняются СТАРЫЕ записи: оператору нужны свежие
+#: обрывы, а не память о первой сессии после запуска.
+CLOSED_TRACE_MAX = 256
 
 
 class WebRTCError(RuntimeError):
@@ -236,6 +244,16 @@ class WebRTCManager:
         self._ice_servers = list(ice_servers or [])
         self._offer_timeout = float(offer_timeout)
         self._sessions: Dict[str, SessionInfo] = {}
+        # След закрытых участников: pid -> момент закрытия. Нужен потому, что
+        # реестр ``Conference`` про сессии не знает физически и не может
+        # отличить «вошёл и ещё не включил камеру» от «была живая сессия и её
+        # нет» — оба дают ``joined`` (замер 2026-10-21: ОТВАЛИВСЯ == НЕ
+        # ПУБЛИКУЕТ). Пишется в ЕДИНОЙ точке закрытия ``_close_session``
+        # (через неё идут ``close_session``, ``close_for_participant``,
+        # ``close_all`` и обрыв по ``connectionstatechange``), вычищается при
+        # новом offer под тем же pid — состояние описывает ТЕКУЩЕЕ положение,
+        # а не историю.
+        self._closed: Dict[str, float] = {}
         self._pc: Dict[str, Any] = {}
         self._relays: Dict[str, _MediaRelay] = {}
         self._counter = 0
@@ -333,6 +351,8 @@ class WebRTCManager:
             self._sessions[sid] = info
             self._pc[sid] = pc
             self._relays[sid] = relay
+            if participant:                # вернулся: след про обрыв не нужен
+                self._closed.pop(participant, None)
 
         # Fan-out: для зрителя добавляем исходящие треки с шины.
         out_tracks: List[Any] = []
@@ -487,6 +507,38 @@ class WebRTCManager:
                 pass
         if info is not None:
             info.state = "closed"
+            # След ставится ЗДЕСЬ, а не в вызывающих местах: все четыре пути
+            # закрытия проходят через эту корутину, поэтому пропустить один из
+            # них (как это было с парным `bus.drop`) физически невозможно.
+            if info.participant:
+                self._mark_closed(info.participant)
+
+    def _mark_closed(self, pid: str) -> None:
+        """Запомнить: у участника БЫЛА сессия и теперь её нет."""
+        with self._lock:
+            # pop перед записью: dict держит порядок вставки, поэтому
+            # повторное закрытие того же pid освежает его запись, а вытеснение
+            # идёт по давности, а не по алфавиту id.
+            self._closed.pop(pid, None)
+            self._closed[pid] = time.time()
+            while len(self._closed) > CLOSED_TRACE_MAX:
+                self._closed.pop(next(iter(self._closed)))
+
+    def closed_participants(self) -> Set[str]:
+        """Участники с закрытыми сессиями и БЕЗ живых на этот момент.
+
+        Нужно ``WebSession.conference_participants``: реестр ``Conference``
+        различить «ждём трек» и «браузер отвалился» не может — про сессии он
+        не знает. Замер 2026-10-21 до правки: отвалившийся и вошедший без
+        камеры давали один и тот же ``joined``, т.е. срез про ``state`` сократил
+        одну ложь до двух неразличимых правд, и оператор по панели не видел,
+        кого ждать, а кого убирать. Живые сессии вычитаются здесь же: след
+        обязан описывать текущее положение, а не прошлые обрывы.
+        """
+        with self._lock:
+            live = {i.participant for i in self._sessions.values()
+                    if i.participant}
+            return set(self._closed) - live
 
     def _forget_bus_channel(self, relay: _MediaRelay) -> None:
         """Убрать канал шины, который наполняла закрытая сессия.

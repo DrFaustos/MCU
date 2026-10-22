@@ -528,3 +528,118 @@ def test_summary_does_not_advertise_fields_nothing_fills():
         "заполняет: пустая строка читается клиентом как настоящее значение")
     assert "participant" in summary, (
         "из сводки исчезло `participant` — см. кейсы выше")
+
+
+# --- след закрытия: менеджер знает то, чего не знает реестр ------------------
+
+def test_closed_session_leaves_a_trace_of_the_participant_it_had():
+    """Менеджер обязан помнить: у участника БЫЛА сессия и её больше нет.
+
+    Замер 2026-10-21, сразу после среза про `state` (тогда же и выявлен):
+    после закрытия сессии ряд участника показывает `joined` — ровно то же
+    значение, что у человека, который вошёл и ещё не включил камеру:
+
+        ОТВАЛИВСЯ   : joined
+        НЕ ПУБЛИКУЕТ: joined
+        НЕРАЗЛИЧИМЫ : True
+
+    Т.е. срез про `state` сократил одну ложь до ДВУХ неразличимых правд:
+    оператор по панели не может отличить «ждём трек» от «браузер отвалился» и
+    не видит, кого надо выгнать. Реестр `Conference` различить их не может
+    физически — про сессии он не знает. Знает менеджер, и он же — ЕДИНАЯ точка
+    закрытия: через `_close_session` идут `close_session`,
+    `close_for_participant`, `close_all` и обрыв по `connectionstatechange`
+    (проверено чтением: отдельных веток закрытия больше нет), поэтому след
+    ставится там, а не в каждом вызывающем месте.
+
+    Анонимный offer следа не оставляет: его id из пространства имён сессий, в
+    реестре участников такого id нет.
+    """
+    m = WebRTCManager(aiortc_module=_FakeAiortc())
+    m.handle_offer("v=0", role="publish", participant="web-1")
+    m.handle_offer("v=0", role="publish")                      # аноним
+
+    assert m.closed_participants() == set(), (
+        "след появился без единого закрытия: сводка начнёт врать заранее")
+
+    for s in list(m.sessions()):
+        m.close_session(s["id"])
+
+    assert m.closed_participants() == {"web-1"}, (
+        f"менеджер не помнит, что у web-1 была сессия: "
+        f"{sorted(m.closed_participants())} — публичный ряд нечем отличить от "
+        "вошедшего без медиа")
+
+
+def test_reopening_a_session_clears_the_trace():
+    """Переподключившийся перестает быть «отвалившимся».
+
+    След нужен только тем, у кого живой сессии СЕЙЧАС нет. Для живого pid он
+    мусор, который к тому же переживёт перезакладку смысла: браузер
+    переподключился, значит следующее его падение обязано быть свежим фактом,
+    а не напоминанием о прошлом.
+    """
+    m = WebRTCManager(aiortc_module=_FakeAiortc())
+    m.handle_offer("v=0", role="publish", participant="web-1")
+    assert m.close_for_participant("web-1") == 1
+    assert "web-1" in m.closed_participants()
+
+    m.handle_offer("v=0", role="publish", participant="web-1")
+
+    assert "web-1" not in m.closed_participants(), (
+        "браузер вернулся, а след остался: состояние строится по истории, а не "
+        "по текущему положению дел")
+
+
+def test_every_close_path_leaves_a_trace():
+    """След обязан стоять на ЕДИНОЙ точке, а не на вызывающих местах.
+
+    Замок на правку «поставил след в close_for_participant и забыл про обрыв».
+    Тот же класс, что «у публикации нет парного drop»: путь закрытия без
+    парной записи = участник навсегда показан не тем, кем является. Каждый из
+    четырёх путей закрытия обязан оставить след; сверяю все, а не один.
+    """
+    m = WebRTCManager(aiortc_module=_FakeAiortc())
+    for pid in ("web-1", "web-2", "web-3"):
+        m.handle_offer("v=0", role="publish", participant=pid)
+
+    def sid_of(pid):
+        found = [s["id"] for s in m.sessions() if s.get("participant") == pid]
+        assert len(found) == 1, f"{pid}: сессий по сводке {found}"
+        return found[0]
+
+    m.close_session(sid_of("web-1"))               # путь: явное закрытие
+    m.close_for_participant("web-2")               # путь: выдворение
+    m.close_all()                                  # путь: остановка сессий
+
+    assert m.closed_participants() == {"web-1", "web-2", "web-3"}, (
+        f"следы поставлены не всеми путями закрытия: "
+        f"{sorted(m.closed_participants())}")
+
+
+def test_close_trace_is_bounded():
+    """След не имеет права расти без границ — это память процесса.
+
+    Кейс написан ДО правки именно поэтому: иначе я чиню неразличимость
+    состояния новой вехой — неограниченным словарём, который растёт на каждый
+    обрыв каждого браузера (а обрывы — штатное событие: панель без reconnect'а
+    теряет сессию на каждое падение Wi-Fi).
+    """
+    import mcuclient.webrtc_ingest as wi
+
+    limit = getattr(wi, "CLOSED_TRACE_MAX", None)
+    assert limit is not None, (
+        "константы лимита нет: след закрытия не ограничен по размеру")
+
+    m = WebRTCManager(aiortc_module=_FakeAiortc())
+    for i in range(int(limit) + 120):
+        pid = f"web-{i}"
+        m.handle_offer("v=0", role="publish", participant=pid)
+        m.close_for_participant(pid)
+
+    left = m.closed_participants()
+    assert len(left) <= int(limit), (
+        f"следа накопилось {len(left)} при лимите {limit}")
+    assert left, (
+        "лимит достигнут удалением ВСЕХ следов: последние обрывы пропали, а "
+        "именно они и нужны оператору")
