@@ -113,7 +113,7 @@ GET:
 | Путь | Ответ |
 |------|-------|
 | `/api/status` | общий статус: room, pjsip, layout, layouts, recording, camera, microphone, video_send, screen_share, video_source, participants[], version, `sip_bridge`, `sip_ports`, `webrtc_sessions`, `conference_participants[]`. `conference_participants` отдаётся **тем же методом**, что и `GET /api/conference`, а не реестром напрямую: иначе состояние соединения считалось бы в одном маршруте и вралось в другом, а панель берёт участников именно отсюда (заперто `test_both_participant_routes_agree_on_state`) |
-| `/api/participants` | `{participants:[...]}` |
+| `/api/participants` | `{participants:[...]}` — тот же SIP/H.323-ряд, что в `/api/status`. Человекочитаемая строка `label` несёт **русскую** подпись состояния (`[входящий]`, `[звонит]`, `[соединение]`, `[в разговоре]`, `[завершён]`) и флаги мутов; `idle` остаётся **без** подписи — это дефолт «вызова нет», а не состояние, и заглушка на нём была бы утверждением о состоянии, которого нет. До правки четыре состояния из шести давали один текст (голый URI), а `confirmed` подписывался латинским `[connected]` рядом с русским `[входящий]`: в списке Qt «аппарат звонит», «соединение идёт» и «вызов завершился» были неотличимы. Термины совпадают со словарём панели `STATE_LABEL` — один и тот же `CallState` показывают оба интерфейса (заперто `tests/test_models.py`) |
 | `/api/chat` | `{messages:[...]}` |
 | `/api/dtmf` | `{events:[...]}` | последние DTMF-тоны (`in`/`out`); панель читает их в журнал тонального автомата и обновляет по событию `dtmf.digits` |
 | `/api/devices/video` | `{devices:[{id,name,driver,inputs,outputs}]}` |
