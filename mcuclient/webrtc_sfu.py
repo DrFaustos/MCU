@@ -42,6 +42,17 @@ class ConferenceParticipant:
     joined_at: float = field(default_factory=time.time)
     video_enabled: bool = True
     audio_enabled: bool = True
+    #: Счётчики КАДРОВ. Увеличивает их только :meth:`Conference.on_frame`,
+    #: боевого вызова которого не было никогда (единственный вызов — в
+    #: tests/test_webrtc_sfu.py), т.е. сами по себе эти поля всегда нули и
+    #: никакого отношения к живому медиа не имеют. Наружу в публичном ряду
+    #: они НЕ едут: `WebSession.conference_participants` перекрывает их
+    #: номерами версий каналов шины медиа — тем же источником, из которого
+    #: `AudioMixSession.tick` берёт живость (заперто
+    #: tests/test_web_server.py). Поля и метод оставлены как есть: `to_dict`
+    #: — контракт набора клавиш ряда, а их удаление было бы правкой через
+    #: поломку чужих кейсов; мёртвый писатель безвреден, пока ряд считает
+    #: шина. Убрать писателя — отдельный срез.
     video_frames: int = 0
     audio_frames: int = 0
     #: «Вошёл в комнату» — НЕ «connected». У реестра нет ни доступа к

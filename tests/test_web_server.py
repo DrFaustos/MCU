@@ -1072,6 +1072,222 @@ def test_both_routes_agree_on_dropped_state():
         s.close()
 
 
+# --- счётчики кадров в ряду участника --------------------------------------
+#
+# Ряд веб-участника несёт `video_frames`/`audio_frames`, но пишет их только
+# `Conference.on_frame`, боевого вызова которого не было никогда: ряд отдавал
+# ноль при живом медиа. Считать их обязана шина медиа — тот же источник, из
+# которого микшер берёт состав публикаторов и признак «говорит»
+# (`AudioMixSession.tick`), а не третья копия истины о кадрах.
+
+
+def _feed_frames(manager, pc, audio: int = 0, video: int = 0) -> None:
+    """Нагнать кадры в фейковый pc внутри рабочего цикла менеджера.
+
+    Паттерн боевого кейса `test_track_relay_delivers_video_and_audio`
+    (tests/test_webrtc_ingest.py): трек читается задачкой в loop менеджера,
+    поэтому нагонка обязана идти в том же loop — иначе релей ничего не примет
+    и кейс покраснеет из-за замера, а не из-за кода. Каждый `emit` даёт ровно
+    один кадр: фейковый трек после исчерпания поднимает ошибку, и задача
+    приёмника заканчивается.
+    """
+    import asyncio
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from test_webrtc_ingest import _FakeAudioFrame, _FakeTrack, _FakeVideoFrame
+
+    async def _feed():
+        for _ in range(video):
+            pc.emit("track", _FakeTrack("video", [_FakeVideoFrame(64, 48)]))
+            await asyncio.sleep(0.02)
+        for _ in range(audio):
+            pc.emit("track", _FakeTrack("audio", [_FakeAudioFrame()]))
+            await asyncio.sleep(0.02)
+
+    manager._run(_feed())
+
+
+def _web_row(s, pid):
+    """Ряд участника из публичной сводки — ровно то, что читает панель."""
+    return {r["id"]: r for r in s.conference_participants()}[pid]
+
+
+def test_participant_row_shows_frames_published_to_the_room():
+    """Ряд участника обязан показывать кадры, а не вечный ноль.
+
+    Замер 2026-10-22 (ветка h323) перед правкой: участник опубликовал 4
+    аудио-кадра, сводка сессий под тем же участником показала 4, ряд
+    участника — `audio_frames=0`. Причина в том, что `video_frames`/
+    `audio_frames` ряда увеличивает только `Conference.on_frame`, а боевого
+    вызова этого метода не было НИКОГДА (`git log -S conference.on_frame` —
+    пусто; единственный вызов живёт в tests/test_webrtc_sfu.py). Поле-обманка
+    того же класса, что `remote` у сессий и `state` у реестра.
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pid = s.conference_join("Публикует")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=4, video=2)
+
+        row = _web_row(s, pid)
+        assert row["audio_frames"] == 4, (
+            f"участник вылил в комнату 4 аудио-кадра, ряд показывает "
+            f"{row['audio_frames']!r}: поле не отражает ничего")
+        assert row["video_frames"] == 2, (
+            f"опубликовано 2 видео-кадра, ряд показывает "
+            f"{row['video_frames']!r}")
+    finally:
+        s.close()
+
+
+def test_participant_row_counters_come_from_the_media_bus():
+    """Источник счётчиков — шина медиа, а не сводка сессий.
+
+    Шина (`Conference.bus`) — единственное место, где видно, что участник льёт
+    в комнату: из неё микшер берёт состав публикаторов и живость. Заводить
+    третий счётчик (по сессиям) означало бы развести «что публикует» и «что
+    показывает панель».
+
+    Различие принципиально: `SessionInfo` считает кадры, ПРИНЯТЫЕ релеем
+    (у зрителя без публикации оно тоже растёт), а ряд участника обязан
+    отвечать на вопрос «что он даёт комнате». Поэтому у зрителя ряд остаётся
+    нулевым при живой сессии.
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pub = s.conference_join("Публикует")["participant"]["id"]
+        look = s.conference_join("Смотрит")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pub)
+        s.webrtc.handle_offer("v=0", role="viewer", participant=look)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=3)
+
+        bus_audio = s.conference.bus.audio_version(pub)
+        row = _web_row(s, pub)
+        assert bus_audio > 0, "замер не нагнал кадров в шину"
+        assert row["audio_frames"] == bus_audio, (
+            f"ряд показывает {row['audio_frames']!r}, шина — {bus_audio}: "
+            "счётчики взяты не из источника истины о медиа")
+
+        viewer = _web_row(s, look)
+        assert viewer["state"] == "connected", (
+            f"зритель должен быть подключён, а не {viewer['state']!r}")
+        assert viewer["audio_frames"] == 0, (
+            f"зритель ничего не публикует, но ряд приписывает ему "
+            f"{viewer['audio_frames']!r} кадров")
+    finally:
+        s.close()
+
+
+def test_participant_row_counters_do_not_outlive_the_channel():
+    """Счётчик ряда — про ТЕКУЩИЙ канал, он обнуляется вместе с ним.
+
+    `MediaBus.drop` убирает канал публикатора (и номер версии вместе с ним),
+    поэтому после обрыва ряд обязан показать ноль, а не накопленное за участие
+    число. Семантику фиксирует этот кейс: без него поле начало бы врать
+    иначе — «отвалившийся участник наговорил на 400 кадров».
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pid = s.conference_join("Публикует")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=3)
+
+        assert _web_row(s, pid)["audio_frames"] == 3, (
+            "до обрыва счётчик обязан показывать живой канал")
+
+        for x in list(s.webrtc.sessions()):
+            s.webrtc.close_session(x["id"])
+        row = _web_row(s, pid)
+        assert row["state"] == "dropped", (
+            f"после закрытия сессии state={row['state']!r}")
+        assert row["audio_frames"] == 0, (
+            f"канал убран из шины, но ряд всё ещё показывает "
+            f"{row['audio_frames']!r} кадров: отвалившийся участник выглядел "
+            "бы говорящим")
+    finally:
+        s.close()
+
+
+def test_participant_row_counters_are_per_participant():
+    """Кадры одного участника не записываются другому.
+
+    Шина считает по id публикатора, SIP-мост льёт в те же каналы под своими
+    id (`sip-<слот>`). Если счётчик ряда возьмётся из общего числа кадров,
+    второй участник получит чужие кадры.
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        a = s.conference_join("Говорит")["participant"]["id"]
+        b = s.conference_join("Молчит")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=a)
+        s.webrtc.handle_offer("v=0", role="publish", participant=b)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=3)
+
+        assert _web_row(s, a)["audio_frames"] == 3, "говорящий обязан быть виден"
+        assert _web_row(s, b)["audio_frames"] == 0, (
+            f"молчаливый участник получил "
+            f"{_web_row(s, b)['audio_frames']!r} кадров: счёт перетёк")
+    finally:
+        s.close()
+
+
+def test_both_participant_routes_agree_on_frame_counters():
+    """Счётчики обязаны считаться ОДНИМ местом: `/status` и `/api/conference`.
+
+    Замок на ФОРМУ решения, а не на дефект: он был зелёным и до правки (оба
+    маршрута отдавали ноль) и краснеет, если обогащение заведут в одном
+    маршруте, а не в `conference_participants`. Тот же класс дыры, что заперт
+    для `state` (`test_both_participant_routes_agree_on_state`).
+    """
+    s, _ = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pid = s.conference_join("Публикует")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=2)
+
+        via_status = {p["id"]: (p["video_frames"], p["audio_frames"])
+                      for p in s.status()["conference_participants"]}
+        via_route = {p["id"]: (p["video_frames"], p["audio_frames"])
+                     for p in s.conference_participants()}
+        assert via_status == via_route, (
+            f"маршруты разошлись по счётчикам: /status {via_status}, "
+            f"/conference {via_route}")
+    finally:
+        s.close()
+
+
+def test_sip_participant_rows_do_not_carry_web_frame_counters():
+    """SIP-ряд не обязан показывать веб-счётчики и не получает чужие кадры.
+
+    Обогашение ряда живёт в `conference_participants` и касается веб-реестра;
+    SIP/H.323-участник идёт своим `_participant_to_dict` со своим пространством
+    полей. Кейс не даёт распространить веб-счётчики туда, где их нечем считать.
+    """
+    s, eng = _session()
+    try:
+        fake = _fake_aiortc(s)
+        pid = s.conference_join("Публикует")["participant"]["id"]
+        s.webrtc.handle_offer("v=0", role="publish", participant=pid)
+        _feed_frames(s.webrtc, fake.pcs[0], audio=2)
+        eng.room.add(Participant(id=1, remote_uri="sip:x@y",
+                                 state=CallState.CONFIRMED))
+
+        rows = s.status()["participants"]
+        assert rows, "замер не создал SIP-участника"
+        for row in rows:
+            assert not row.get("audio_frames"), (
+                f"SIP-ряд получил веб-счётчики: {row}")
+    finally:
+        s.close()
+
+
 def test_conference_leave_accepts_someone_elses_id():
     """Выдворение: ``leave`` принимает ЛЮБОЙ id, и панель на это опирается.
 

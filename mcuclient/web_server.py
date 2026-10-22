@@ -885,6 +885,38 @@ class WebSession:
         ``close()`` (evict) и ``_mix_recipients()`` читают реестр напрямую
         СОЗНАТЕЛЬНО: им нужны только id, а звать сюда ленивую фабрику
         mediasoup-сигналинга ради них — второй источник истины без нужды.
+
+        Счётчики кадров (`video_frames`/`audio_frames`) здесь же и по той же
+        причине. Поля реестра увеличиваются только `Conference.on_frame`, а
+        БОЕВОГО вызова этого метода не было никогда: `git log -S
+        conference.on_frame` — пусто, единственный вызов живёт в
+        tests/test_webrtc_sfu.py. Замер 2026-10-22 перед правкой: участник
+        вылил в комнату 4 аудио-кадра, сводка сессий под тем же участником
+        показала 4, ряд наружу уехал с `audio_frames=0` — поле-обманка того
+        же класса, что `remote` у сессий и прежнее `connected` у реестра.
+
+        Считаю по номерам версий шины медиа (`video_version`/
+        `audio_version`), а не по сессиям, и вот почему: шина — ЕДИНСТВЕННОЕ
+        место, где видно, ЧТО участник даёт комнате, и из неё же
+        `AudioMixSession.tick` берёт состав публикаторов и признак «говорит»
+        (mcuclient/webrtc_sfu.py:368, 379-381). Счёт по `sessions()` дал бы
+        вторую истину о медиа: `SessionInfo` считает кадры, ПРИНЯТЫЕ релеем,
+        и у зрителя без публикации тоже растёт, т.е. оператор увидел бы у
+        молчаливого наблюдателя «говорит 400 кадров» (заперто
+        `test_participant_row_counters_come_from_the_media_bus`).
+
+        Семантика — ТЕКУЩИЙ канал, а не накопленное за участие: `bus.drop`
+        убирает канал публикатора вместе с номером версии, поэтому после
+        обрыва ряд показывает ноль. Иначе отвалившийся браузер выглядел бы
+        говорящим (заперто `test_participant_row_counters_do_not_outlive_the_channel`). Пространства
+        id разведены: SIP-мост льёт в ту же шину под `sip-<слот>`
+        (mcuclient/sip_web_bridge.py:97), поэтому кадры SIP-вызова не
+        записываются веб-участнику (заперто
+        `test_participant_row_counters_are_per_participant`).
+
+        Цена — два взятия локала на ряд (панель опрашивает `/status` раз в
+        3 с), что тривиально против уже существующих здесь `sessions()` и
+        `closed_participants()`.
         """
         rows = self.conference.participants()
         live = {s.get("participant") for s in self.webrtc.sessions()}
@@ -898,11 +930,17 @@ class WebSession:
         # ``closed_participants`` уже вычитает живые aiortc-сессии, но вычитаю
         # и здесь: менеджер не видит сайдкар, а приоритет живого — выше.
         dropped = self.webrtc.closed_participants() - live
+        bus = self.conference.bus
         for row in rows:
-            if row["id"] in live:
+            pid = row["id"]
+            if pid in live:
                 row["state"] = "connected"
-            elif row["id"] in dropped:
+            elif pid in dropped:
                 row["state"] = "dropped"
+            # Счётчики КАДРОВ ряда — номера версий каналов публикатора в
+            # шине, а не поля реестра: см. абзац про счётчики в docstring.
+            row["video_frames"] = bus.video_version(pid)
+            row["audio_frames"] = bus.audio_version(pid)
         return rows
 
     def conference_rename(self, pid: str, name: str) -> Dict[str, Any]:
