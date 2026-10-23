@@ -1527,3 +1527,148 @@ def test_webrtc_close_without_session_id_is_bad_request():
         assert fake.closed == []
     finally:
         srv.stop()
+
+
+# --- Разбор булева флага тела POST ------------------------------------------
+#
+# Живой замер (срез S, docs/STATUS.md) поймал классический дефект: флаг тела
+# приводился сырым bool(), а `bool("false")` и `bool("0")` есть True. Значит
+# оператор или внешний клиент, отправивший строку вместо JSON-литерала, получал
+# ровно противоположное желаемому: включённую передачу видео, демонстрацию
+# экрана и запись на диск. Панель шлёт boolean (`enabled: !status.video_send`) и
+# дефекта не видит никогда — видят его curl и внешние системы, т.е. ровно те,
+# ради кого проект называет себя совместимым MCU. Поэтому проверяется
+# поведение HTTP-пути, а не приватный хелпер: имя хелпера — деталь реализации.
+#
+# Пара «строка = литерал» важна в обе стороны: тест требует, чтобы строка
+# давала ТОТ ЖЕ результат, что литерал, а не чтобы строка запрещалась.
+
+
+def test_http_string_flag_turns_off_exactly_like_literal():
+    """Roundtrip: `{"enabled":"false"}` обязан выключать, а не включать.
+
+    Смысл именно в паре (литерал / строка): если сверить строку только с
+    нулём, тест позеленел бы и на «строка игнорируется».
+    Camera/microphone включены потому, что до правки их выключение строкой
+    не работало молча: ответ всегда `true`, и без чтения движка разница была
+    бы не видна вовсе.
+    """
+    # Четыре пути, а не два: у камеры и микрофона ответ — подтверждение
+    # команды (`{"ok": true, "camera": true}`), поэтому их флаг читается из
+    # движка, а не из тела ответа.
+    cases = (
+        ("/api/video_send", lambda body, eng: body["video_send"]),
+        ("/api/screen_share", lambda body, eng: body["screen_share"]),
+        ("/api/camera", lambda body, eng: eng.media_state.camera_enabled),
+        ("/api/microphone",
+         lambda body, eng: eng.media_state.microphone_enabled),
+    )
+    for path, seen in cases:
+        eng = _FakeEngine()
+        srv = _start_server(eng)
+        try:
+            code_lit, body_lit = _http(srv, "POST", path, {"enabled": False})
+            assert code_lit == 200, body_lit
+            assert seen(body_lit, eng) is False, (path, body_lit)
+            for value in ("false", "False", "0"):
+                code, body = _http(srv, "POST", path, {"enabled": True})
+                assert code == 200, body
+                assert seen(body, eng) is True, (path, body)
+                code, body = _http(srv, "POST", path, {"enabled": value})
+                assert code == 200, (path, value, body)
+                assert seen(body, eng) is False, (
+                    f"{path}: строка {value!r} не выключила флаг: {body}")
+        finally:
+            srv.stop()
+
+
+def test_http_string_flag_toggle_path_matches_literal():
+    """Тот же контракт на пути, где флаг идёт через _opt_bool.
+
+    `/api/recording` — единственный путь с флагом, который не создаёт файлов и
+    не требует участника: замер не оставляет артефактов в репозитории (иначе
+    сам тест породил бы recordings/, как это сделал ручной замер).
+    """
+    srv = _start_server()
+    try:
+        _http(srv, "POST", "/api/recording", {"enabled": True})
+        code_lit, body_lit = _http(srv, "POST", "/api/recording",
+                                   {"enabled": False})
+        assert code_lit == 200, body_lit
+        assert body_lit["recording"] is False, body_lit
+        _http(srv, "POST", "/api/recording", {"enabled": True})
+        code, body = _http(srv, "POST", "/api/recording",
+                           {"enabled": "false"})
+        assert code == 200, (code, body)
+        assert body["recording"] is False, (
+            f"строка \"false\" не выключила запись: {body}")
+    finally:
+        srv.stop()
+
+
+def test_http_flag_string_garbage_is_400_not_silently_true():
+    """Мусор вместо флага — 400 с причиной, а не молчаливое «истина».
+
+    Молча ложь или молча истина — один и тот же грех: запрос делает не то, что
+    просили. Идиома уже есть в этом же модуле: `_opt_int` на нечисло поднимает
+    ApiError, а не возвращает 0.
+    """
+    srv = _start_server()
+    try:
+        code, body = _http(srv, "POST", "/api/video_send",
+                           {"enabled": "да"})
+        assert code == 400, (code, body)
+        assert body["ok"] is False, body
+        assert "логич" in str(body.get("error", "")).lower(), (
+            f"отказ обязан называть природу значения: {body}")
+    finally:
+        srv.stop()
+
+
+def test_http_flag_default_without_key_is_preserved():
+    """Отсутствие ключа — прежнее значение по умолчанию, а не ошибка.
+
+    Правка разбора не имеет права сдвинуть дефолты: `{}` на камеру значит
+    «включить», как было до правки.
+    """
+    eng = _FakeEngine()
+    eng.media_state.camera_enabled = False
+    srv = _start_server(eng)
+    try:
+        code, body = _http(srv, "POST", "/api/camera", {})
+        assert code == 200, body
+        assert eng.media_state.camera_enabled is True, (
+            f"дефолт включённой камеры потерян: {body}")
+    finally:
+        srv.stop()
+
+
+def test_http_address_save_string_false_does_not_persist():
+    """`save:"false"` обязан НЕ сохранять конфиг, а не сохранять его.
+
+    Клавиша `save` описана в docs/WEB_CONTROL.md после среза S; её дефолт —
+    True (смена адреса постоянна). Строка "false" из-за bool() давала True,
+    т.е. «не сохранять» не работало никогда.
+    """
+    eng = _FakeEngine()
+    seen = []
+
+    def apply_sip_settings(**kw):
+        seen.append(dict(kw))
+        return {"ok": True}
+
+    eng.apply_sip_settings = apply_sip_settings
+    srv = _start_server(eng)
+    try:
+        code, body = _http(srv, "POST", "/api/address",
+                           {"domain": "example.org", "save": "false"})
+        assert code == 200, (code, body)
+        assert seen and seen[-1]["save"] is False, (
+            f"строка save=false дошла как истина: {seen}")
+        code, body = _http(srv, "POST", "/api/address",
+                           {"domain": "example.org"})
+        assert code == 200, (code, body)
+        assert seen[-1]["save"] is True, (
+            f"дефолт save=True потерян: {seen}")
+    finally:
+        srv.stop()

@@ -1709,15 +1709,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/mute":
             return s.mute(data.get("id"), audio=_opt_bool(data.get("audio")), video=_opt_bool(data.get("video")))
         if path == "/api/mute_all":
-            return s.mute_all(audio=bool(data.get("audio", True)), video=bool(data.get("video", False)))
+            return s.mute_all(audio=_flag_bool(data.get("audio"), True),
+                              video=_flag_bool(data.get("video"), False))
         if path == "/api/layout":
             return s.set_layout(str(data.get("layout", "")))
         if path == "/api/address":
             return s.set_address(domain=data.get("domain"), user=data.get("user"),
                                  display_name=data.get("display_name"),
                                  listen=data.get("listen"),
-                                 save=True if data.get("save") is None
-                                 else bool(data.get("save")))
+                                 save=_flag_bool(data.get("save"), True))
         if path == "/api/codecs":
             return s.set_codecs(str(data.get("profile", "")))
         if path == "/api/encryption":
@@ -1734,13 +1734,13 @@ class _Handler(BaseHTTPRequestHandler):
             return s.send_dtmf(str(data.get("digits", "")), _opt_int(data.get("id")),
                                str(data.get("method", "auto")))
         if path == "/api/camera":
-            return s.set_camera(bool(data.get("enabled", True)))
+            return s.set_camera(_flag_bool(data.get("enabled"), True))
         if path == "/api/microphone":
-            return s.set_microphone(bool(data.get("enabled", True)))
+            return s.set_microphone(_flag_bool(data.get("enabled"), True))
         if path == "/api/video_send":
-            return s.set_video_send(bool(data.get("enabled", True)))
+            return s.set_video_send(_flag_bool(data.get("enabled"), True))
         if path == "/api/screen_share":
-            return s.set_screen_share(bool(data.get("enabled", True)))
+            return s.set_screen_share(_flag_bool(data.get("enabled"), True))
         if path == "/api/video_source":
             return s.set_video_source(str(data.get("kind", "camera")), _opt_int(data.get("device")))
         if path == "/api/video_device":
@@ -1856,10 +1856,53 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.events.unsubscribe(q)  # type: ignore[attr-defined]
 
 
+#: Строковые записи флага, которые реально присылают внешние клиенты: curl,
+#: shell-переменная, ENV/YAML из автоматизации. Приведение `bool()` тут не
+#: помогает никогда: `bool("false")`, `bool("0")`, `bool("no")` есть True, т.е.
+#: «выключи» превращалось в «включи». Панель шлёт JSON-литералы и дефекта не
+#: видит вообще — видят его ровно те, ради кого проект называет себя
+#: совместимым MCU.
+_BOOL_TRUE = {"true", "yes", "on", "1"}
+_BOOL_FALSE = {"false", "no", "off", "0", ""}
+
+
+def _as_bool(value: Any) -> bool:
+    """Логическое значение тела запроса без `bool(str)`.
+
+    Числа значат то, что значат (0 — ложь), строки разбираются по смыслу, а
+    мусор поднимает ApiError: молчаливое «стало истина» равносильно молчаливой
+    лжи. Идиома взята у `_opt_int` рядом — тот тоже отказывает, а не возвращает
+    ноль.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _BOOL_TRUE:
+            return True
+        if token in _BOOL_FALSE:
+            return False
+    raise ApiError("Ожидалось логическое значение (true/false), "
+                   "получено " + repr(value))
+
+
 def _opt_bool(value: Any) -> Optional[bool]:
     if value is None:
         return None
-    return bool(value)
+    return _as_bool(value)
+
+
+def _flag_bool(value: Any, default: bool) -> bool:
+    """Флаг тела со значением по умолчанию: ключа нет — прежнее поведение.
+
+    Такие места до правки писались `bool(data.get("enabled", True))`: дефолт
+    сохранялся, а разбор строки — нет.
+    """
+    if value is None:
+        return default
+    return _as_bool(value)
 
 
 def _opt_int(value: Any) -> Optional[int]:
