@@ -1258,6 +1258,52 @@ def _server_get_response_keys():
     return out
 
 
+def _prose_top_keys(line):
+    """Верхние клавиши ответа, заявленные ПРОЗОЙ (без `{...}`), или [].
+
+    GET-таблица `docs/WEB_CONTROL.md` описывает форму ответа не только
+    литералом `{...}`, но и перечислением через запятую: строка `/api/status`
+    набрана именно так. Прежнее правило видело только фигурные скобки, и
+    такая строка молча выходила из проверки (`if not want: continue`): ложь
+    в перечислении была для стража невидима. Воспроизведено этим срезом —
+    подсов выдуманного имени в прозу зелёный, тот же подсов в `{}` красит
+    ровно тот же кейс.
+
+    Правила извлечения, каждое выросло из собственной ошибки того же дня:
+    (1) строка с `{}` — не проза, её сверяет `_brace_top_keys`, иначе имена
+    из пояснения удвоили бы проверку и дали бы ложные находки;
+    (2) берётся только часть ДО первой точки: после неё идут пояснения, где
+    попадаются слова и имена тестов (первая версия regex вытащила `GET`,
+    `api`, `conference` и `test_both_participant_routes_agree_on_state`);
+    (3) перечислением считается прогон не короче трёх имён: «SSE-поток
+    событий шины» перечнем не является и краснить не имеет права;
+    (4) токен — только строчные латиница/цифры/`_`; инлайн-код и `[]`
+    снимаются, поэтому `participants[]` и `sip_bridge` — клавиши, а `HTTP`,
+    `PNG`, `test_...` — нет;
+    (5) прогон обрывается на первом фрагменте, не похожем на имя: это граница
+    между перечнем и прозой, а не «ещё одно поле».
+    """
+    cells = line.split("|")
+    if len(cells) < 4:
+        return []
+    cell = cells[2]
+    if "{" in cell:
+        return []
+    head = cell.split(".", 1)[0]
+    if ":" not in head:
+        return []
+    keys = []
+    for raw in head.split(":", 1)[1].split(","):
+        tok = raw.strip().strip("`").strip()
+        if tok.endswith("[]"):
+            tok = tok[:-2]
+        if not re.fullmatch("[a-z_][a-z0-9_]*", tok) or tok.startswith(
+                "test_"):
+            break
+        keys.append(tok)
+    return keys if len(keys) >= 3 else []
+
+
 def _first_braces(text):
     """Первый сбалансированный `{...}` — заявленная форме строки таблицы."""
     start = text.find('{')
@@ -1391,6 +1437,10 @@ def _response_key_gaps(doc_get=None, lines=None, server=None,
     for path in sorted(doc_get):
         line = lines[doc_get[path] - 1]
         want = _brace_top_keys(_first_braces(line))
+        prose = False
+        if not want:
+            want = _prose_top_keys(line)
+            prose = bool(want)
         if not want:
             continue
         got = server.get(path)
@@ -1403,7 +1453,8 @@ def _response_key_gaps(doc_get=None, lines=None, server=None,
         missing = [key for key in want if key not in got]
         if missing:
             bad.append(
-                f'GET {path}: док (строка {doc_get[path]}) обещает клавиши '
+                f'GET {path}: док (строка {doc_get[path]}) обещает '
+                f'{"клавиши в прозе" if prose else "клавиши"} '
                 f'{", ".join(missing)} — их нет в ответе сервера (в ответе: '
                 f'{", ".join(sorted(got))})')
     return checked, blind, bad
@@ -1425,7 +1476,10 @@ def test_response_key_guard_sees_every_documented_get_row():
     ничем. Такой была `/api/address` (ответ — отчёт движка, а резолвить форму
     по имени `to_dict` нельзя: в `sip_address.py` два `to_dict` на 6 и 18
     клавиш). Срез 2026-10-23 закрыл её ЖИВЫМ замером, и слепых строк не
-    осталось вовсе. Любая новая — сигнал расширить резолв, а не список:
+    осталось вовсе. Срез этим же классом вернул в сверку и строки,
+    набранные ПРОЗОЙ без `{}` (`/api/status`): их перечень меряется
+    `_prose_top_keys`. Любая новая — сигнал расширить резолв, а не
+    список:
     молчаливое исключение строки из проверки неотличимо от подгонки под
     результат.
     """
@@ -1435,6 +1489,9 @@ def test_response_key_guard_sees_every_documented_get_row():
         f'checked={sorted(checked)}, blind={sorted(blind)}')
     assert not blind, f'появилась слепая строка: {sorted(blind)}'
     assert blind <= BLIND_RESPONSE_OK, f'слепая зона выросла: {sorted(blind)}'
+    assert '/api/status' in checked, (
+        'прозаический перечень /api/status снова вне сверки: '
+        f'checked={sorted(checked)}')
     assert '/api/codecs' in checked and '/api/encryption' in checked, \
         'helper-формы (codecs/encryption) не разобраны — тот класс невидимости, ' \
         'ради которого написан этот кейс'
@@ -1483,9 +1540,26 @@ def test_response_key_probe_recognizes_the_real_defect_shape():
     _c, _b, bad = gaps('`{srtp, web_tls, ...}` текущее шифрование',
                        {'srtp', 'srtp_modes', 'web_tls', 'web_tls_modes'})
     assert not bad, bad
-    # Легитимно — строка без {}.
+    # Легитимно — прозаический перечень, когда каждое имя есть в ответе.
+    _c, _b, bad = gaps('общий статус: room, pjsip, layout',
+                       {'room', 'pjsip', 'layout', 'recording'})
+    assert not bad and _c == ['/api/probe'] and not _b, (bad, _c, _b)
+    # Дефект — перечень набран ПРОЗОЙ (без `{}`) и обещает имя, которого
+    # в ответе нет. До этого среза строка была для правила невидима: без
+    # фигурных скобок `want` пустел и `continue` выбрасывал её из
+    # проверки молча — «зелёный страж» в ней не сверял ничего.
     _c, _b, bad = gaps('общий статус: room, pjsip, layout', {'room', 'pjsip'})
+    assert len(bad) == 1 and 'layout' in bad[0], bad
+    assert 'в прозе' in bad[0], bad
+    # Легитимно — проза без перечисления имён (SSE-поток) не сверяется.
+    _c, _b, bad = gaps('SSE-поток событий шины', {'room'})
     assert not bad and _c == [] and _b == set(), (bad, _c, _b)
+    # Приоритет у `{}`: как только форма набрана скобками, текст за ними
+    # перечнем не считается (иначе имена из пояснения удвоили бы
+    # проверку и породили бы ложные находки).
+    _c, _b, bad = gaps('общий статус: {room, pjsip}, layout',
+                       {'room', 'pjsip'})
+    assert not bad and _c == ['/api/probe'], (bad, _c)
     # Слепая зона: форма не выводима -> проверять нечего, краснеть нельзя.
     _c, blind, bad = gaps('`{uri, domain}` адрес МСУ', set())
     assert not bad and blind == {'/api/probe'}, (bad, blind)
