@@ -88,3 +88,90 @@ def test_stats():
     assert st["sip_frames"] == 1
     assert st["publisher"] == "sip"
     assert st["enabled"] is True
+
+
+# --- каналы на слот (per-slot) ----------------------------------------------
+
+
+def test_channel_of_is_per_slot_and_distinct_from_shared():
+    """Имя канала слота обязано отличаться от общего id.
+
+    Смысл per-slot каналов: на двух терминалах их PCM не затирают друг друга
+    в шине. Вернёт `channel_of` общий :attr:`SIP_PUBLISHER_ID` — вызовы снова
+    сольются в одного публикатора, ровно тот дефект, ради которого префикс
+    и ввели.
+    """
+    assert SipWebAudioBridge.channel_of(0) == "sip-0"
+    assert SipWebAudioBridge.channel_of(1) == "sip-1"
+    assert SipWebAudioBridge.channel_of(1) != SipWebAudioBridge.SIP_PUBLISHER_ID
+
+
+def test_publisher_publishes_into_its_own_channel():
+    """Названный канал принимает PCM; общий при этом остаётся пустым."""
+    bus = MediaBus()
+    bridge = SipWebAudioBridge(bus)
+    bridge.on_sip_audio(_pcm(2000), 16000, 1, "sip-3")
+
+    assert bus.latest_audio("sip-3") is not None
+    assert bus.latest_audio(SipWebAudioBridge.SIP_PUBLISHER_ID) is None
+
+
+def test_two_calls_do_not_overwrite_each_other():
+    """Два вызова обязаны сосуществовать в шине.
+
+    До per-slot каналов оба лились в id `sip`: кадр второго терминала затирал
+    первый, а `mix_excluding("sip")` вычитал разом обоих — терминалы друг
+    друга не слышали.
+    """
+    bus = MediaBus()
+    bridge = SipWebAudioBridge(bus)
+    bridge.on_sip_audio(_pcm(1000), 16000, 1, "sip-0")
+    bridge.on_sip_audio(_pcm(2000), 16000, 1, "sip-1")
+
+    a = bus.latest_audio("sip-0")
+    b = bus.latest_audio("sip-1")
+    assert a is not None and b is not None
+    assert a[0] != b[0], "PCM второго вызова затёр первый"
+
+
+def test_without_publisher_channel_is_shared_as_before():
+    """Порт, не назвавший канал, публикуется в общий id (обратная совместимость)."""
+    bus = MediaBus()
+    bridge = SipWebAudioBridge(bus)
+    bridge.on_sip_audio(_pcm(2000), 16000, 1)
+
+    assert bus.latest_audio(SipWebAudioBridge.SIP_PUBLISHER_ID) is not None
+
+
+def test_forget_removes_channel_from_bus():
+    """Уборка канала: завершённый вызов не имеет права остаться в миксе.
+
+    ``MediaBus`` держит последний кадр до ``drop``, а микшер собирает состав
+    публикаторов из шины — без уборки браузеры слушают застывший последний
+    кадр завершённого терминала (фантом).
+    """
+    bus = MediaBus()
+    bridge = SipWebAudioBridge(bus)
+    bridge.on_sip_audio(_pcm(2000), 16000, 1, "sip-1")
+
+    bridge.forget("sip-1")
+
+    assert bus.latest_audio("sip-1") is None
+
+
+def test_forget_without_drop_method_is_silent():
+    """Уборка не имеет права ронять мост, если у шины нет `drop`."""
+    class NoDrop:
+        def publish_audio(self, *a):
+            pass
+
+    SipWebAudioBridge(NoDrop()).forget("sip-0")  # не должно бросить
+
+
+def test_forget_swallows_bus_error():
+    """Упавшая шина не роняет мост из нативного потока pjsua2."""
+    class Boom:
+        def drop(self, pid):
+            raise RuntimeError("шина легла")
+
+    SipWebAudioBridge(Boom()).forget("sip-0")  # не должно бросить

@@ -11,6 +11,8 @@
 | **1. Контейнеры** (`scripts/dev/*.sh`) | Нужны два изолированных клиента, реальный pjsua2, GUI | SIP-звонок, видео, устройства |
 | **2. Процессы** (`scripts/dev/smoke_local.sh`) | Контейнеры недоступны / быстрый smoke | Сигналинг, CONFIRMED, teardown |
 | **2a. Видео** (`scripts/testbed/run_two_instance_video_test.sh`) | Нужно проверить видеопоток без камеры | `call.video active=True` на обоих концах |
+| **2b. DTMF** (`scripts/testbed/run_two_instance_dtmf_test.sh`) | Нужно проверить тоны (набор номера зала, IVR/PIN) | `[+] DTMF MCU<->MCU OK`, вся строка тонов у адресата |
+| **2c. Interop** (`scripts/testbed/run_two_instance_interop_test.sh`) | Меняли `sip.interop` / настройки аккаунта | CONFIRMED при `prack: mandatory` + `session_timer: required` + `rtcp_mux: on` |
 | **3. Браузер** (`--web`, `aiortc`) | Нужно проверить web-конференцию (BBB-подобно) | вход по имени, публикация своей камеры/микрофона, раздача видео и аудио другим браузерам |
 
 Оба пути используют **один и тот же код** из рабочего дерева.
@@ -139,6 +141,18 @@ scripts/dev/smoke_local.sh
 
 Переменные: `LISTEN_PORT`, `CALL_PORT`.
 
+> **Правило стенда (важно для агентов и новичков).** PJSIP поднят с
+> `threadCnt = 0`, поэтому без `libHandleEvents()` он не разбирает ни INVITE,
+> ни ответы, ни медиа. Ждать события вызова через `time.sleep` в стендовых
+> скриптах **нельзя** — вызов «никогда» не подтвердится. Используйте
+> `scripts/testbed/lib/pump.py`:
+> ```python
+> from scripts.testbed.lib.pump import pump
+> pump(engine, 25, lambda: any(e == "call.confirmed" for e, _ in events))
+> ```
+> `pump` ещё и регистрирует текущий поток в pjlib — без этого любой вызов
+> PJSIP API из «чужого» потока завершает процесс assertion'ом.
+
 ---
 
 ## 2a. Видео-стенд (2 процесса, синтетический источник Colorbar)
@@ -163,12 +177,71 @@ scripts/dev/smoke_local.sh
 
 ---
 
+## 2b. DTMF-стенд (2 процесса, тоны по SIP/RTP)
+
+```bash
+scripts/testbed/run_two_instance_dtmf_test.sh
+```
+
+Звонок MCU ↔ MCU, затем исходящий конец отправляет `1984#`. Успех:
+`[+] DTMF MCU<->MCU OK` и `DTMF приняты: 1984#` на принимающей стороне.
+
+Переменные: `LISTEN_PORT` (по умолч. 15084), `CALL_PORT` (15083).
+
+> **Почему этот стенд обязателен.** Unit-тесты проверяют только то, что мы
+> дёрнули `Call.sendDtmf`. Реальность другая: при `threadCnt = 0` pjsip **не
+> разыгрывает очередь тонов** — `sendDtmf("1984#")` и `dialDtmf("1984#")`
+> доносят до адресата ровно один тон «1». Отправка тон-за-тоном без накачки
+> `libHandleEvents` между тонами тоже ломается (адресат обрезает тон и теряет
+> символ). Ловится это только живым звонком:
+> `scripts/testbed/run_two_instance_dtmf_test.sh`.
+>
+> Второе следствие: `engine.process_events(0.16)` — это **не** «спать 160 мс».
+> `libHandleEvents()` возвращается на первом же обработанном пакете, поэтому
+> пауза между тонами держится по `time.monotonic()` маленькими шагами накачки
+> (`DTMF_PUMP_STEP_SEC` в `mcuclient/dtmf_service.py`).
+
+---
+
+## 2c. Interop-стенд (2 процесса, строгий набор настроек аккаунта)
+
+```bash
+scripts/testbed/run_two_instance_interop_test.sh
+```
+
+Оба конца поднимаются с `sip.interop` = `prack: mandatory`,
+`session_timer: required`, `session_expires_sec: 600`,
+`min_session_expires_sec: 90`, `rtcp_mux: on`. Успех: `[+] SIP-interop
+MCU<->MCU OK`, на обеих сторонах `CONFIRMED` и строка `SIP-interop: ...`
+в логе.
+
+Переменные: `LISTEN_PORT` (по умолч. 15086), `CALL_PORT` (15085).
+
+> **Зачем, если есть 2a/2b.** Движок ошибки прошивки `AccountConfig` глотает
+> (`try/except` + `hasattr` — иначе урезанная сборка не регистрируется),
+> поэтому юнит-тесты не отличают «настройка применена» от «настройка
+> проглочена». Стенд проверяет ровно это: в логе старта есть `SIP-interop:`
+> и нет ни одной строки «не применён», и при всём этом звонок доходит до
+> CONFIRMED. Так же он ловит и обратное — когда настройки совместимости сами
+> рвут звонок (так и был найден случай с `prack`, см.
+> [SIP_INTEROP.md](SIP_INTEROP.md)).
+>
+> Стенды делят `127.0.0.1` и чувствительны к таймингам: запускать строго по
+> одному, не параллельно с `pytest` (проверка DTMF на это особенно
+> обидная).
+
+---
+
 ## 3. Что считается успехом
 
 * `test_call.sh` → `ЗВОНОК ПОДТВЕРЖДЁН`;
 * в логах — `call.confirmed` / `CallState.CONFIRMED`;
 * **нет** `Assertion`, `Fatal Python error`, `Aborted` при завершении
-  (это регресс teardown — см. `_CALL_KEEPALIVE` в `mcuclient/sip_engine.py`).
+  (это регресс teardown — см. `_park_call()` / `_CALL_KEEPALIVE` в
+  `mcuclient/sip_engine.py`, проверяется `tests/test_call_parking.py`).
+  Отдельно: «полезная работа» сделалась, а процесс вернул `rc=134`
+  (SIGABRT) — это тот же регресс, а не «нормальный» выход; стенды
+  проверяют именно нулевой код возврата.
 
 ---
 
@@ -181,7 +254,7 @@ scripts/dev/smoke_local.sh
 | GUI-окна не появляются | нет X-авторизации | `up.sh` сам уйдёт в headless; задайте `MCU_X11=headless` |
 | `PJMEDIA_EAUD_SYSERR` | нет рабочего аудио | используйте `--null-audio` (up.sh делает сам) |
 | Пустые тайлы видео на Wayland | pjsua2 требует XID/HWND | `run.py` сам ставит `QT_QPA_PLATFORM=xcb`; при чистом Wayland — предупреждение |
-| `Assertion pjsua_call_set_user_data` | деструктор `_Call` на разрушенном Endpoint | уже исправлено (`_CALL_KEEPALIVE`); обновите код |
+| `Assertion pjsua_call_set_user_data` (`rc=134`) | деструктор `_Call` отработал после `libDestroy()` | исправлено `_park_call()` (он же зовёт `__disown__`); просто держать ссылку в `_CALL_KEEPALIVE` недостаточно — при выходе интерпретатора глобальные переменные очищаются |
 
 ---
 

@@ -29,7 +29,7 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .log import get_logger
 
@@ -42,6 +42,14 @@ try:  # pragma: no cover — зависит от окружения
 except Exception:  # noqa: BLE001 — aiortc опционален
     aiortc = None  # type: ignore
     WEBRTC_AVAILABLE = False
+
+
+#: Максимум записей в следе закрытых участников (:meth:`WebRTCManager.closed_participants`). Ограничение ОБЯЗАТЕЛЬНО: обрыв сессии — штатное
+#: событие (у панели нет reconnect'а, `onconnectionstatechange` лишь
+#: пишет подсказку), а след живёт в памяти процесса, т.е. без лимита это
+#: медленная утечка. Вытесняются СТАРЫЕ записи: оператору нужны свежие
+#: обрывы, а не память о первой сессии после запуска.
+CLOSED_TRACE_MAX = 256
 
 
 class WebRTCError(RuntimeError):
@@ -58,7 +66,19 @@ class SessionInfo:
     video_frames: int = 0
     audio_frames: int = 0
     created_at: float = field(default_factory=time.time)
-    remote: str = ""
+    #: id участника конференции, к которому относится сессия, либо ``None`` для
+    #: анонимного offer'а. Отдельное поле, а НЕ ``_MediaRelay.publish_id``: у
+    #: анонима publish_id равен id СЕССИИ (`webrtc-<N>`) ровно затем, чтобы он не
+    #: занял канал живого участника, — наружу такой «участник» отдавать нельзя:
+    #: оператор вызвал бы выдворение с id, которого нет в реестре конференции, и
+    #: получил бы штатное ok:false (заперто tests/test_webrtc_ingest.py).
+    #:
+    #: Поле `remote` здесь жило с первого коммита WebRTC-ingest (b972884) и за
+    #: всю историю проекта не было присвоено НИ РАЗУ: наружу оно уходило вечно
+    #: пустой строкой, т.е. «адрес неизвестен» выглядело штатным значением.
+    #: Убрано вместо «до лучших времён»: настоящее значение из aiortc отсюда не
+    #: добывается, а вечно-пустое поле — это обещание API, которое никто не держит.
+    participant: Optional[str] = None
 
 
 def _default_aiortc() -> Any:
@@ -122,7 +142,26 @@ class _MediaRelay:
         # зрители (fan-out). publish_id — id участника конференции.
         self._bus = bus
         self._publish_id = publish_id or info.id
+        # Сколько кадров ушло в шину: по нему закрытие сессии решает, убирать
+        # ли канал. Зритель (viewer) в шину не льёт ничего — его «канал»
+        # трогать нельзя: под тем же id может публиковать живая сессия.
+        self._bus_frames = 0
         self._tasks: List[asyncio.Task] = []
+
+    @property
+    def publish_id(self) -> str:
+        """Канал шины, в который этот ретранслятор пишет свои кадры."""
+        return self._publish_id
+
+    @property
+    def role(self) -> str:
+        """Роль сессии-владельца канала: ``publish`` или ``viewer``."""
+        return getattr(self._info, "role", None) or "publish"
+
+    @property
+    def published_to_bus(self) -> bool:
+        """Ушёл ли в шину хотя бы один кадр (значит канал мог создаться)."""
+        return self._bus_frames > 0
 
     def attach(self, track: Any) -> None:
         kind = getattr(track, "kind", "") or ""
@@ -158,6 +197,7 @@ class _MediaRelay:
         # 2) шина медиа -> зрители (fan-out).
         if self._bus is not None:
             self._bus.publish_video(self._publish_id, rgb, width, height)
+            self._bus_frames += 1
 
     def _emit_audio(self, frame: Any) -> None:
         pcm, rate, channels = _audio_pcm(frame)
@@ -166,6 +206,7 @@ class _MediaRelay:
             sink.on_audio_pcm(pcm, rate, channels)
         if self._bus is not None:
             self._bus.publish_audio(self._publish_id, pcm, rate, channels)
+            self._bus_frames += 1
 
     async def close(self) -> None:
         for task in self._tasks:
@@ -203,6 +244,16 @@ class WebRTCManager:
         self._ice_servers = list(ice_servers or [])
         self._offer_timeout = float(offer_timeout)
         self._sessions: Dict[str, SessionInfo] = {}
+        # След закрытых участников: pid -> момент закрытия. Нужен потому, что
+        # реестр ``Conference`` про сессии не знает физически и не может
+        # отличить «вошёл и ещё не включил камеру» от «была живая сессия и её
+        # нет» — оба дают ``joined`` (замер 2026-10-21: ОТВАЛИВСЯ == НЕ
+        # ПУБЛИКУЕТ). Пишется в ЕДИНОЙ точке закрытия ``_close_session``
+        # (через неё идут ``close_session``, ``close_for_participant``,
+        # ``close_all`` и обрыв по ``connectionstatechange``), вычищается при
+        # новом offer под тем же pid — состояние описывает ТЕКУЩЕЕ положение,
+        # а не историю.
+        self._closed: Dict[str, float] = {}
         self._pc: Dict[str, Any] = {}
         self._relays: Dict[str, _MediaRelay] = {}
         self._counter = 0
@@ -278,9 +329,19 @@ class WebRTCManager:
                             participant: Optional[str] = None) -> Dict[str, Any]:
         mod = self._aiortc
         self._counter += 1
-        sid = f"web-{self._counter}"
+        # Id СЕССИИ живёт в ОТДЕЛЬНОМ пространстве имён от id УЧАСТНИКА
+        # конференции (`Conference.join` тоже `web-<N>`, но со своим
+        # счётчиком). Иначе анонимный offer — а `participant` в контракте
+        # POST /api/webrtc/offer (docs/WEB_CONTROL.md) не обязателен — делает
+        # сид каналом шины, и он же есть канал живого участника. Замерено
+        # пробой боевым путём: join() и handle_offer() вернули `web-1`, PCM
+        # анонима лёг в канал участника, а conference.leave() снёс канал
+        # живой сессии (publishers() стал пустым при живом анониме).
+        sid = f"webrtc-{self._counter}"
         info = SessionInfo(id=sid)
         info.role = role
+        # Исходный participant, а НЕ publish_id релея: см. docstring SessionInfo.
+        info.participant = participant
         pc = mod.RTCPeerConnection(self._pc_config())
         # publish_id — id участника конференции (совпадает с тем, на
         # который подписываются зрители); иначе id сессии.
@@ -290,6 +351,8 @@ class WebRTCManager:
             self._sessions[sid] = info
             self._pc[sid] = pc
             self._relays[sid] = relay
+            if participant:                # вернулся: след про обрыв не нужен
+                self._closed.pop(participant, None)
 
         # Fan-out: для зрителя добавляем исходящие треки с шины.
         out_tracks: List[Any] = []
@@ -386,7 +449,7 @@ class WebRTCManager:
                 {
                     "id": s.id, "state": s.state, "role": s.role,
                     "video_frames": s.video_frames, "audio_frames": s.audio_frames,
-                    "created_at": s.created_at, "remote": s.remote,
+                    "created_at": s.created_at, "participant": s.participant,
                 }
                 for s in self._sessions.values()
             ]
@@ -400,6 +463,34 @@ class WebRTCManager:
             log.debug("Закрытие сессии %s с ошибкой", sid, exc_info=True)
         return True
 
+    def close_for_participant(self, pid: str) -> int:
+        """Закрыть ВСЕ сессии участника конференции; вернуть их число.
+
+        Связь «сессия ↔ участник» живёт в ``_MediaRelay.publish_id`` (её
+        задаёт ``handle_offer(participant=...)``), в ``SessionInfo`` поля нет —
+        поэтому поиск идёт по релеям, а сессии анонимных offer'ов (у которых
+        ``publish_id`` = id сессии, а не ``web-N``) сюда не попадают: чужое
+        пространство имён id трогать нельзя.
+
+        Без этого метода ``Conference.leave`` физически не мог точечно найти
+        сессии выгнанного: он знал только реестр и шину. Замер 2026-10-21:
+        после leave `RTCPeerConnection` был жив, релей тоже, и следующий
+        входящий трек воссоздавал убранный канал шины — выгнанный возвращался
+        в микс застывшим PCM (заперто tests/test_web_leave_closes_ingest.py).
+        """
+        if not pid:
+            return 0
+        with self._lock:
+            sids = [sid for sid, relay in self._relays.items()
+                    if relay.publish_id == pid]
+        closed = 0
+        for sid in sids:
+            if self.close_session(sid):
+                closed += 1
+        if closed:
+            log.info("Закрыто сессий %d: участник %s вышел", closed, pid)
+        return closed
+
     async def _close_session(self, sid: str) -> None:
         pc = self._pc.pop(sid, None)
         relay = self._relays.pop(sid, None)
@@ -408,6 +499,7 @@ class WebRTCManager:
             self._viewer_tracks.pop(sid, None)
         if relay is not None:
             await relay.close()
+            self._forget_bus_channel(relay)
         if pc is not None:
             try:
                 await pc.close()
@@ -415,6 +507,70 @@ class WebRTCManager:
                 pass
         if info is not None:
             info.state = "closed"
+            # След ставится ЗДЕСЬ, а не в вызывающих местах: все четыре пути
+            # закрытия проходят через эту корутину, поэтому пропустить один из
+            # них (как это было с парным `bus.drop`) физически невозможно.
+            if info.participant:
+                self._mark_closed(info.participant)
+
+    def _mark_closed(self, pid: str) -> None:
+        """Запомнить: у участника БЫЛА сессия и теперь её нет."""
+        with self._lock:
+            # pop перед записью: dict держит порядок вставки, поэтому
+            # повторное закрытие того же pid освежает его запись, а вытеснение
+            # идёт по давности, а не по алфавиту id.
+            self._closed.pop(pid, None)
+            self._closed[pid] = time.time()
+            while len(self._closed) > CLOSED_TRACE_MAX:
+                self._closed.pop(next(iter(self._closed)))
+
+    def closed_participants(self) -> Set[str]:
+        """Участники с закрытыми сессиями и БЕЗ живых на этот момент.
+
+        Нужно ``WebSession.conference_participants``: реестр ``Conference``
+        различить «ждём трек» и «браузер отвалился» не может — про сессии он
+        не знает. Замер 2026-10-21 до правки: отвалившийся и вошедший без
+        камеры давали один и тот же ``joined``, т.е. срез про ``state`` сократил
+        одну ложь до двух неразличимых правд, и оператор по панели не видел,
+        кого ждать, а кого убирать. Живые сессии вычитаются здесь же: след
+        обязан описывать текущее положение, а не прошлые обрывы.
+        """
+        with self._lock:
+            live = {i.participant for i in self._sessions.values()
+                    if i.participant}
+            return set(self._closed) - live
+
+    def _forget_bus_channel(self, relay: _MediaRelay) -> None:
+        """Убрать канал шины, который наполняла закрытая сессия.
+
+        ``MediaBus`` держит последний кадр до ``drop()``, а
+        ``AudioMixSession.tick()`` берёт состав публикаторов именно из шины.
+        Без уборки браузер, закрывший вкладку, остаётся в миксе всех
+        остальных бессрочно: его застывший кадр суммируется в каждый
+        следующий микс (замерено пробой: амплитуда 3000 до закрытия и 3000
+        после; ``publishers()`` — ['web-1'] при нуле живых сессий).
+
+        Канал принадлежит не сессии, а участнику: ``publish_id`` = id
+        конференции, и под ним могут стоять две живые сессии (публикация и
+        просмотр, два браузера одного человека). Убираем только когда под этим
+        id не публикует больше никто живой, иначе зритель, закрывший своё
+        окно, оглушил бы активного публикуемого участника.
+        """
+        if self._bus is None or not relay.published_to_bus:
+            return
+        pid = relay.publish_id
+        with self._lock:
+            others = [o for o in self._relays.values() if o is not relay]
+        for other in others:
+            if other.publish_id != pid:
+                continue
+            # Живая публикация под тем же id — канал остаётся.
+            if other.published_to_bus or other.role == "publish":
+                return
+        try:
+            self._bus.drop(pid)
+        except Exception:  # noqa: BLE001 — закрытие сессии не должно падать
+            log.debug("Уборка канала шины %s упала", pid, exc_info=True)
 
     def close_all(self) -> None:
         for sid in list(self._sessions.keys()):

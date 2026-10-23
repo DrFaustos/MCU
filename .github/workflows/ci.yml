@@ -54,9 +54,16 @@ jobs:
         run: |
           mypy mcuclient/models.py mcuclient/call_registry.py \
                mcuclient/call_manager.py mcuclient/pjsip_adapter.py \
-               mcuclient/config.py mcuclient/qt_platform.py
+               mcuclient/config.py mcuclient/qt_platform.py \
+               mcuclient/adaptive_bitrate.py
       - name: Mypy — остальной пакет (не блокирует, пока идёт типизация)
         run: mypy mcuclient --ignore-missing-imports || true
+      - name: Аннотации STRICT_MODULES (без mypy, блокирует)
+        # docs/STATUS.md обещает, что новые модули держатся типизированными
+        # через scripts/check_annotations.py, а mypy строг лишь к списку выше.
+        # Без этого шага обещание исполнялось только вручную: в runner'е и
+        # pytest'е аннотации не проверяются вообще.
+        run: python scripts/check_annotations.py
 
   # Быстрая проверка, что dev-скрипты синтаксически валидны и контейнерные
   # определения на месте — без реальной сборки образов (она долгая и локальная).
@@ -83,8 +90,24 @@ jobs:
           python -m py_compile run.py mcuclient/qt_platform.py mcuclient/doctor.py \
               mcuclient/rtcp_metrics.py mcuclient/icons.py \
               mcuclient/x11_embed.py \
-              scripts/testbed/two_instance_video_call.py
+              mcuclient/h323_audio_bridge.py \
+              scripts/testbed/two_instance_video_call.py \
+              scripts/testbed/h323_native_two_hosts.py \
+              scripts/testbed/h323_native_mcu_three_hosts.py \
+              scripts/doc_values_selftest.py
           echo "OK"
+
+      # Сам страж (tests/test_doc_values.py) бегает в pytest, но «зелёный страж»
+      # неотличим от неработающего: этот self-test подсовывает в доки враньё и
+      # проверяет, что страж краснеет. Именно так 2026-10-09 и вскрылось, что он
+      # не видел тире-форму ссылок. Без шага механизм мог сгнить молча.
+      # Job выбран dev-scripts, а не lint-and-test: self-test делает 8 прогонов
+      # стража, а lint-and-test — matrix из трёх версий Python.
+      - name: Install pytest (нужен self-test'у стража)
+        run: python -m pip install pytest
+
+      - name: Doc-guard self-test (страж обязан краснеть на подсов)
+        run: python scripts/doc_values_selftest.py
 
       - name: Testbed configs consistency (H.323 route, video stand)
         run: |

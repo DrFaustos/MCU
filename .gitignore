@@ -105,6 +105,9 @@ __pycache__/
 tools/h323d/*.o
 tools/h323d/bin/
 tools/h323d/build/
+# собранный бинарь в корне каталога (Makefile-путь): 2.2 МБ, пересобирается
+# ./scripts/build_h323d.sh — в дереве ему не место
+tools/h323d/mcu_h323d
 .build-venv2/
 
 # Локальное venv для WebRTC (aiortc) — не коммитим
@@ -119,3 +122,6 @@ node_modules/
 mediasoup-sidecar/node_modules/
 # Пустой корневой lock (создан случайно в корне, не нужен)
 /package-lock.json
+
+# scratch для агентов (одноразовые скрипты/логи)
+.agent/

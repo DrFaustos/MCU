@@ -49,7 +49,10 @@ def test_mixed_track_returns_pcm_from_mixer(monkeypatch=None):
     saved = sys.modules.get("av")
     sys.modules["av"] = _FakeAv()
     try:
-        frame = asyncio.get_event_loop().run_until_complete(track.recv())
+        # asyncio.run, а не get_event_loop(): второй в 3.12 уже даёт
+        # DeprecationWarning, а в 3.14 бросает RuntimeError (луп не
+        # создаётся) — тест падал на новой интерпретаторе, хотя код корректен.
+        frame = asyncio.run(track.recv())
         assert frame is not None
     finally:
         if saved is None:

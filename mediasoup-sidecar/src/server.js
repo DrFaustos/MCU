@@ -120,6 +120,14 @@ async function handle(method, path, body) {
     };
   }
 
+  // Закрыть ОДИН транспорт (Python обязан освобождать PlainTransport при
+  // каждой повторной попытке поднять RTP-мост — см. Room.closeTransport).
+  if (method === 'POST' && path === '/transports/close') {
+    const room = getRoom(body.roomId);
+    room.closeTransport(String(body.transportId));
+    return { ok: true };
+  }
+
   // connect транспорта (DTLS для WebRTC)
   if (method === 'POST' && path === '/transports/connect') {
     const room = getRoom(body.roomId);

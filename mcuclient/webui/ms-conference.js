@@ -163,6 +163,43 @@ async function msReconnect() {
   $('rtcHint').textContent = 'mediasoup: переподключено';
 }
 
+// Освободить СЕРВЕРНЫЕ ресурсы: транспорт и учёт участника на сайдкаре.
+//
+// transport.close() в mediasoup-client гасит только локальный WebRTC-объект в
+// браузере — вторую сторону закрывает приложение, и это наш /mediasoup/leave.
+// Без него WebRtcTransport висит на сайдкаре до смерти его процесса и держит
+// пару UDP+TCP портов из rtc_min..rtc_max (по умолчанию 40000-40100 = 101
+// порт): закрыл вкладку, открыл заново — порт потрачен.
+// viaBeacon=true — путь для pagehide: fetch при выгрузке не доживает, а
+// sendBeacon не даёт задать заголовок Authorization, поэтому токен — в query
+// (qs): сервер принимает его и там (web_server._authorized читает parse_qs).
+function msLeave(viaBeacon) {
+  if (!me) return;
+  const pid = me.id;
+  Object.values(_msConsumers).forEach(c => { try { c.consumer.close(); } catch (e) {} });
+  _msConsumers = {};
+  _msProducers.forEach(p => { try { p.close(); } catch (e) {} });
+  _msProducers = [];
+  try { if (_msSend) _msSend.close(); } catch (e) {}
+  try { if (_msRecv) _msRecv.close(); } catch (e) {}
+  _msSend = null; _msRecv = null;
+  _msProducerMap = {};
+  if (window._msSyncTimer) { clearInterval(window._msSyncTimer); window._msSyncTimer = null; }
+  _msEnabled = false;
+  if (viaBeacon) {
+    try {
+      navigator.sendBeacon('/api/mediasoup/leave' + qs,
+        new Blob([JSON.stringify({ participant: pid })], { type: 'application/json' }));
+    } catch (e) { /* браузер уже уходит, сделать больше нельзя */ }
+    return;
+  }
+  api('/mediasoup/leave', 'POST', { participant: pid }).catch(() => {});
+}
+
+// Закрытая вкладка/обновление страницы — единственный момент, когда участник
+// «исчезает» без какого-либо вызова к серверу.
+window.addEventListener('pagehide', () => { if (_msEnabled || _msSend) msLeave(true); });
+
 // Включить/выключить mediasoup-режим (вместо aiortc-пути).
 async function msToggle(on) {
   if (on) {
@@ -172,20 +209,11 @@ async function msToggle(on) {
     await msSync();
     if (!window._msSyncTimer) window._msSyncTimer = setInterval(msSync, 4000);
   } else {
-    _msEnabled = false;
-    if (window._msSyncTimer) { clearInterval(window._msSyncTimer); window._msSyncTimer = null; }
-    _msProducers.forEach(p => { try { p.close(); } catch (e) {} });
-    _msProducers = [];
-    try { if (_msSend) _msSend.close(); } catch (e) {}
-    try { if (_msRecv) _msRecv.close(); } catch (e) {}
-    _msSend = null; _msRecv = null;
-    Object.values(_msConsumers).forEach(c => { try { c.consumer.close(); } catch (e) {} });
-    _msConsumers = {};
-    _msProducerMap = {};
+    msLeave(false);            // закрывает и серверную сторону
     await rtcUnpublish();
   }
   $('rtcHint').textContent = 'SFU: ' + (on ? 'mediasoup' : 'aiortc');
 }
 
 window.msConference = { toggle: msToggle, sync: msSync, available: msAvailable,
-                       reconnect: msReconnect, health: msHealth };
+                       reconnect: msReconnect, health: msHealth, leave: msLeave };

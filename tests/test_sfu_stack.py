@@ -39,7 +39,7 @@ def test_compose_has_both_services_and_build_context():
 def test_compose_control_api_is_localhost_only():
     text = _read(COMPOSE)
     # Control API mediasoup не должен торчать наружу.
-    assert "127.0.0.1:4443:4443" in text
+    assert "127.0.0.1:${MCU_MEDIASOUP_HTTP_PORT:-4443}:4443" in text
 
 
 def test_compose_publishes_udp_media_range():
@@ -57,5 +57,16 @@ def test_compose_requires_announced_ip_and_turn_password():
 def test_env_example_has_required_keys():
     text = _read(ENV_EXAMPLE)
     for key in ("ANNOUNCED_IP", "TURN_USER", "TURN_PASSWORD",
-                "MCU_MEDIASOUP_RTC_MIN", "MCU_MEDIASOUP_RTC_MAX"):
+                "MCU_MEDIASOUP_RTC_MIN", "MCU_MEDIASOUP_RTC_MAX",
+ "MCU_STACK_NAME", "MCU_MEDIASOUP_HTTP_PORT"):
         assert key in text, f"в .env.example нет {key}"
+
+
+def test_compose_is_multi_stack_safe():
+ text = _read(COMPOSE)
+ assert "name: ${MCU_STACK_NAME:-mcu}-sfu" in text
+ assert "container_name: ${MCU_STACK_NAME:-mcu}-mediasoup" in text
+ assert "--listening-port=${TURN_LISTEN_PORT:-3478}" in text
+ turn = _read(ROOT / "docker" / "turn" / "docker-compose.yml")
+ assert "name: ${MCU_STACK_NAME:-mcu}-turn" in turn
+ assert "container_name: ${MCU_STACK_NAME:-mcu}-coturn" in turn

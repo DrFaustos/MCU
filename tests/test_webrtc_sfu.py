@@ -126,16 +126,6 @@ def test_participants_snapshot_has_kind_web():
     assert snap[0]["name"] == "Аня"
 
 
-def test_on_frame_counts():
-    conf = Conference()
-    p = conf.join("Аня")
-    conf.on_frame(p.id, "video")
-    conf.on_frame(p.id, "video")
-    conf.on_frame(p.id, "audio")
-    q = conf.get(p.id)
-    assert q.video_frames == 2 and q.audio_frames == 1
-
-
 def test_on_change_callback_fires():
     calls = []
     conf = Conference(on_change=lambda: calls.append(1))
@@ -150,3 +140,97 @@ def test_leave_drops_bus_media():
     conf.bus.publish_video(p.id, "f", 1, 1)
     conf.leave(p.id)
     assert conf.bus.latest_video(p.id) is None
+
+
+# --- индикатор «говорит» у веб-участников ------------------------------------
+
+
+def test_update_levels_sets_speaking_and_volume():
+    conf = Conference()
+    a = conf.join("Аня")
+    b = conf.join("Боря")
+    changed = conf.update_levels({a.id: 100, b.id: 0}, a.id)
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[a.id]["speaking"] is True and rows[a.id]["volume_level"] == 100
+    assert rows[b.id]["speaking"] is False and rows[b.id]["volume_level"] == 0
+    assert changed == 1, "изменённым считается только тот, у кого поле поехало"
+
+
+def test_update_levels_is_idempotent():
+    conf = Conference()
+    a = conf.join("Аня")
+    conf.update_levels({a.id: 55}, a.id)
+    assert conf.update_levels({a.id: 55}, a.id) == 0
+
+
+def test_update_levels_handles_garbage_and_no_speaker():
+    conf = Conference()
+    a = conf.join("Аня")
+    conf.update_levels({a.id: None}, None)
+    row = conf.participants()[0]
+    assert row["volume_level"] == 0 and row["speaking"] is False
+
+
+def test_update_levels_does_not_fire_on_change():
+    """Тик микшера идёт каждые 20 мс.
+
+    Поднимать на уровни событие «список участников изменился» — значит
+    заваливать подписчиков десятки раз в секунду вместо того, чтобы панель
+    просто забрала их при следующем опросе статуса.
+    """
+    calls: list = []
+    conf = Conference(on_change=lambda: calls.append(1))
+    a = conf.join("Аня")
+    after_join = len(calls)          # join своё событие уже поднял
+    conf.update_levels({a.id: 80}, a.id)
+    conf.update_levels({a.id: 20}, None)
+    assert len(calls) == after_join, "на уровни событие смены списка не поднимается"
+
+
+def test_participants_snapshot_carries_speaking_and_volume():
+    """Ключи to_dict — контракт панели: тайл браузера берёт их оттуда."""
+    conf = Conference()
+    p = conf.join("Аня")
+    conf.update_levels({p.id: 42}, p.id)
+    row = conf.participants()[0]
+    assert row["speaking"] is True
+    assert row["volume_level"] == 42
+    assert row["kind"] == "web"
+
+
+def test_registry_row_has_no_dead_frame_counters():
+    """Ряд реестра не имеет права нести клавиши, которые нечем наполнить.
+
+    Замер 2026-10-22 (ветка h323): участник вылил в шину 5 аудио-кадров
+    (`bus.audio_version` = 5), а ряд реестра уехал наружу с `audio_frames=0`.
+    Наполнять эти поля обязан был `Conference.on_frame`, боевого вызова которого
+    не было НИКОГДА (`git log -S conference.on_frame` — пусто по всей истории).
+    Метод и поля удалены; кейс остаётся замком на возврат клавиш-заглушек: их
+    нечем наполнить в слое, который про медиа не знает ничего.
+    Публичный ряд починен слайсом ранее: там счётчики считает шина. Но клавиши
+    остались в реестре, который про медиа не знает ничего, — т.е. тот же слой,
+    что уже врал про `state`, по-прежнему врут про кадры. Наружу ряд реестра
+    уходит и напрямую: `POST /api/conference/join` отдаёт `to_dict()` целиком.
+    """
+    conf = Conference()
+    p = conf.join("Аня")
+    for _ in range(5):
+        conf.bus.publish_audio(p.id, b"\x00\x01" * 16, 48000, 1)
+
+    row = conf.participants()[0]
+    for key in ("video_frames", "audio_frames"):
+        assert key not in row, (
+            f"ряд реестра по-прежнему несёт {key}={row[key]!r} при живой шине: "
+            "клавиша обязывает выглядеть «не публикует»")
+    assert conf.bus.audio_version(p.id) == 5, "замер не нагнал кадры в шину"
+
+
+def test_registry_has_no_unreachable_frame_writer():
+    """Мёртвый писатель обязан быть удалён, а не «оставлен как безвредный».
+
+    Пока у реестра есть метод, который никто не зовёт, любой читатель кода
+    (и следующий срез) волен решить, что счётчики живые: ровно так этот
+    кандидат был отвергнут один раз. Проверяется достижимость, а не наличие.
+    """
+    assert not hasattr(Conference, "on_frame"), (
+        "у Conference остался on_frame: писатель, недостижимый из боя")
