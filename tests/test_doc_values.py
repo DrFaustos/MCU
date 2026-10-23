@@ -145,6 +145,12 @@ DENIED_PHRASES = [
      'AudioMixSession.mixed_for — микс голосов всех, кроме самого зрителя'),
     ('только сигнальный',
      'OpenAudioChannel переопределён на PCM-канал, звук через хост идёт'),
+    ('звук участников в браузер не идёт',
+     'зрителю уходит ОДИН смешанный аудио-трек из AudioMixSession.mixed_for\n'
+     '     (webrtc_ingest.py), панель вешает на него <audio> (webui/index.html)'),
+    ('не раздаются (нет SFU/TURN)',
+     'SFU-lite на aiortc и TURN в репозитории (§7a, §7b, docker/turn/), плюс\n'
+     '     опциональный mediasoup-SFU (§10): и то, и другое есть'),
 ]
 
 

@@ -499,3 +499,36 @@ def test_declared_sip_channel_without_conference_still_gets_the_spotlight():
         f"служебный канал перебил объявленный: speaker={mix.active_speaker()!r} "
         f"при levels={mix.levels()}")
     assert term.volume_level > 0, "громкость вызова не доехала до участника"
+def test_viewer_mix_contains_the_call_voice():
+    """Голос SIP-вызова обязан лежать в миксе, который уходит браузеру.
+
+    Замок на утверждение документа, а не на правку кода: до 2026-10-22
+    docs/WEB_CONTROL.md §7 («Что пока НЕ сделано») говорил оператору «звук
+    участников в браузер не идёт». Это неверно, и проверка цепочки, а не
+    догадка: панель шлёт в viewer-offer `participant: me.id`
+    (webui/index.html), сервер сохраняет его (web_server.py),
+    `webrtc_ingest._handle_offer` при наличии participant отдаёт зрителю ОДИН
+    трек из `AudioMixSession.mixed_for`, а на `ontrack` панель вешает <audio>.
+    Значит достаточно доказать, что голос вызова попадает в микс получателя.
+
+    Объявление уровней (`set_sip_level_targets`) для этого НЕ требуется:
+    подсветке нужно знать адресата, миксу — нет. Именно поэтому отрицание
+    «звука в браузере» было непроверяемым набором: путь зелёный, а док — нет.
+    """
+    conf = Conference()
+    anna = conf.join("Анна")            # браузерный зритель
+    mix = AudioMixSession(conf.bus, recipients=lambda: [anna.id],
+                          conference=conf)
+
+    # Единственный источник звука в комнате — вызов в своём канале.
+    conf.bus.publish_audio("sip-0", _pcm(3000, 160), 16000, 1)
+    mix.tick()
+
+    item = mix.mixed_for(anna.id)
+    assert item is not None, (
+        "зритель конференции вообще остался без микса: levels=%s"
+        % mix.levels())
+    assert _amp(item[1]) > 0, (
+        "голос вызова не доехал до браузерного зрителя: микс есть, но тишина "
+        "(levels=%s) — док был бы прав, а набора, который это ловит, нет"
+        % mix.levels())
