@@ -1430,3 +1430,199 @@ def test_response_key_probe_recognizes_the_real_defect_shape():
     # Слепая зона: форма не выводима -> проверять нечего, краснеть нельзя.
     _c, blind, bad = gaps('`{uri, domain}` адрес МСУ', set())
     assert not bad and blind == {'/api/probe'}, (bad, blind)
+
+
+# --- Вложенные формы рядов: верхнеуровневое правило до них не дотягивается --
+#
+# `test_rest_api_documented_response_keys_exist` сверяет ВЕРХНИЙ уровень ответа,
+# и его же автор честно записал ограничением: форму вложенных объектов он не
+# сверяет. В эту щель попались живые строки docs/WEB_CONTROL.md:
+#   * `/api/devices/video` обещал `inputs`/`outputs`, которых у видеоряда не
+#     было никогда: писатель `media_devices.list_video_devices` кладёт
+#     `id,name,driver,synthetic`, а `inputs`/`outputs` кладёт ТОЛЬКО аудио-метод
+#     (строка дока про аудио правдива и остаётся нетронутой);
+#   * `/api/conference` обещал вложенный ряд `{id,name,kind,video,audio}`, а
+#     `WebParticipant.to_dict` отдаёт `video_enabled`/`audio_enabled` — клавиш
+#     `video`/`audio` наружу не уходило никогда (замер ряда и ответа join).
+# Панель читает серверные имена (`muted: !p.audio_enabled`, `mics.filter(x =>
+# x.inputs > 0)` — фильтр сидит на загрузчике микрофонов), т.е. врала таблица,
+# а не код: правка дока не прячет дефект кода.
+#
+# Два механизма снятия формы, потому что AST бессилен ровно там, где он уже
+# подвёл: `_returned_keys` для `conference_participants` даёт пусто (ряд
+# собирается обогащением), поэтому ряд конференции меряется ЖИВЬЕМ, а ряд
+# устройств — литералами `append({...})` модуля-писателя.
+
+DOC_NESTED_ROWS = {
+    # путь -> (модуль-писатель, функция) | None: ряд меряется живьем
+    "/api/devices/video": ("mcuclient/media_devices.py", "list_video_devices"),
+    "/api/devices/audio": ("mcuclient/media_devices.py", "list_audio_devices"),
+    "/api/conference": None,
+}
+
+
+def _doc_nested_keys(line):
+    """Верхние клавиши ПЕРВОГО вложенного `[{...}]` строки таблицы.
+
+    [] если вложенной формы нет — такую строку это правило не проверяет (её
+    проверяет верхнеуровневое). Многоточие и `?` на конце не клавиши.
+    """
+    match = re.search(r"\[\{([^{}]*)\}\]", line)
+    if not match:
+        return []
+    keys = []
+    for token in match.group(1).split(","):
+        key = token.strip().rstrip("?")
+        if re.match("^[a-z_][a-z0-9_]*$", key):
+            keys.append(key)
+    return keys
+
+
+def _writer_row_keys(rel, func_name):
+    """Клавиши ряда, которые КЛАДЁТ писатель: `append({...})` и `row["k"] = ...`.
+
+    Разбирается функция конкретного модуля, а не реестр `web_server.py`:
+    `list_video_devices`/`list_audio_devices` там отсутствуют физически (сервер
+    проксирует движок), и искать их там — ровно та слепота, из-за которой
+    `/api/address` уже объявили ложью.
+    """
+    funcs = _func_index((ROOT / rel).read_text(encoding="utf-8"))
+    fn = funcs.get(func_name)
+    assert fn is not None, f"в {rel} нет функции {func_name}"
+    keys = set()
+    named = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and _callee_name(node) == "append":
+            for arg in node.args:
+                keys |= _dict_literal_keys(arg)
+        elif isinstance(node, ast.Assign):
+            keys |= _dict_literal_keys(node.value)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    named.add(target.id)
+            if (len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Subscript)
+                    and isinstance(node.targets[0].slice, ast.Constant)
+                    and isinstance(node.targets[0].slice.value, str)):
+                base = node.targets[0].value
+                if isinstance(base, ast.Name) and (base.id in named
+                                                   or base.id in ("d", "row", "device")):
+                    keys.add(node.targets[0].slice.value)
+    return keys
+
+
+def _conference_row_keys():
+    """Клавиши вложенного ряда `/api/conference` БОЕМ (не из AST).
+
+    Ряд собирается обогащением в `WebSession.conference_participants`, AST его
+    не видит. Движок — заглушка без методов: реестр конференции и медиа-шина
+    живут в процессе, pjsua2 для формирования ряда не нужен.
+    """
+    from mcuclient.config import load_config
+    from mcuclient.web_server import WebSession
+
+    session = WebSession(object(), load_config(None))
+    try:
+        session.conference_join("Замер")
+        rows = session.conference_participants()
+        assert rows, "живой ряд конференции пуст — предусловие не создано"
+        return set(rows[0])
+    finally:
+        session.close()
+
+
+def _row_keys_for(path):
+    """(клавиши, которые кладёт писатель, откуда снято) — боевой резолв."""
+    writer = DOC_NESTED_ROWS[path]
+    if writer is None:
+        return _conference_row_keys(), "живой замер ряда"
+    return _writer_row_keys(*writer), f"литералы {writer[0]}::{writer[1]}"
+
+
+def _nested_row_gaps(doc_get=None, lines=None, keys_for=None):
+    """(сверяемые пути, находки) — чистая функция для probe-кейса.
+
+    `keys_for` инъективный: probe-кейс обязан подставлять свои клавиши, а не
+    читать несуществующий модуль. Первая версия принимала подставные клавиши в
+    аргументы и не пробрасывала их — probe падал на FileNotFound, и это ровно
+    тот случай, когда красный тест ничего не объясняет.
+    """
+    if doc_get is None:
+        doc_get = _doc_api_routes()["GET"]
+    if lines is None:
+        lines = DOC_API.read_text(encoding="utf-8").splitlines()
+    if keys_for is None:
+        keys_for = _row_keys_for
+    checked, bad = [], []
+    for path in sorted(doc_get):
+        if path not in DOC_NESTED_ROWS:
+            continue
+        want = _doc_nested_keys(lines[doc_get[path] - 1])
+        if not want:
+            continue
+        got, how = keys_for(path)
+        checked.append(path)
+        missing = [key for key in want if key not in got]
+        if missing:
+            bad.append(f"{path}: док (строка {doc_get[path]}) обещает во "
+                       f"вложенном ряду клавиши {', '.join(missing)} — писатель "
+                       f"их не кладёт ({how}; кладёт: {', '.join(sorted(got))})")
+    return checked, bad
+
+
+def test_rest_api_documented_nested_row_keys_exist():
+    """Вложенный ряд обязан нести заявленные таблицей клавиши."""
+    checked, bad = _nested_row_gaps()
+    assert len(checked) == len(DOC_NESTED_ROWS), (
+        f"сверено лишь {checked} — парсер вложенных форм ослеп")
+    assert not bad, ("таблицы REST обещают во вложенном ряду клавиши, которых "
+                     "писатель не кладёт:\n" + "\n".join(bad))
+
+
+def test_nested_row_probe_recognizes_the_real_defect_shape():
+    """Правило обязано ловить выдуманную вложенную клавишу и не ловить лишнее.
+
+    Пары «дефект / легитимно» — как в test_glue_probe_...: без них непонятно,
+    что поймано, и первая версия правила краснела на легитимных формах.
+    """
+    assert _doc_nested_keys("`{devices:[{id,name,driver,synthetic}]}`") == \
+        ["id", "name", "driver", "synthetic"]
+    assert _doc_nested_keys("`{participants:[{id,name,kind}], webrtc:bool}`") \
+        == ["id", "name", "kind"]
+    assert _doc_nested_keys("`{action, participant, ...}` — без []") == []
+    assert _doc_nested_keys("`{devices:[{id,name?}]}`") == ["id", "name"]
+
+    def gaps(row, keys):
+        # Носитель строки — путь, который есть в таблице правила; клавиши
+        # писателя подставляются, боевой резолв не вызывается.
+        path = "/api/conference"
+        line = f"| {TICK}{path}{TICK} | {row} |"
+        return _nested_row_gaps({path: 1}, [line],
+                                keys_for=lambda p: (keys, "probe"))
+
+    # Дефект 1 — ровно форма /api/devices/video: заявлены inputs у видеоряда.
+    checked, bad = gaps("`{devices:[{id,name,driver,inputs,outputs}]}`",
+                        {"id", "name", "driver", "synthetic"})
+    assert len(bad) == 1 and "inputs" in bad[0] and "outputs" in bad[0], bad
+    assert checked == ["/api/conference"], checked
+    # Дефект 2 — ровно форма /api/conference: выдуманные video/audio.
+    _c, bad = gaps("`{participants:[{id,name,kind,video,audio}], "
+                   "webrtc:bool}` — ряд",
+                   {"id", "name", "kind", "video_enabled", "audio_enabled"})
+    assert len(bad) == 1 and "video" in bad[0] and "audio" in bad[0], bad
+    # Легитимно — писатель кладёт ровно заявленное.
+    _c, bad = gaps("`{devices:[{id,name,driver,synthetic}]}`",
+                   {"id", "name", "driver", "synthetic"})
+    assert not bad, bad
+    # Легитимно — односторонняя проверка: лишние клавиши писателя не ложь.
+    _c, bad = gaps("`{participants:[{id,name,kind}]}`",
+                   {"id", "name", "kind", "video_enabled", "volume_level"})
+    assert not bad, bad
+    # Легитимно — строка без вложенной формы этим правилом не проверяется.
+    _c, bad = gaps("`{participants:[...], webrtc:bool}` — ряды см. ниже",
+                   {"что угодно"})
+    assert not bad and _c == [], (bad, _c)
+    # Пустой ряд писателя = предусловие не создано: правило обязан краснеть,
+    # а не молчать (иначе молчание неотличимо от порядка).
+    _c, bad = gaps("`{devices:[{id,name}]}`", set())
+    assert len(bad) == 1 and "id" in bad[0], bad
