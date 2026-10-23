@@ -1583,6 +1583,193 @@ def test_response_key_probe_recognizes_the_real_defect_shape():
     assert not bad and blind == {'/api/probe'}, (bad, blind)
 
 
+# --- HTTP-коды, обещанные REST-таблицами ------------------------------------
+#
+# Прежние сверители смотрят в имена: пути, клавиши ответа, клавиши тела.
+# Числа — коды ответов — не сверялись ничем, и reproduce этого среза показал,
+# что из этого вышло: выдуманный `499` в POST-строке `/api/audio_device` и
+# выдуманные `507` / `599` в прозе `/api/frame.png` и `/api/video.mjpeg` —
+# прогон зелёный, красных кейсов ноль, тогда как тот же метод и в том же
+# замере ловит ложь в форме (`invented_codec_key`) ровно целевым кейсом.
+#
+#: Вызовы, из которых сервер достает код ответа. Первый вариант снятия был
+#: regex `status=(\d{3})` и он НЕ видел `ApiError("...", 501)`: там код
+#: позиционный. Строка дока про `501` при этом правдива, то есть regex,
+#: не видящий правду, краснил бы на правде — ровно тот грех, который этот
+#: страж и вырезает. Поэтому статусы снимаются АСТ-обходом.
+STATUS_SENDERS = ('ApiError', '_send_error_json', 'send_response',
+                  'send_error', '_send_json')
+
+#: Трехзначное число, похожее на HTTP-код. Границы обязательны: без них
+#: наивный поиск доставал «код 323» из `H.323` и краснил правдивую строку
+#: `/api/participants`. Четырехзначные числа (порт, период опроса) кодами не
+#: считаются: `3000` и `9001` не обязаны быть HTTP-статусами.
+HTTP_CODE = re.compile(r'(?<![A-Za-z0-9.])[1-5][0-9][0-9](?![0-9])')
+
+#: Код после «(а) не NNN» — отрицание, а не обещание.
+HTTP_CODE_DENIED = re.compile(r'(?:а\s+)?не\s+([1-5][0-9][0-9])')
+
+
+def _server_status_codes(source=None):
+    """Коды HTTP, которые сервер способен отправить (множество int).
+
+    Механизма «узнать код для конкретного пути» здесь нет и придумать его
+    нельзя: POST-ветки не отправляют ответ сами, они бросают `ApiError`, а
+    общий `except ApiError` превращает исключение в ответ. Замер АСТ'ом это
+    подтвердил: у `/api/video_device`, `/api/audio_device`,
+    `/api/conference/rename` и остальных нуль вызовов `self.*` внутри ветки.
+    Поэтому замок алфавитный: обещанный таблицей код обязан встречаться среди
+    отправляемых, а не «принадлежать этому пути».
+
+    Динамический статус (`ApiError(str(exc), exc.status)`) нового числа не
+    добавляет: это проброс кода из `ApiError`, то есть тот же литерал.
+    """
+    if source is None:
+        source = SERVER_FILE.read_text(encoding='utf-8')
+    codes = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (func.attr if isinstance(func, ast.Attribute)
+                else getattr(func, 'id', ''))
+        if name not in STATUS_SENDERS:
+            continue
+        for arg in node.args:
+            if (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, int)
+                    and 100 <= arg.value < 600):
+                codes.add(arg.value)
+        for kw in node.keywords:
+            if (kw.arg == 'status'
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, int)):
+                codes.add(kw.value.value)
+    return codes
+
+
+def _doc_http_codes(doc_get=None, doc_post=None, lines=None):
+    """(обещанные коды, снятые отрицания) из колонок описания REST-таблиц.
+
+    Находка — кортеж (глагол, путь, номер строки, код). Из строки
+    таблицы выбрасывается только первая ячейка (путь). Замер по боевому
+    документу: обещанных кодов 12, а `cells[2]` видит 3 — десять
+    обещаний POST-таблицы остались бы невидимыми, то есть «взять колонку
+    описания» было бы ровно той слепой зоной, против которой написан
+    этот страж.
+
+    Отрицания возвращаются отдельно и в сверку не идут. В живом документе их
+    ровно четыре, и все они говорят, чего сервер делать НЕ должен: «штатный
+    `{"ok": false}` с HTTP 200, а не 404», «400 с причиной, а не 500 с текстом
+    `TypeError`», «409 с причиной, а не 200», «404 с причиной, а не 200».
+    Требовать от сервера код, который документ отрицает, значит краснить на
+    правде — тот же класс подгонки, что и «починить тест вместо правила».
+    """
+    if doc_get is None or doc_post is None:
+        routes = _doc_api_routes()
+        if doc_get is None:
+            doc_get = routes['GET']
+        if doc_post is None:
+            doc_post = routes['POST']
+    if lines is None:
+        lines = DOC_API.read_text(encoding='utf-8').splitlines()
+    promised, denied = [], []
+    for verb, table in (('GET', doc_get), ('POST', doc_post)):
+        for path in sorted(table):
+            lineno = table[path]
+            cells = lines[lineno - 1].split('|')
+            if len(cells) < 4:
+                continue
+            # Выбрасывается только ПЕРВАЯ ячейка (путь): его цифры к
+            # обещаниям отношения не имеют. Вариант «взять cells[2]» был
+            # бы слепой зоной на всей POST-таблице: в GET-таблице две
+            # ячейки и описание во второй, а в POST-таблице три (путь,
+            # форма тела, описание) и коды живут в третьей.
+            cell = "|".join(cells[2:])
+            negated = {m.start(1) for m in HTTP_CODE_DENIED.finditer(cell)}
+            for match in HTTP_CODE.finditer(cell):
+                if match.start() in negated:
+                    denied.append((verb, path, lineno, match.group(0)))
+                    continue
+                promised.append((verb, path, lineno, int(match.group(0))))
+    return promised, denied
+
+
+def _status_code_gaps(doc_get=None, doc_post=None, lines=None, alpha=None):
+    """(сверенные коды, находки) — чистая функция для probe-кейса."""
+    if alpha is None:
+        alpha = _server_status_codes()
+    promised, _denied = _doc_http_codes(doc_get, doc_post, lines)
+    checked, bad = [], []
+    for verb, path, lineno, code in promised:
+        checked.append((verb, path, code))
+        if code not in alpha:
+            bad.append(
+                f'{verb} {path}: док (строка {lineno}) обещает HTTP {code}, '
+                f'которого сервер не отправляет ни одним механизмом '
+                f'(отправляемые: {", ".join(str(c) for c in sorted(alpha))})')
+    return checked, bad
+
+
+def test_documented_http_status_codes_are_reachable():
+    """Коды ответов, обещанные REST-таблицами, сервер обязан отправлять.
+
+    Таблицы обещают не только форму ответа, но и коды: «404, если кадров
+    нет», «501, если нет кодировщика JPEG», «409 на отказ движка». Ни один
+    прежний сверитель внутрь чисел не смотрел, и выдуманный код был для
+    стража невидим.
+
+    Границы замка честные, обе — из замера, а не из удобства. Алфавитная, а
+    не путевая: привязать код к пути нечем (см. `_server_status_codes`).
+    Односторонняя: сервер отправляет 401, 403, 413 и 500, которых в таблицах
+    нет, и это не ложь дока, а общие механизмы авторизации, лимита тела и
+    незапланированной ошибки — двусторонняя сверка краснила бы на правде.
+    """
+    checked, bad = _status_code_gaps()
+    assert len(checked) >= 8, (
+        f'сверяется лишь {len(checked)} обещанных кодов — парсер ослеп')
+    assert not bad, ('таблицы REST обещают коды ответов, которых сервер не '
+                     'отправляет:\n' + '\n'.join(bad))
+
+
+def test_http_code_probe_recognizes_the_real_defect_shape():
+    """Правило обязано ловить выдуманный код и НЕ ловить правду.
+
+    Пары «дефект / легитимно» — те же, что в остальных probe-кейсах: без них
+    непонятно, что именно поймано. Легитимные пары — ровно те ловушки, на
+    которых парсер спотыкался при допуске: отрицание, `H.323`, четырехзначное
+    число и проза без кодов. Алфавит здесь подставлен намеренно узкий, чтобы
+    отрицание «а не 500» покраснило бы само, если бы парсер его не снял.
+    """
+    alpha = {200, 400, 404, 501}
+
+    def gaps(row):
+        line = f'| {TICK}`/api/probe`{TICK} | {row} |'
+        return _status_code_gaps({'/api/probe': 1}, {}, [line], alpha)
+
+    # Дефект — кода нет среди отправляемых.
+    checked, bad = gaps('выбрать камеру; 499 на отказ движка')
+    assert len(bad) == 1 and '499' in bad[0], bad
+    assert checked == [('GET', '/api/probe', 499)], checked
+    # Легитимно — отрицание: «400 с причиной, а не 500 с текстом TypeError».
+    checked, bad = gaps('**400 с причиной**, а не 500 с текстом `TypeError`')
+    assert not bad, bad
+    assert [c[2] for c in checked] == [400], checked
+    # Легитимно — штатный код есть в алфавите, отрицание снято.
+    checked, bad = gaps('повторный выход — 200, а не 404')
+    assert not bad, bad
+    assert [c[2] for c in checked] == [200], checked
+    # Легитимно — `H.323` не содержит HTTP-кода (моя находка-призрак).
+    checked, bad = gaps('тот же SIP/H.323-ряд, что в `/api/status`')
+    assert not bad and not checked, (bad, checked)
+    # Легитимно — четырехзначное число не код ответа.
+    checked, bad = gaps('панель опрашивает каждые 3000 мс, порт 9001')
+    assert not bad and not checked, (bad, checked)
+    # Легитимно — проза без кодов (SSE-поток) не сверяется.
+    checked, bad = gaps('SSE-поток событий шины')
+    assert not bad and not checked, (bad, checked)
+
+
 # --- Вложенные формы рядов: верхнеуровневое правило до них не дотягивается --
 #
 # `test_rest_api_documented_response_keys_exist` сверяет ВЕРХНИЙ уровень ответа,
