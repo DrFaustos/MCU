@@ -1133,26 +1133,14 @@ def test_citation_waiver_is_scoped_and_fail_closed():
         'README.md', trunc))) == 1, 'в инструкции усечение должно краснеть'
 
 
-# --- Форма ответа REST: таблицы обещают не только пути -------------------
-#
-# Существующий сверитель путей (`test_rest_api_tables_list_exactly_the_server_
-# routes`) бессилен перед классом «путь в таблице есть, а форма ответа выдумана»:
-# номер строки на месте, маршрут в развилке найден, прогон зелёный. Три живых
-# вранья сняты 2026-10-22 замером верхнеуровневых клавиш: `/api/codecs` обещал
-# `{audio, video}` (их не было никогда, панель читает `codecs.audio_enabled`),
-# `/api/webrtc/sessions` обещал `webrtc:bool` (ответ отдаёт `available`),
-# `/api/web_recording` обещал `file` (клавиши такой нет: запись пишет ДВА файла).
-#
-# Проверка односторонняя: заявленное доком обязано БЫТЬ в ответе. Обратное
-# («док обязан перечислить всё») краснило бы легитимные перечисления с многоточием
-# (`{srtp, web_tls, ...}`), а ложь ловит именно первое направление.
-#
-# Пустое множество клавишей = «форма из кода НЕ выводима» (у `/api/address`
-# ответ приходит из отчёта движка, а литерал там — пустой `{}`), и такая строка
-# уходит в слепую зону, а не краснеет: краснеть на правде страж не имеет права.
-# Чтобы слепая зона не разрасталась молча, её граница заперта отдельным кейсом.
-
-BLIND_RESPONSE_OK = {'/api/address'}
+# Пустое множество клавишей = «форма из кода НЕ выводима», и такая
+# строка уходит в слепую зону, а не краснеет: краснеть на правде страж
+# не имеет права. Граница зоны заперта отдельным кейсом, а сама зона
+# пуста с 2026-10-23: `/api/address` больше не слепая — её форма мерится
+# ЖИВЬЁМ (`LIVE_RESPONSE_KEYS` ниже). Любая новая «невыводимая» строка
+# обязана краснить прогон, а не молча оседать в этом списке: молчаливое
+# исключение строки из проверки неотличимо от подгонки под результат.
+BLIND_RESPONSE_OK = set()
 
 
 def _func_index(source):
@@ -1330,7 +1318,66 @@ def _brace_top_keys(brace):
     return keys
 
 
-def _response_key_gaps(doc_get=None, lines=None, server=None):
+#: Строки GET-таблицы, чья форма ответа НЕ выводится из `web_server.py` и
+#: поэтому мерится ЖИВЫМ замером боя — та же идея, что `DOC_NESTED_ROWS` для
+#: вложенных рядов (срез 2026-10-22). Разрыв с прежним поведением принципиальный:
+#: раньше такая строка молча уходила в слепую зону.
+def _address_response_keys():
+    """Верхние клавиши боевого ответа `GET /api/address`.
+
+    AST тут бессилен дважды. Первый: в `web_server.py` литерала формы нет —
+    `_address_dict` просто отдаёт словарь движка, а на движке без
+    `current_address` он возвращает `{}` МОЛЧА, поэтому заглушка обязана иметь
+    метод, а пустой результат обязан краснить, а не считаться «формы нет».
+    Второй: резолвить форму по ИМЕНИ функции нельзя — в
+    `mcuclient/sip_address.py` два `to_dict` (`SipTarget` на 6 клавиш и
+    `AddressReport` на 18), и разбор по имени даёт именно первый; проверено
+    живьём: наивный резолв дал бы 12 ложных находок на правдивой строке дока.
+
+    pjsua2 для замера не нужен (`sip_address` и `web_server` импортируются без
+    него), артефактов замер не оставляет.
+    """
+    from mcuclient.config import load_config
+    from mcuclient.sip_address import AddressReport
+    from mcuclient.web_server import WebSession
+
+    class Engine:
+        """Движок-заглушка ровно с тем методом, который читает сервер."""
+
+        def current_address(self):
+            return AddressReport(user='mcu', domain='example.org',
+                                 host='10.0.0.5', host_source='dns',
+                                 local_ip='10.0.0.9').to_dict()
+
+    session = WebSession(Engine(), load_config(None))
+    try:
+        keys = set(session.address())
+    finally:
+        session.close()
+    assert keys, ('живой ответ /api/address пуст — предусловие не создано '
+                  '(на движке без current_address сервер отдаёт {} молча)')
+    return keys
+
+
+LIVE_RESPONSE_KEYS = {'/api/address': _address_response_keys}
+
+
+def _live_response_keys(path):
+    """Клавиши формы, снимается которая только живьём; None — не живой путь.
+
+    None означает «форму вывести нечем»: вызывающий код отправит строку в
+    слепую зону, потому что краснеть на невыводимом страж не имеет права.
+    """
+    resolve = LIVE_RESPONSE_KEYS.get(path)
+    if resolve is None:
+        return None
+    keys = resolve()
+    assert keys, f'живой резолв {path} вернул пустой набор'
+    return keys
+
+
+def _response_key_gaps(doc_get=None, lines=None, server=None,
+                     live=None):
     """(сверенные пути, слепая зона, находки) — чистая функция для probe-кейса."""
     if doc_get is None:
         doc_get = _doc_api_routes()['GET']
@@ -1338,6 +1385,8 @@ def _response_key_gaps(doc_get=None, lines=None, server=None):
         lines = DOC_API.read_text(encoding='utf-8').splitlines()
     if server is None:
         server = _server_get_response_keys()
+    if live is None:
+        live = _live_response_keys
     checked, blind, bad = [], set(), []
     for path in sorted(doc_get):
         line = lines[doc_get[path] - 1]
@@ -1345,6 +1394,8 @@ def _response_key_gaps(doc_get=None, lines=None, server=None):
         if not want:
             continue
         got = server.get(path)
+        if not got:
+            got = live(path)
         if not got:
             blind.add(path)
             continue
@@ -1370,12 +1421,19 @@ def test_response_key_guard_sees_every_documented_get_row():
     """Слепая зона обязана быть известной и не расти молча.
 
     Строка, форма которой не выводится из web_server.py, не проверяется ничем.
-    Сегодня такая ровно одна (`/api/address`: ответ — отчёт движка). Любая
-    новая — сигнал расширить резолв, а не список: молчаливое исключение строки
-    из проверки неотличимо от подгонки под результат.
+    Строка, форма которой не выводится из web_server.py, не проверяется
+    ничем. Такой была `/api/address` (ответ — отчёт движка, а резолвить форму
+    по имени `to_dict` нельзя: в `sip_address.py` два `to_dict` на 6 и 18
+    клавиш). Срез 2026-10-23 закрыл её ЖИВЫМ замером, и слепых строк не
+    осталось вовсе. Любая новая — сигнал расширить резолв, а не список:
+    молчаливое исключение строки из проверки неотличимо от подгонки под
+    результат.
     """
     checked, blind, _bad = _response_key_gaps()
-    assert '/api/address' in blind, blind
+    assert '/api/address' in checked, (
+        'форма /api/address снова не сверяется: '
+        f'checked={sorted(checked)}, blind={sorted(blind)}')
+    assert not blind, f'появилась слепая строка: {sorted(blind)}'
     assert blind <= BLIND_RESPONSE_OK, f'слепая зона выросла: {sorted(blind)}'
     assert '/api/codecs' in checked and '/api/encryption' in checked, \
         'helper-формы (codecs/encryption) не разобраны — тот класс невидимости, ' \
@@ -1396,10 +1454,11 @@ def test_response_key_probe_recognizes_the_real_defect_shape():
     assert _brace_top_keys('{uri, domain, port, warnings[]}') == \
         ['uri', 'domain', 'port', 'warnings']
 
-    def gaps(row, server):
+    def gaps(row, server, live=None):
         line = f"| {TICK}`/api/probe`{TICK} | {row} |"
         checked, blind, bad = _response_key_gaps(
-            {'/api/probe': 1}, [line], {'/api/probe': server})
+            {'/api/probe': 1}, [line], {'/api/probe': server},
+            live=live)
         return checked, blind, bad
 
     # Дефект 1 — ровно форма /api/codecs: обещаны audio/video, ответ их не даёт.
@@ -1429,6 +1488,24 @@ def test_response_key_probe_recognizes_the_real_defect_shape():
     assert not bad and _c == [] and _b == set(), (bad, _c, _b)
     # Слепая зона: форма не выводима -> проверять нечего, краснеть нельзя.
     _c, blind, bad = gaps('`{uri, domain}` адрес МСУ', set())
+    assert not bad and blind == {'/api/probe'}, (bad, blind)
+    # Дефект — форма, выводимая только ЖИВЬЁМ: выдуманная клавиша
+    # обязана краснить, а не уходить в слепую зону. Именно этот
+    # случай страж ПРОПУСКАЛ до 2026-10-23 (строка молча оседала в
+    # BLIND_RESPONSE_OK, и «зелёный страж» в ней не сверял ничего).
+    _c, blind, bad = gaps('`{uri, invented_field}` адрес МСУ',
+                          set(), live=lambda p: {'uri', 'domain'})
+    assert len(bad) == 1 and 'invented_field' in bad[0], bad
+    assert not blind and _c == ['/api/probe'], (blind, _c)
+    # Легитимно — живая форма содержит заявленное: зелено.
+    _c, blind, bad = gaps('`{uri, domain}` адрес МСУ', set(),
+                          live=lambda p: {'uri', 'domain'})
+    assert not bad and not blind and _c == ['/api/probe'], (
+        bad, blind, _c)
+    # Легитимно — пустой live-набор это не «форма без клавиш», а
+    # невыводимая строка: она в слепой зоне, но не находка.
+    _c, blind, bad = gaps('`{uri}` адрес МСУ', set(),
+                          live=lambda p: set())
     assert not bad and blind == {'/api/probe'}, (bad, blind)
 
 
