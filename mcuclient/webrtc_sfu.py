@@ -325,6 +325,13 @@ class AudioMixSession:
         self._indicator = LevelsIndicator(level_stale_ms)
         # pid -> версия последнего учтённого аудио-кадра шины.
         self._last_audio_ver: Dict[str, int] = {}
+        #: Каналы SIP-вызовов -> участники модели (``sip-<слот>`` ->
+        #: ``Participant``). Объявляет единственный, кто знает связь
+        #: «канал ↔ вызов» — :class:`~mcuclient.sip_bridge_service
+        #: .SipBridgeService`: веб-реестр про вызовы SIP не знает физически,
+        #: поэтому без объявления измеренная громкость терминала просто
+        #: выбрасывалась (заперто tests/test_audio_mix_session.py).
+        self._sip_targets: Dict[str, Any] = {}
 
     # -- параметры ---------------------------------------------------------
     @property
@@ -371,6 +378,10 @@ class AudioMixSession:
         нированно, без ``time.sleep`` на величину порога.
         """
         publishers = list(self._bus.publishers())
+        # Снимок один на тик: отображение объявляет другой поток (мост SIP),
+        # и раздавать уровни по меняющемуся под ногами словарю нельзя.
+        with self._lock:
+            sip_targets = dict(self._sip_targets)
         moment = time.monotonic() if now is None else float(now)
         # «Свежий» = версия аудио выросла с прошлого тика: только новый кадр
         # отмечает живость публикации. По последнему кадру шины гореть нельзя —
@@ -428,12 +439,32 @@ class AudioMixSession:
         # Право быть докладчиком — только у тех, у кого есть тайл. Служебный
         # канал SIP (суммарный PCM терминалов) в миксе остаётся и считается,
         # но светиться вместо браузера не имеет права.
-        self._indicator.update(
-            self._mixer, fresh, now=moment,
-            eligible=None if conference is None else conference.participant_ids())
+        # Право быть докладчиком — у тех, у кого есть тайл: веб-реестр И
+        # объявленные каналы SIP-вызовов. Раньше здесь были только id
+        # веб-участников, поэтому `speaker` для SIP-канала не рождался
+        # НИКОГДА, а `layout_service` в режиме `speaker` при всех
+        # `is_speaking=False` брал ПЕРВОГО подтверждённого — «спикер» по
+        # порядку вставки. Служебный общий канал `sip` мимо по-прежнему:
+        # участника с таким id не существует.
+        # Кандидаты собираются ДО проверки реестра: тайл есть и у
+        # объявленного SIP-вызова, поэтому без реестра каналы вызовов
+        # обязаны остаться в множестве — иначе служебный общий канал
+        # `sip` снова забирает `speaker` себе, а участника с таким id
+        # нет ни в одном реестре (заперто кейсом про служебный канал).
+        eligible = list(sip_targets)
+        if conference is not None:
+            eligible += [c for c in conference.participant_ids()
+                         if c not in eligible]
+        if not eligible:
+            eligible = None
+        self._indicator.update(self._mixer, fresh, now=moment,
+                               eligible=eligible)
         if conference is not None:
             conference.update_levels(self._indicator.levels,
                                      self._indicator.speaker)
+        # Уровни вызовов раздаются здесь же, а не где-нибудь у SIP-моста::
+        # у подсветки и у микса обязан быть один штамп на один тик.
+        self._publish_sip_levels(sip_targets)
 
         recipients = self._recipients
         if callable(recipients):
@@ -470,6 +501,56 @@ class AudioMixSession:
         вызывающий, изменив его, молча испортил бы следующий расчёт.
         """
         return dict(self._indicator.levels)
+
+    def set_sip_level_targets(self, targets: Dict[str, Any]) -> None:
+        """Объявить, каким участникам принадлежат каналы SIP-вызовов.
+
+        Измерение громкости терминала существует давно: PCM вызовов льётся
+        в шину под ``sip-<слот>``, и :meth:`tick` считает его уровни ровно
+        как у браузеров. Не хватало ответа на вопрос «кому отдать»: веб-
+        реестр про вызовы SIP не знает, а :meth:`update_levels` ищет ключи
+        шины среди веб-участников и для ``sip-*`` молча промахивался —
+        посчитанное число выбрасывалось (живой репро 2026-10-22:
+        ``levels() == {\"sip-0\": 100}`` при ряде `speaking=False`).
+
+        Объявление заменяет отображение ЦЕЛИКОМ (пустой словарь снимает его):
+        мост объявляет заново на каждое переподключение слота и очищает при
+        остановке. Принимаются только каналы ВЫЗОВОВ (``sip-<слот>``):
+        служебный общий канал ``sip`` — суммарный PCM всех терминалов,
+        «починить» ему подсветку значило бы завести фантомного участника
+        (заперто ``test_service_channel_gets_no_participant_levels``).
+        """
+        declared = {channel: participant
+                    for channel, participant in dict(targets).items()
+                    if isinstance(channel, str) and channel.startswith("sip-")
+                    and participant is not None}
+        with self._lock:
+            self._sip_targets = declared
+
+    def _publish_sip_levels(self, targets: Dict[str, Any]) -> None:
+        """Раздать уровни вызовов их участникам (продюсер — :meth:`tick`).
+
+        Тот же инвариант, что у H.323-моста: гаснет по ОДНОМУ порогу
+        индикатора (устаревший канал уже занулён в ``update``), поэтому
+        завершённый вызов не продолжает «говорить» по залипшему последнему
+        кадру шины.
+        """
+        if not targets:
+            return
+        levels = self._indicator.levels
+        speaker = self._indicator.speaker
+        for channel, participant in targets.items():
+            try:
+                pct = int(levels.get(channel, 0) or 0)
+            except (TypeError, ValueError):
+                pct = 0
+            try:
+                participant.volume_level = pct
+                participant.is_speaking = (speaker is not None
+                                           and channel == speaker)
+            except Exception:  # noqa: BLE001 — тик не имеет права падать
+                log.debug("Участник SIP-канала %s не принял уровни",
+                          channel, exc_info=True)
 
     def active_speaker(self) -> Optional[str]:
         """Публикатор, громчайший на последнем тике; None — тишина у всех."""

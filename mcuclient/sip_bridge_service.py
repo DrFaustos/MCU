@@ -129,6 +129,10 @@ class SipBridgeService:
             # состав публикаторов из неё, а MediaBus держит последний кадр до
             # самого drop — иначе браузеры слышат фантом.
             self._forget_channel(slot)
+        # Объявления снимаются вместе с портами: `_attached` уже пуст, и
+        # микшер обязан перестать красить завершённые вызовы по залипшему
+        # последнему кадру шины.
+        self._declare_levels()
         self._enabled = False
 
     # -- события движка ----------------------------------------------------
@@ -257,6 +261,11 @@ class SipBridgeService:
                 self._attached[idx] = call
                 attached[idx] = call
             log.info("Аудио-мост SIP подключён к вызову (слот %d)", idx)
+        # Отображение пересобирается после каждого переподключения: слот
+        # переехал на другой вызов — вместе с ним обязан переехать и
+        # участник, иначе подсветка осталась бы человеку, чей вызов уже
+        # завершился.
+        self._declare_levels()
 
     # -- медиа -------------------------------------------------------------
     def _make_on_frame(self, slot: int) -> Callable[..., None]:
@@ -298,6 +307,44 @@ class SipBridgeService:
             forget(SipWebAudioBridge.channel_of(slot))
         except Exception:  # noqa: BLE001 — уборка не имеет права ронять мост
             log.debug("Уборка SIP-канала слота %d упала", slot, exc_info=True)
+
+    def _declare_levels(self) -> None:
+        """Объявить веб-микшеру каналы вызовов и их участников.
+
+        У микшера есть измерение (PCM всех каналов шины), но нет ответа
+        «какой вызов сидит в каком слоте» — это знает только этот сервис
+        (:attr:`_attached`). Без объявления уровни терминала считались и
+        выбрасывались: ряд наружу отдавал `speaking=False, volume_level=0`
+        при громком разговоре (замерено 2026-10-22), а рамка `.speaking` на
+        SIP-тайле и режим `speaker` в раскладке жили порядком вставки.
+
+        Точка объявления необязательна (моки, старые обвязки, mediasoup без
+        веб-микшера): мост спрашивает её по своему контракту через getattr
+        и при отсутствии молча работает как раньше.
+        """
+        mixer = getattr(self._session, "audio_mix", None)
+        declare = getattr(mixer, "set_sip_level_targets", None)
+        if not callable(declare):
+            return
+        registry = getattr(self._engine, "registry", None)
+        find = getattr(registry, "find_by_call", None)
+        if not callable(find):
+            return
+        with self._lock:
+            attached = dict(self._attached)
+        targets: Dict[str, Any] = {}
+        for slot, call in attached.items():
+            try:
+                participant = find(call)
+            except Exception:  # noqa: BLE001 — статус не имеет права ронять мост
+                participant = None
+            if participant is None:
+                continue     # участника в комнате ещё нет (или его убрали)
+            targets[SipWebAudioBridge.channel_of(slot)] = participant
+        try:
+            declare(targets)
+        except Exception:  # noqa: BLE001 — объявление не имеет права ронять поллер
+            log.debug("Объявление SIP-каналов микшеру упало", exc_info=True)
 
     def _with_channel(self, name: str, fn: Any, args: tuple,
                       channel: Optional[str]) -> tuple:

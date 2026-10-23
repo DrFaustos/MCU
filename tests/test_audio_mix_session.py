@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 
+from mcuclient.models import CallState, Participant
 from mcuclient.webrtc_sfu import AudioMixSession, Conference, MediaBus
 
 
@@ -337,3 +338,164 @@ def test_channel_revives_when_its_stream_resumes():
     item = mix.mixed_for("web-2")
     assert item is not None and _amp(item[1]) == 2500, (
         f"вернувшийся голос не дошёл до микса: {_amp(item[1]) if item else None}")
+
+
+# --- SIP-вызов: «говорит» терминала обязан доезжать до ЕГО участника --------
+#
+# Живой репро 2026-10-22 (ветка h323): тон, налитый в канал вызова `sip-0`,
+# даёт микшеру `levels() == {"sip-0": 100}` — измерение громкости SIP-вызова
+# СУЩЕСТВУЕТ. Но наружу ряд участника уезжает с `speaking=False,
+# volume_level=0`, а `active_speaker()` — None: `update_levels` ищет ключи
+# шины среди веб-участников и для `sip-*` физически промахивается, а
+# `eligible` («у кого есть тайл») знает только веб-тайлы. Панель рисует рамку
+# `.speaking` и по SIP-тайлам, и `layout_service` в режиме `speaker` берёт
+# ПЕРВОГО подтверждённого, когда `is_speaking` нет ни у кого: оператор видит
+# говорящий терминал как молчащий, а «говорящий» в раскладке — это порядок
+# вставки, а не голос.
+#
+# Право быть докладчиком даёт владелец связи «канал ↔ участник» —
+# `SipBridgeService` (он один знает, какой вызов сидит в слоте). Микшер
+# обязан принимать это отображение и раздавать уровни по нему, НЕ трогая
+# служебный общий канал `sip` (у него участника нет никогда).
+
+
+def _sip_participant(pid=11):
+    return Participant(id=pid, remote_uri="sip:term@lab",
+                       state=CallState.CONFIRMED)
+
+
+def test_declared_sip_channel_gets_levels_and_speaking():
+    """Объявленный канал вызова обязан кормить levels/is_speaking участника.
+
+    Единственное, чего не хватало измерению, — отображения «канал шины ->
+    участник модели». С ним громкость терминала перестаёт быть числом,
+    которое микшер посчитал и выбросил.
+    """
+    conf = Conference()
+    anna = conf.join("Анна")            # браузер молчит
+    mix = AudioMixSession(conf.bus, recipients=lambda: [anna.id],
+                          conference=conf)
+    term = _sip_participant()
+    mix.set_sip_level_targets({"sip-0": term})
+
+    conf.bus.publish_audio("sip-0", _pcm(3000, 160), 16000, 1)
+    conf.bus.publish_audio(anna.id, _pcm(0), 48000, 1)
+    mix.tick()
+
+    assert term.is_speaking is True, (
+        f"терминал орёт в свой канал (levels={mix.levels()}), а участник не "
+        f"«говорит»: измерение посчитано и выброшено")
+    assert term.volume_level == 75, (
+        f"громкость терминала не доехала до участника: {term.volume_level!r}, "
+        f"levels={mix.levels()}")
+    # Браузер, который молчит, подсветку получить не мог.
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[anna.id]["speaking"] is False
+
+
+def test_sip_louder_than_browser_takes_the_spotlight():
+    """Громкий вызов имеет право быть докладчиком — иначе «speaker» врёт.
+
+    До правки `eligible` = id веб-участников, поэтому `speaker` для SIP-канала
+    не рождался НИКОГДА: режим `speaker` в `layout_service` при всех
+    `is_speaking=False` берёт первого подтверждённого, т.е. показывает
+    «спикера» по порядку вставки.
+    """
+    conf = Conference()
+    anna = conf.join("Анна")            # браузер поёт тише терминала
+    mix = AudioMixSession(conf.bus, recipients=lambda: [anna.id],
+                          conference=conf)
+    term = _sip_participant()
+    mix.set_sip_level_targets({"sip-0": term})
+
+    conf.bus.publish_audio("sip-0", _pcm(3000, 160), 16000, 1)
+    conf.bus.publish_audio(anna.id, _pcm(800), 48000, 1)
+    mix.tick()
+
+    assert mix.active_speaker() == "sip-0", (
+        f"громчайший канал не стал докладчиком: {mix.active_speaker()!r} при "
+        f"levels={mix.levels()}")
+    assert term.is_speaking is True
+    rows = {r["id"]: r for r in conf.participants()}
+    assert rows[anna.id]["speaking"] is False, (
+        "докладчик перешёл к терминалу, а браузер остался подсвечен — две "
+        "подсветки на один голос")
+
+
+def test_sip_channel_fades_its_participant_when_silence():
+    """Замолчавший канал обязан погасить участника, а не держать последний голос.
+
+    Тот же инвариант, что уже заперт для микса и для H.323-моста: `MediaBus`
+    держит последний кадр до `drop`, поэтому без затухания «говорит» горело бы
+    у терминала, который положил трубку, до самого выхода из комнаты.
+    """
+    conf = Conference()
+    mix = AudioMixSession(conf.bus, recipients=lambda: [], conference=conf)
+    term = _sip_participant()
+    mix.set_sip_level_targets({"sip-0": term})
+
+    conf.bus.publish_audio("sip-0", _pcm(3000, 160), 16000, 1)
+    mix.tick(now=0.0)
+    assert term.is_speaking is True, "первый тик не зажег подсветку"
+
+    mix.tick(now=1.0)                   # новых кадров нет — канал протух
+    assert term.is_speaking is False, "замолчавший терминал остался «говорить»"
+    assert term.volume_level == 0, (
+        f"устаревший канал обязан отдать 0, а не последний RMS: "
+        f"{term.volume_level!r}")
+
+
+def test_service_channel_gets_no_participant_levels():
+    """Служебный общий канал `sip` не имеет права получить уровни участника.
+
+    Кейс зелёный и ДО правки, и после: он замок на сохранность чужого
+    инварианта (test_sip_service_channel_cannot_steal_the_spotlight). Общий
+    канал — суммарный PCM всех терминалов, участника с таким id нет ни в одном
+    реестре; «починить» ему подсветку означало бы завести фантомного участника.
+    """
+    conf = Conference()
+    anna = conf.join("Анна")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [anna.id],
+                          conference=conf)
+    term = _sip_participant()
+    mix.set_sip_level_targets({"sip": term})     # так делать нельзя
+
+    conf.bus.publish_audio("sip", _pcm(3000, 160), 16000, 1)
+    conf.bus.publish_audio(anna.id, _pcm(0), 48000, 1)
+    mix.tick()
+
+    assert term.is_speaking is False, (
+        "служебный канал заставил несуществующего участника «говорить»")
+    assert term.volume_level == 0
+    assert mix.active_speaker() is None, (
+        "служебный канал перехватил докладчика: "
+        f"{mix.active_speaker()!r}")
+    assert mix.levels()["sip"] == 75, "уровень терминала обязан считаться"
+
+
+def test_declared_sip_channel_without_conference_still_gets_the_spotlight():
+    """Без веб-реестра объявленный канал вызова обязан остаться кандидатом.
+
+    Право быть докладчиком даётся тайлом, а тайл есть и у SIP-участника: если
+    «множество кандидатов» строится только внутри ветки «реестр есть», то без
+    реестра служебный общий канал `sip` (суммарный PCM всех терминалов,
+    участника у него нет) снова перебивает конкретного вызова и `speaker`
+    становится id, которого нет ни в одном реестре — ровно тот дефект, который
+    уже заперт кейсом test_sip_service_channel_cannot_steal_the_spotlight,
+    только для браузеров.
+    """
+    conf = Conference()
+    conf.join("Анна")
+    mix = AudioMixSession(conf.bus, recipients=lambda: [], conference=None)
+    term = _sip_participant()
+    mix.set_sip_level_targets({"sip-0": term})
+
+    # Терминал (его отдельный канал) тише, чем суммарный служебный канал.
+    conf.bus.publish_audio("sip-0", _pcm(1200, 160), 16000, 1)
+    conf.bus.publish_audio("sip", _pcm(3000, 160), 16000, 1)
+    mix.tick()
+
+    assert term.is_speaking is True, (
+        f"служебный канал перебил объявленный: speaker={mix.active_speaker()!r} "
+        f"при levels={mix.levels()}")
+    assert term.volume_level > 0, "громкость вызова не доехала до участника"

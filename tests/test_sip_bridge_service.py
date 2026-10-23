@@ -1024,3 +1024,153 @@ def test_thread_flags_left_clean_after_stop():
     assert threading.get_ident() in svc._pj_threads  # noqa: SLF001
     svc.stop()
     assert svc._pj_threads == set()  # noqa: SLF001
+
+
+# --- объявление канала участнику: «говорит» терминала доезжает до ряда ------
+#
+# Измерение громкости SIP-вызова делает веб-микшер (он видит PCM всех каналов
+# шины), но он физически не знает, какой ВЫЗОВ сидит в каком слоте: это знает
+# только этот сервис (`_attached`). Поэтому именно он обязан объявить микшеру
+# отображение «канал -> участник» — иначе уровни считаются и выбрасываются
+# (живой репро 2026-10-22: `audio_mix.levels() == {"sip-0": 100}`, а ряд
+# наружу `speaking=False, volume_level=0`).
+#
+# Свои фейки, чтобы не править чужую обвязку: `_LevelSession` добавляет к
+# минимуму сессии `audio_mix` с точкой объявления, `_LevelEngine` — реестр с
+# поиском участника по объекту вызова (тот же контракт, что у pjsua2-движка).
+
+
+class _MixSpy:
+    """Минимум `AudioMixSession`, который нужен мосту для раздачи уровней."""
+
+    def __init__(self) -> None:
+        self.sample_rate = 16000
+        self.targets = {}
+        self.calls = 0
+
+    def set_sip_level_targets(self, targets):
+        self.calls += 1
+        self.targets = dict(targets)
+
+
+class _Registry:
+    """Реестр вызовов: поиск участника по объекту вызова (как у движка)."""
+
+    def __init__(self) -> None:
+        self.by_call = {}
+
+    def add(self, call, participant):
+        self.by_call[id(call)] = participant
+
+    def find_by_call(self, call, pj_call_id=None):
+        return self.by_call.get(id(call))
+
+
+class _LevelEngine(_Engine):
+    def __init__(self, calls=None) -> None:
+        super().__init__(calls)
+        self.registry = _Registry()
+
+
+class _LevelSession(_Session):
+    def __init__(self) -> None:
+        super().__init__()
+        self.audio_mix = _MixSpy()
+
+
+def _level_service(calls, participants):
+    """Мост с движком, у которого есть реестр, и сессией со «шпионом» микшера."""
+    eng = _LevelEngine(calls)
+    for call, participant in zip(calls, participants):
+        eng.registry.add(call, participant)
+    ses = _LevelSession()
+
+    def make_port(on_frame, take_web, clock_rate=16000):
+        return _Port(on_frame, take_web, clock_rate)
+
+    svc = SipBridgeService(ses, eng, make_port=make_port,
+                           get_calls=eng.active_audio_calls)
+    assert svc.start() is True
+    return svc, eng, ses
+
+
+def test_attached_slot_declares_its_channel_to_the_mixer():
+    """Подключённый слот обязан объявить микшеру канал и его участника.
+
+    Без этого объявления у микшера нет ни источника «кому отдать громкость»,
+    ни права считать SIP-канал кандидатом в докладчики: измерение есть, ряда
+    нет.
+    """
+    c1 = _Call()
+    p1 = Participant(id=11, remote_uri="sip:term@lab")
+    svc, _eng, ses = _level_service([c1], [p1])
+    try:
+        assert svc.ensure_ports() == 1
+        assert ses.audio_mix.targets == {"sip-0": p1}, (
+            f"канал вызова не объявлен микшеру: {ses.audio_mix.targets}")
+    finally:
+        svc.stop()
+
+
+def test_channel_redeclaration_follows_the_new_call_of_a_slot():
+    """Слот переехал на другой вызов — участник обязан переехать вместе с ним.
+
+    Иначе подсветка уедет человеку, чей вызов уже завершился: `MediaBus` и
+    `_attached` тут честные, а отображение в микшере — нет.
+    """
+    c1 = _Call()
+    c2 = _Call()
+    p1 = Participant(id=11, remote_uri="sip:one@lab")
+    p2 = Participant(id=12, remote_uri="sip:two@lab")
+    svc, eng, ses = _level_service([c1], [p1])
+    try:
+        svc.ensure_ports()
+        eng.calls = [c2]
+        eng.registry.add(c2, p2)
+        svc.ensure_ports()
+        assert ses.audio_mix.targets == {"sip-0": p2}, (
+            f"слот переехал, а объявление осталось прежнему участнику: "
+            f"{ses.audio_mix.targets}")
+    finally:
+        svc.stop()
+
+
+def test_stopped_bridge_takes_its_channel_declarations_away():
+    """Остановленный мост не имеет права оставить микшер кормить ряд.
+
+    Порт закрыт, вызовов нет — а объявленное отображение продолжало бы
+    подсвечивать завершённый вызов по залипшему последнему кадру шины.
+    """
+    c1 = _Call()
+    p1 = Participant(id=11, remote_uri="sip:term@lab")
+    svc, _eng, ses = _level_service([c1], [p1])
+    svc.ensure_ports()
+    assert ses.audio_mix.targets, "объявление не появилось"
+    svc.stop()
+    assert ses.audio_mix.targets == {}, (
+        f"мост остановлен, а каналы объявлены до сих пор: "
+        f"{ses.audio_mix.targets}")
+
+
+def test_session_without_mixer_is_not_a_crash():
+    """Сессия без микшера (моки, старые обвязки) обязана остаться рабочей.
+
+    Мост спрашивает необязательные методы у сессии по своему контракту;
+    отсутствие точки объявления не имеет права ронять pjsua2-колбэк.
+    """
+    c1 = _Call()
+    p1 = Participant(id=11, remote_uri="sip:term@lab")
+    ses = _Session()                     # audio_mix нет вовсе
+
+    def make_port(on_frame, take_web, clock_rate=16000):
+        return _Port(on_frame, take_web, clock_rate)
+
+    eng = _LevelEngine([c1])
+    eng.registry.add(c1, p1)
+    svc = SipBridgeService(ses, eng, make_port=make_port,
+                           get_calls=eng.active_audio_calls)
+    assert svc.start() is True
+    try:
+        assert svc.ensure_ports() == 1   # порты поднялись, падения нет
+    finally:
+        svc.stop()
