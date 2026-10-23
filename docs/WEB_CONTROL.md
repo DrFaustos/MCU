@@ -160,7 +160,7 @@ POST (тело — JSON):
 | `/api/video_source` | `{kind, device?}` | источник: camera/screen/colorbar |
 | `/api/video_device` | `{device}` | выбрать камеру по id. `device` обязано быть целым (строка `"5"` допустима): `{"device": "abc"}` или отсутствующее поле — **400 с причиной**, а не 500 с текстом `TypeError`. Если движок не смог применить — **409 с причиной**, а не 200 + `{"ok": false}`: панель читает `error` только при !res.ok, и молчаливый ok:false оператор не увидел бы никогда |
 | `/api/audio_device` | `{device}` | выбрать микрофон по id; те же коды, что у камеры: 400 на кривой `device`, 409 на отказ движка. Панель зовёт его из селектора «Микрофоны…», список берёт из `GET /api/devices/audio` |
-| `/api/address` | `{domain?, user?, display_name?, listen?}` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
+| `/api/address` | `{domain?, user?, display_name?, listen?, save?}`: `save` по умолчанию `true` — новый адрес ещё и пишется в конфиг-файл (`cfg.save()`), т.е. смена адреса из web постоянна (панель `save` не шлёт вовсе); `save:false` меняет адрес только до перезапуска. Флаг читается через `bool()`, поэтому строка `"false"` даёт `true` | сменить адрес МСУ на лету (`account.modify`, без перезапуска) |
 | `/api/codecs` | `{profile}` | профиль кодеков |
 | `/api/encryption` | `{srtp?, web_tls?}` | SRTP (`off`/`optional`/`mandatory`) и TLS панели |
 | `/api/web_tls` | `{mode}` | `off`/`self_signed`/`custom`; при отказе HTTPS панель возвращается на HTTP |

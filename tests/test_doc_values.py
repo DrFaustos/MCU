@@ -1626,3 +1626,190 @@ def test_nested_row_probe_recognizes_the_real_defect_shape():
     # а не молчать (иначе молчание неотличимо от порядка).
     _c, bad = gaps("`{devices:[{id,name}]}`", set())
     assert len(bad) == 1 and "id" in bad[0], bad
+
+
+# --- Формы тела POST: то же сверие, но в другую сторону ---------------------
+#
+# GET-таблица описывает ОТВЕТ, POST-таблица — ЗАПРОС: `{domain?, user?, ...}`.
+# Класс лжи здесь двусторонний, и односторонней проверкой ловится половина:
+#   * док обещает клавишу, которую сервер не читает: клиент шлёт, сервер молча
+#     игнорирует — то же враньё, что выдуманный ключ ответа;
+#   * сервер читает клавишу, о которой док молчит: недокументированное
+#     поведение. Второй случай и есть живой дефект этого правила — `/api/address`
+#     читает `save` с дефолтом True, т.е. смена адреса МСУ из панели по
+#     умолчанию ПИШЕТ конфиг насовсем, а таблица не говорила об этом никогда
+#     (строка дока и `save` в dispatch появились в одном коммите b5de10a).
+#
+# Форма POST выводится из AST лучше GET-ответа: dispatch читает тело напрямую
+# через `data.get("ключ")`, а ветка пути опознаётся по `path == "/api/..."`.
+# Ловушка одна — `elif`: в AST это вложенный If в orelse, и наивный обход
+# orelse присвоил бы одному пути клавиши всех соседей, отчего находок стало бы
+# МЕНЬШЕ, чем расхождений в реальности. Поэтому в orelse не заходим, если там
+# elif; сам разбор работает по исходнику-строке, чтобы probe-кейс подставлял
+# свой код без записи файлов в репозиторий.
+
+#: Пути POST, чьё тело не выводится из dispatch (ни одной читаемой клавиши).
+#: Пусто, и это заперто отдельным assert: слепая зона не разрастается молча.
+BLIND_BODY_OK = set()
+
+
+def _post_branch_keys(source):
+    """{путь POST: клавиши тела, которые читает dispatch} по исходнику."""
+    funcs = _func_index(source)
+    fn = funcs.get(API_HANDLERS["POST"][1])
+    assert fn is not None, f"в сервере нет {API_HANDLERS['POST'][1]}"
+
+    def harvest(nodes):
+        keys, stack = set(), list(nodes)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.If):
+                stack.extend(node.body)
+                nested_elif = (len(node.orelse) == 1
+                               and isinstance(node.orelse[0], ast.If))
+                if not nested_elif:
+                    stack.extend(node.orelse)
+                continue
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "data"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                keys.add(node.args[0].value)
+            if (isinstance(node, ast.Subscript)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "data"
+                    and isinstance(node.slice, ast.Constant)
+                    and isinstance(node.slice.value, str)):
+                keys.add(node.slice.value)
+            stack.extend(ast.iter_child_nodes(node))
+        return keys
+
+    branch = {}
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+            continue
+        if not isinstance(test.ops[0], ast.Eq):
+            continue
+        for name, value in ((test.left, test.comparators[0]),
+                            (test.comparators[0], test.left)):
+            if (isinstance(name, ast.Name) and name.id == "path"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and value.value.startswith("/api/")):
+                branch.setdefault(value.value, set()).update(
+                    harvest(node.body))
+    return {path: keys for path, keys in branch.items() if keys}
+
+
+def _dispatch_body_keys(server=None):
+    """Боевой разбор: клавиши тела из `_handle_api_post` реального сервера."""
+    return _post_branch_keys((server or SERVER_FILE).read_text(
+        encoding="utf-8"))
+
+
+def _post_body_gaps(doc_post=None, lines=None, branch=None):
+    """(сверяемые пути, слепая зона, находки) — чистая функция для probe-кейса.
+
+    Находкой считается и заявленная-но-нечитаемая клавиша, и читаемая-но-не-
+    заявленная: обе половины стоят клиенту времени. Путь, где dispatch не
+    читает ничего, в находки не идёт — он в слепую зону, закрытую BLIND_BODY_OK.
+    """
+    if doc_post is None:
+        doc_post = _doc_api_routes()["POST"]
+    if lines is None:
+        lines = DOC_API.read_text(encoding="utf-8").splitlines()
+    if branch is None:
+        branch = _dispatch_body_keys()
+    checked, blind, bad = [], [], []
+    for path in sorted(doc_post):
+        want = _brace_top_keys(_first_braces(lines[doc_post[path] - 1]))
+        if not want:
+            continue
+        got = branch.get(path, set())
+        if not got:
+            blind.append(path)
+            continue
+        checked.append(path)
+        invented = [key for key in want if key not in got]
+        if invented:
+            bad.append(f"{path}: док (строка {doc_post[path]}) обещает в теле "
+                       f"клавиши {', '.join(invented)} — dispatch их не читает "
+                       f"(читает: {', '.join(sorted(got))})")
+        silent = sorted(got - set(want))
+        if silent:
+            bad.append(f"{path}: dispatch читает клавиши тела "
+                       f"{', '.join(silent)}, а док (строка {doc_post[path]}) "
+                       f"их не заявляет — недокументированное поведение")
+    return checked, blind, bad
+
+
+def test_post_documented_body_keys_match_the_dispatch():
+    """Форма тела POST обязана совпадать с тем, что читает dispatch."""
+    checked, blind, bad = _post_body_gaps()
+    assert len(checked) >= 30, (
+        f"сверено лишь {len(checked)} POST-строк — парсер тела ослеп")
+    assert set(blind) <= BLIND_BODY_OK, (
+        f"слепая зона тела выросла без записи: {sorted(blind)}")
+    assert not bad, ("таблицы POST расходятся с dispatch:\n"
+                     + "\n".join(bad))
+
+
+def test_post_body_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить обе половины лжи и не ловить нормальные строки.
+
+    Пары «дефект / легитимно» обязательны: правило двустороннее, и без probe-
+    кейса непонятно, какая из половин вообще исполняется. Отдельно проверяется
+    разбор `elif` — если бы orelse смешивал ветки, находок было бы меньше, чем
+    расхождений, и молчание выглядело бы порядком.
+    """
+    src = (
+        'def _handle_api_post(self, path, data):\n'
+        '    if path == "/api/probe_a":\n'
+        '        return {"ok": bool(data.get("alpha"))}\n'
+        '    if path == "/api/probe_b":\n'
+        '        return {"ok": data.get("beta")}\n'
+        '    elif path == "/api/probe_c":\n'
+        '        return {"ok": data.get("gamma")}\n'
+        '    return {}\n'
+    )
+    got = _post_branch_keys(src)
+    assert got == {"/api/probe_a": {"alpha"}, "/api/probe_b": {"beta"},
+                   "/api/probe_c": {"gamma"}}, (
+        f"разбор тела перепутал ветки (elif смешался): {got}")
+
+    def gaps(row, keys):
+        # Носитель строки — путь из разобранного подставного сервера, чтобы
+        # боевой dispatch не вызывался вовсе.
+        path = "/api/probe_a"
+        line = f"| {TICK}{path}{TICK} | {row} |"
+        return _post_body_gaps({path: 1}, [line], {path: set(keys)})
+
+    # Дефект 1 — выдуманная клавиша: клиент шлёт то, что игнорируется.
+    checked, blind, bad = gaps("`{alpha, gamma}`", {"alpha"})
+    assert len(bad) == 1 and "gamma" in bad[0] and "не читает" in bad[0], bad
+    assert checked == ["/api/probe_a"] and blind == [], (checked, blind)
+    # Дефект 2 — ровно форма /api/address: читается save, док молчит.
+    _c, _b, bad = gaps("`{alpha}`", {"alpha", "save"})
+    assert len(bad) == 1 and "save" in bad[0] and "не заявляет" in bad[0], bad
+    # Легитимно — множества равны.
+    _c, _b, bad = gaps("`{alpha}`", {"alpha"})
+    assert not bad, bad
+    # Легитимно — необязательная клавиша с `?` считается заявленной.
+    _c, _b, bad = gaps("`{alpha?}`", {"alpha"})
+    assert not bad, bad
+    # Легитимно — строка без {} телом не управляет (например, «без тела»).
+    _c, _b, bad = gaps("без тела", {"alpha"})
+    assert not bad and _c == [], (bad, _c)
+    # Пустой разбор пути = слепая зона: не краснеет, но виден списком.
+    _c, blind, bad = gaps("`{alpha}`", set())
+    assert not bad and blind == ["/api/probe_a"], (bad, blind)
+    # Боевая проверка не деградировала до молчания: 30+ сверяемых строк.
+    checked, _bl, _ba = _post_body_gaps()
+    assert len(checked) >= 30, checked
