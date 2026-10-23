@@ -1131,3 +1131,302 @@ def test_citation_waiver_is_scoped_and_fail_closed():
         'docs/STATUS.md', trunc)), 'вторая ветка правила не знает про цитаты'
     assert len(_dead_pointers('README.md', _pointer_lines(
         'README.md', trunc))) == 1, 'в инструкции усечение должно краснеть'
+
+
+# --- Форма ответа REST: таблицы обещают не только пути -------------------
+#
+# Существующий сверитель путей (`test_rest_api_tables_list_exactly_the_server_
+# routes`) бессилен перед классом «путь в таблице есть, а форма ответа выдумана»:
+# номер строки на месте, маршрут в развилке найден, прогон зелёный. Три живых
+# вранья сняты 2026-10-22 замером верхнеуровневых клавиш: `/api/codecs` обещал
+# `{audio, video}` (их не было никогда, панель читает `codecs.audio_enabled`),
+# `/api/webrtc/sessions` обещал `webrtc:bool` (ответ отдаёт `available`),
+# `/api/web_recording` обещал `file` (клавиши такой нет: запись пишет ДВА файла).
+#
+# Проверка односторонняя: заявленное доком обязано БЫТЬ в ответе. Обратное
+# («док обязан перечислить всё») краснило бы легитимные перечисления с многоточием
+# (`{srtp, web_tls, ...}`), а ложь ловит именно первое направление.
+#
+# Пустое множество клавишей = «форма из кода НЕ выводима» (у `/api/address`
+# ответ приходит из отчёта движка, а литерал там — пустой `{}`), и такая строка
+# уходит в слепую зону, а не краснеет: краснеть на правде страж не имеет права.
+# Чтобы слепая зона не разрасталась молча, её граница заперта отдельным кейсом.
+
+BLIND_RESPONSE_OK = {'/api/address'}
+
+
+def _func_index(source):
+    """{имя: узел def} — по одному определению на имя (проверено в G3)."""
+    funcs = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.setdefault(node.name, node)
+    return funcs
+
+
+def _dict_literal_keys(node):
+    if isinstance(node, ast.Dict):
+        return {k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    return set()
+
+
+def _callee_name(node):
+    """Имя функции для Call / Name / Attribute (аргумент self._call(fn))."""
+    target = node.func if isinstance(node, ast.Call) else node
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _returned_keys(fn, funcs, depth=0, seen=()):
+    """Клавиши dict, которые функция МОЖЕТ отдать наружу (надмножество).
+
+    Собирает литералы return/присваиваний, `data["key"] = ...` и резолвит
+    боевой идиом «верни результат helper'а»: `return helper(...)`,
+    `self._call(helper)`, `self._call(lambda: helper(...))`. Именно так уходят
+    `/api/codecs` и `/api/encryption`, которые прежний разбор считал
+    «формы нет». Надмножество безопасно: односторонняя проверка от этого не
+    начинает врать, она лишь обязана не пропускать выдуманную клавишу.
+    """
+    if fn.name in seen or depth > 2:
+        return set()
+    keys = set()
+    named = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and node.value is not None:
+            keys |= _dict_literal_keys(node.value)
+            if isinstance(node.value, ast.Name):
+                named.add(node.value.id)
+        elif isinstance(node, ast.Assign):
+            keys |= _dict_literal_keys(node.value)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    named.add(target.id)
+            if (len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Subscript)
+                    and isinstance(node.targets[0].value, ast.Name)
+                    and node.targets[0].value.id in named
+                    and isinstance(node.targets[0].slice, ast.Constant)
+                    and isinstance(node.targets[0].slice.value, str)):
+                keys.add(node.targets[0].slice.value)
+    calls = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+            calls.append(node.value)
+        elif isinstance(node, ast.Call) and _callee_name(node) == '_call':
+            for arg in node.args:
+                if isinstance(arg, (ast.Name, ast.Attribute, ast.Call)):
+                    calls.append(arg)
+                else:
+                    calls.extend(n for n in ast.walk(arg)
+                                 if isinstance(n, ast.Call))
+    for node in calls:
+        sub = funcs.get(_callee_name(node))
+        if sub is not None and sub is not fn:
+            keys |= _returned_keys(sub, funcs, depth + 1, seen + (fn.name,))
+    return keys
+
+
+def _sent_json_expr(body):
+    for node in ast.walk(ast.Module(body=list(body), type_ignores=[])):
+        if isinstance(node, ast.Call) and _callee_name(node) == '_send_json' \
+                and node.args:
+            return node.args[0]
+    return None
+
+
+def _server_get_response_keys():
+    """{путь: множество верхних клавиш ответа | None, если форма не выводима}."""
+    source = SERVER_FILE.read_text(encoding='utf-8')
+    funcs = _func_index(source)
+    out = {}
+    for name in API_HANDLERS['GET']:
+        fn = funcs.get(name)
+        assert fn is not None, f'в web_server.py нет функции {name}'
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+                continue
+            test = node.test
+            if not (len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                    and isinstance(test.left, ast.Name)
+                    and test.left.id in ('path', 'self.path')
+                    and isinstance(test.comparators[0], ast.Constant)):
+                continue
+            path = test.comparators[0].value
+            if not (isinstance(path, str) and path.startswith('/api/')):
+                continue
+            expr = _sent_json_expr(node.body)
+            if expr is None or path in out:
+                continue
+            keys = _dict_literal_keys(expr)
+            if not keys:
+                sub = funcs.get(_callee_name(expr))
+                if sub is not None:
+                    keys = _returned_keys(sub, funcs)
+            out[path] = keys or None
+    return out
+
+
+def _first_braces(text):
+    """Первый сбалансированный `{...}` — заявленная форме строки таблицы."""
+    start = text.find('{')
+    if start < 0:
+        return ''
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ''
+
+
+def _brace_top_keys(brace):
+    """Верхние клавиши из `{a:[{x,y}], b:bool}` -> ['a', 'b'].
+
+    Два правила, каждое выросло из собственной ошибки этого дня: (1) токен
+    считается клавишей только в позиции ключа (сразу после `{` или `,`), иначе
+    `bool` из `webrtc:bool` попадал в список; (2) пробелы после запятой позицию
+    ключа НЕ сбрасывают — с прошлым поведением из `{audio:[...], video:[...]}`
+    выживала первая клавиша, и проверка рапортовала «расхождений нет».
+    """
+    keys = []
+    ident = re.compile('[A-Za-z_][A-Za-z0-9_]*')
+    depth = 0
+    at_key = False
+    i = 0
+    while i < len(brace):
+        ch = brace[i]
+        if ch in '{[(':
+            depth += 1
+            at_key = depth == 1
+            i += 1
+            continue
+        if ch in '}])':
+            depth -= 1
+            i += 1
+            continue
+        if ch == ',' and depth == 1:
+            at_key = True
+            i += 1
+            continue
+        if depth == 1 and at_key:
+            if ch.isspace():
+                i += 1
+                continue
+            match = ident.match(brace, i)
+            if match:
+                keys.append(match.group(0))
+                i = match.end()
+                at_key = False
+                continue
+            at_key = False
+        i += 1
+    return keys
+
+
+def _response_key_gaps(doc_get=None, lines=None, server=None):
+    """(сверенные пути, слепая зона, находки) — чистая функция для probe-кейса."""
+    if doc_get is None:
+        doc_get = _doc_api_routes()['GET']
+    if lines is None:
+        lines = DOC_API.read_text(encoding='utf-8').splitlines()
+    if server is None:
+        server = _server_get_response_keys()
+    checked, blind, bad = [], set(), []
+    for path in sorted(doc_get):
+        line = lines[doc_get[path] - 1]
+        want = _brace_top_keys(_first_braces(line))
+        if not want:
+            continue
+        got = server.get(path)
+        if not got:
+            blind.add(path)
+            continue
+        checked.append(path)
+        missing = [key for key in want if key not in got]
+        if missing:
+            bad.append(
+                f'GET {path}: док (строка {doc_get[path]}) обещает клавиши '
+                f'{", ".join(missing)} — их нет в ответе сервера (в ответе: '
+                f'{", ".join(sorted(got))})')
+    return checked, blind, bad
+
+
+def test_rest_api_documented_response_keys_exist():
+    """Клавиши ответа, обещанные таблицей, обязаны быть в ответе сервера."""
+    checked, blind, bad = _response_key_gaps()
+    assert len(checked) >= 9, f'сверено лишь {len(checked)} строк — парсер ослеп'
+    assert not bad, 'таблицы REST обещают клавиши, которых в ответе нет:\n' \
+        + '\n'.join(bad)
+
+
+def test_response_key_guard_sees_every_documented_get_row():
+    """Слепая зона обязана быть известной и не расти молча.
+
+    Строка, форма которой не выводится из web_server.py, не проверяется ничем.
+    Сегодня такая ровно одна (`/api/address`: ответ — отчёт движка). Любая
+    новая — сигнал расширить резолв, а не список: молчаливое исключение строки
+    из проверки неотличимо от подгонки под результат.
+    """
+    checked, blind, _bad = _response_key_gaps()
+    assert '/api/address' in blind, blind
+    assert blind <= BLIND_RESPONSE_OK, f'слепая зона выросла: {sorted(blind)}'
+    assert '/api/codecs' in checked and '/api/encryption' in checked, \
+        'helper-формы (codecs/encryption) не разобраны — тот класс невидимости, ' \
+        'ради которого написан этот кейс'
+
+
+def test_response_key_probe_recognizes_the_real_defect_shape():
+    """Правило обязано ловить выдуманную клавишу и НЕ ловить вложенные.
+
+    Пары «дефект / легитимно» — как в test_glue_probe_...: без них непонятно,
+    что поймано. Легитимные пары — это ровно те две ошибки, которые мой парсер
+    совершил сегодня: он принял вложенные `id,name,kind` за верхний уровень
+    `{participants:[{...}]}` и посчитал `bool` клавишей из `webrtc:bool`.
+    """
+    assert _brace_top_keys('{audio:[...], video:[...]}') == ['audio', 'video']
+    assert _brace_top_keys('{participants:[{id,name,kind}], webrtc:bool}') == \
+        ['participants', 'webrtc']
+    assert _brace_top_keys('{uri, domain, port, warnings[]}') == \
+        ['uri', 'domain', 'port', 'warnings']
+
+    def gaps(row, server):
+        line = f"| {TICK}`/api/probe`{TICK} | {row} |"
+        checked, blind, bad = _response_key_gaps(
+            {'/api/probe': 1}, [line], {'/api/probe': server})
+        return checked, blind, bad
+
+    # Дефект 1 — ровно форма /api/codecs: обещаны audio/video, ответ их не даёт.
+    checked, blind, bad = gaps('`{audio:[...], video:[...]}` кодеки',
+                               {'profile', 'audio_enabled'})
+    assert len(bad) == 1 and 'audio' in bad[0], bad
+    assert checked == ['/api/probe'] and not blind, (checked, blind)
+    # Дефект 2 — форма `/api/web_recording`: выдуманный `file` при полном ответе.
+    _c, _b, bad = gaps('(`{recording, file?}`)',
+                       {'recording', 'video', 'audio', 'frames'})
+    assert len(bad) == 1 and 'file' in bad[0], bad
+    # Легитимно — вложенные клавиши не требуются верхнему уровню ответа.
+    _c, _b, bad = gaps('`{participants:[{id,name,kind,video,audio}], '
+                       'webrtc:bool}` — конференция',
+                       {'participants', 'webrtc'})
+    assert not bad, bad
+    # Легитимно — `bool` не клавиша, а тип (моя ошибка первой версии).
+    _c, _b, bad = gaps('`{sessions:[...], available:bool}` — сессии',
+                       {'sessions', 'available'})
+    assert not bad, bad
+    # Легитимно — перечисление с многоточием обязано оставаться зелёным.
+    _c, _b, bad = gaps('`{srtp, web_tls, ...}` текущее шифрование',
+                       {'srtp', 'srtp_modes', 'web_tls', 'web_tls_modes'})
+    assert not bad, bad
+    # Легитимно — строка без {}.
+    _c, _b, bad = gaps('общий статус: room, pjsip, layout', {'room', 'pjsip'})
+    assert not bad and _c == [] and _b == set(), (bad, _c, _b)
+    # Слепая зона: форма не выводима -> проверять нечего, краснеть нельзя.
+    _c, blind, bad = gaps('`{uri, domain}` адрес МСУ', set())
+    assert not bad and blind == {'/api/probe'}, (bad, blind)
