@@ -292,6 +292,18 @@ def main() -> int:
                       "ghost_dead_id"):
         failed += 1
 
+    # Отдельный сценарий: кнопка с действием, которого dispatch-карта не
+    # различает. Маршруты, таблицы документа, формы тела и id разметки на
+    # месте (прежние сверители зелёные), а `map[action]` равен undefined:
+    # кнопка видна оператору и молчит. До этого среза подсов ПРОПУСКАЛСЯ:
+    # алфавит data-act панели не сверялся ничем.
+    if not _seed_edit("mcuclient/webui/index.html",
+                      '<button data-act="wrename" data-id="${esc(p.id)}">',
+                      '<button data-act="wrename" data-id="${esc(p.id)}">'
+                      'Имя</button><button data-act="ghost_action_btn">x',
+                      "ghost_action_btn"):
+        failed += 1
+
     # Контроль чистоты: без подсовов прогон обязан быть зелёным, иначе весь
     # self-test — самообман (красный набор ловит что угодно).
     out = run_guard()

@@ -2527,3 +2527,169 @@ def test_panel_id_probe_recognizes_the_real_defect_shape():
     # Боевая проверка не деградировала до молчания.
     live, _bad = _panel_id_gaps()
     assert len(live) >= 40, live
+
+
+# #: --- замок: действия панели -------------------------------------------
+# #:
+# #: Кнопка объявляет действие атрибутом `data-act="x"`, а обработчик
+# #: различает действия единственно известным механизмом: литеральной картой
+# #: `const map = {...}` и вызовом `act(map[action])` (index.html:758-787).
+# #: Форм `case` и `=== action` в панели нет (замер grep: ноль вхождений),
+# #: поэтому искать различаемый алфавит там было бы ошибкой разборщика:
+# #: пустой набор веток дал бы ложноположительный шторм на правде — ровно
+# #: тот класс, из-за которого отвергнут замок клавиш ответа.
+# #:
+# #: Кнопка с именем, которого в карте нет, даёт `map[action]` равное
+# #: undefined: она видна оператору, а клик по ней не делает ничего. Это тот
+# #: же класс отказа, что мёртвый маршрут панели (замок вызовов API), только
+# #: внутри одного файла, и в истории панели такие кнопки уже чинились
+# #: руками по исходнику.
+# #:
+# #: Объявленная слепая зона: действие, назначенное скриптом
+# #: (`el.dataset.act = 'x'`), в набор предложений не входит. По замеру у
+# #: панели одно упоминание `dataset.act` и это ЧТЕНИЕ (строка 749), а не
+# #: установка; молча расширять покрытие на несуществующую конструкцию —
+# #: значит ослаблять замок ради вида полноты.
+PANEL_ACTION_ATTR_RE = re.compile(
+    r'''data-act\s*=\s*(['"])([a-z_][a-z0-9_-]*)\1''')
+
+#: Границы dispatch-карты и маска её ключа. Фигурная скобка открытия собрана
+#: через chr, чтобы литерал не зависел от экранирования в инструментах
+#: правки: проший меритель разведки умер именно на потере экранирования.
+#: Ключом считается только строка `name: () => ...` или `name: function`,
+#: поэтому пять пояснительных комментариев внутри карты ветками не становятся.
+PANEL_MAP_OPEN = 'const map = ' + chr(123)
+PANEL_MAP_CLOSE = '};'
+PANEL_MAP_KEY_RE = re.compile(r'^ +([A-Za-z_][A-Za-z0-9_]*)[ ]*:')
+
+
+def _panel_action_offers(text, rel='?'):
+    """{действие: [(файл, строка, чем объявлено)]} — что панель предлагает.
+
+    Построчно и с пропуском комментариев по той же причине, что и ссылки на
+    id, и вызовы API: закомментированная кнопка ничего не обещает оператору.
+    """
+    out = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        for match in PANEL_ACTION_ATTR_RE.finditer(line):
+            out.setdefault(match.group(2), []).append(
+                (rel, lineno, 'data-act'))
+    return out
+
+
+def _panel_action_branches(text):
+    """{имя} — ключи dispatch-карты, которую различает обработчик.
+
+    Если карта не найдена, возвращается пустое множество. Это намеренно не
+    ошибка разбора: покраснеть обязан верхний уровень на нижней границе, а
+    не выдать «находок ноль» — та самая ловушка зелёного молчания.
+    """
+    keys = set()
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            if PANEL_MAP_OPEN in line:
+                inside = True
+            continue
+        if line.strip().startswith(PANEL_MAP_CLOSE):
+            break
+        match = PANEL_MAP_KEY_RE.match(line)
+        if not match:
+            continue
+        if '=>' in line or 'function' in line:
+            keys.add(match.group(1))
+    return keys
+
+
+def _panel_action_contract():
+    """(предложения, ветки) по всем носителям контракта панели.
+
+    Набор общий, а не «в том же файле»: `ms-conference.js` грузится тегом
+    после инлайн-скрипта и объявляет кнопки разметкой, которую читает
+    обработчик из `index.html`. По замеру карта в панели одна (строка 758).
+    """
+    offers, handled = {}, set()
+    for rel in PANEL_CONTRACT_FILES:
+        text = (PANEL_DIR / rel).read_text(encoding='utf-8')
+        for name, where in _panel_action_offers(text, rel).items():
+            offers.setdefault(name, []).extend(where)
+        handled |= _panel_action_branches(text)
+    for name in offers:
+        offers[name] = sorted(offers[name])
+    return offers, handled
+
+
+def _panel_action_gaps(offers=None, handled=None):
+    """(сверенные действия, находки) — чистая функция для probe-кейса."""
+    if offers is None:
+        offers, handled = _panel_action_contract()
+    if handled is None:
+        _o, handled = _panel_action_contract()
+    checked, bad = [], []
+    for name in sorted(offers):
+        if name in handled:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{ln} [{how}]'
+                          for rel, ln, how in offers[name][:3])
+        bad.append(f'Панель {where} предлагает действие {name!r}, а '
+                   f'dispatch-карта его не различает: `map[{name}]` равен '
+                   f'undefined, кнопка на экране есть и молчит')
+    return checked, bad
+
+
+def test_panel_actions_hit_branches_the_handler_distinguishes():
+    """Каждое `data-act` обязано найтись среди веток обработчика.
+
+    Мёртвое действие не видно ни в логе, ни в ответе сервера: запрос даже
+    не отправляется. Замер боевого дерева: 8 объявленных действий, 8 ключей
+    карты, пересечение полное. Нижняя граница обязательна: без неё потеря
+    карты (переименование переменной, переезд обработчика в модуль) дала бы
+    «ноль предложений, ноль находок» и зелёный прогон.
+    """
+    checked, bad = _panel_action_gaps()
+    assert len(checked) >= 6, (
+        f'сверено лишь {len(checked)} действий — разбор карты ослеп')
+    assert not bad, ('панель предлагает действия, которых обработчик не '
+                     'различает:\n' + '\n'.join(bad))
+
+
+def test_panel_action_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить кнопку без ветки и не красить живые формы.
+
+    Обратное направление (ветка без кнопки) находкой НЕ является: карта
+    может различать действие, которое пока не выведено на экран, — это
+    запас, а не обещание оператору.
+    """
+    def gaps(js):
+        return _panel_action_gaps(_panel_action_offers(js, 'probe.html'),
+                                  _panel_action_branches(js))
+
+    # Дефект: кнопка, которой карта не различает. Живое действие рядом
+    # обязано остаться сверенным — замок обязан именовать мёртвое имя.
+    checked, bad = gaps('<button data-act="live"></button>\n'
+                        '<button data-act="ghost_action"></button>\n'
+                        'const map = {\n'
+                        '  live: () => 0,\n'
+                        '};\n')
+    assert len(bad) == 1 and 'ghost_action' in bad[0], bad
+    assert checked == ['live'], checked
+    # Легитимно: кнопка и ветка совпали.
+    checked, bad = gaps('<button data-act="live"></button>\n'
+                        'const map = {\n  live: () => 0,\n};\n')
+    assert not bad and checked == ['live'], (checked, bad)
+    # Легитимно: ветка без кнопки — запас обработчика, не дефект.
+    checked, bad = gaps('const map = {\n  orphan: () => 0,\n};\n')
+    assert not bad and checked == [], (checked, bad)
+    # Легитимно: комментарий внутри карты не является веткой, а
+    # закомментированная кнопка не является предложением.
+    checked, bad = gaps('// <button data-act="commented"></button>\n'
+                        'const map = {\n'
+                        '  // live: () => 0,\n'
+                        '};\n')
+    assert not bad and checked == [], (checked, bad)
+    # Боевая проверка не деградировала до молчания.
+    live, _bad = _panel_action_gaps()
+    assert len(live) >= 6, live
