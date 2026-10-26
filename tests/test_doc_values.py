@@ -2829,3 +2829,249 @@ def test_panel_duplicate_id_probe_recognizes_the_real_defect_shape():
     # Боевое дерево не деградировало до молчания.
     live, _bad = _panel_dup_id_gaps()
     assert len(live) >= 40, live
+
+
+# #: --- замок: чтение data-ключа обязано быть объявленным --------------------
+# #
+# # Панель общается с DOM через data-атрибуты: объявляет (`data-peer="..."` в
+# # разметке и в JS-строке шаблона, `el.dataset.peer = id`), читает
+# # (`el.dataset.peer`, `querySelector('[data-peer=...]')`). Ключ в DOM один, а
+# # именных форм две (`dataset.rowId` <-> `data-row-id`) и несколько форм записи.
+# # Чтение необъявленного ключа молчаливо целиком: исключения нет, `dataset.x`
+# # отдаёт undefined, селектор не находит узел — кнопка видна оператору и молчит
+# # (та же форма отказа, что у мёртвой id-ссылки), и до сервера запрос не доходит.
+# #
+# # Объявленной слепой зоной этого замка был замок action-ов (см. зону выше:
+# # «действие, назначенное скриптом (`el.dataset.act = ...`), в набор
+# # предложений не входит»). Здесь она закрыта: присваивание dataset ЗАСЧИТАНО
+# # объявлением. Без этого замок краснел бы на правде — ms-conference.js:114 в
+# # ОДНОЙ строке держит чтение селектором `audio[data-ms="${...}"]` и объявление
+# # `a.dataset.ms = producerId`.
+# #
+# # Метрика куплена красным прогоном мерителя, а не выбрана. Чтение описывалось
+# # regex'ом с негативным lookahead и дало на правдивом дереве 2 находки: 'm' и
+# # 'pee'. Корень прочитан из падения: lookahead не защищает от backtracking —
+# # на `a.dataset.ms = producerId` жадный класс даёт `ms`, lookahead видит ` =` и
+# # отказывается, откат на `m`, за которым идёт буква, lookahead удовлетворяет, и
+# # ОДИНОЧНАЯ установка становится «чтением» ключа `m`. Лечится не подкруткой
+# # lookahead, а сменой меры: имя читается ОДНИМ regex без lookahead (усечение
+# # невозможно по построению), а объявление отделено от чтения ФАКТИЧЕСКИМ
+# # остатком строки. Сравнение (`===`) при этом остаётся чтением.
+# #
+# # Метрика измеряет собственную видимость: список усечений (сразу после имени
+# # идёт буква/цифра/подчёркивание) обязан быть пуст, иначе «ноль находок»
+# # неотличим от «разбор ослеп» — тот же класс, что тривиально-зелёный сторож.
+# #
+# # Объявленные слепые зоны — по замеру, а не на слово:
+# #  - вычисляемое имя (`dataset[key]`, `getAttribute('data-' + x)`): имя не
+# #    литерал, сопоставить его с объявлением статически нельзя; по замеру в
+# #    носителях контракта таких мест ноль;
+# #  - строки внутри <style>: CSS-правило `.tile[data-x]{}` не читает DOM; по
+# #    замеру правил с [data- в панели ноль, но конструкция массовая, поэтому
+# #    закрыта границами <style>, а не оставлена вслепую.
+
+PANEL_DATA_KEY = r'[a-z][a-z0-9_-]*'
+#: Объявление атрибутом. Перед `data-` обязано быть начало строки, пробел или
+#: таб: иначе CSS-селектор `[data-peer=` был бы засчитан обещанием атрибута,
+#: набор предложений раздулся бы и замок ослеп на первом же мёртвом ключе
+#: (проверено посевом bait 5).
+PANEL_DATA_OFFER_RE = re.compile(r'(?:^|(?<=[ \t]))data-(' + PANEL_DATA_KEY
+                                 + r')\s*=')
+PANEL_DATA_SETAPI_RE = re.compile(
+    r'''setAttribute\(\s*['"]data-([a-z0-9_-]+)''')
+#: Чтение CSS-селектором: querySelector / querySelectorAll / closest / matches.
+PANEL_DATA_SEL_RE = re.compile(r'\[data-(' + PANEL_DATA_KEY + r')')
+#: ЕДИНЫЙ разбор dataset: имя читается жадным классом, БЕЗ lookahead — см.
+#: docstring зоны. Подчёркивание в классе обязательно: без него имя резалось на
+#: `_` и посев срабатывал бы по ложной причине.
+PANEL_DATASET_RE = re.compile(r'\.dataset\.([A-Za-z_][A-Za-z0-9_]*)')
+#: Присваивание: `=` и не `==`; сравнение (`===`, `!==`) остаётся чтением.
+PANEL_DATA_ASSIGN_RE = re.compile(r'\s*=(?!=)')
+PANEL_DATA_TAIL_RE = re.compile(r'[A-Za-z0-9_]')
+PANEL_DATA_CAMEL_RE = re.compile(r'([A-Z])')
+PANEL_STYLE_OPEN_RE = re.compile(r'<style\b')
+PANEL_STYLE_CLOSE_RE = re.compile(r'</style\b')
+
+
+def _panel_data_kebab(name):
+    """dataset.rowId -> row-id: один доменный ключ, две именные формы.
+
+    Подчёркивание сохраняется — ровно так же, как браузер конвертирует dataset
+    в атрибут. Поэтому `runtime_probe` обязан остаться целиком, а не усечься до
+    `runtime`.
+    """
+    return PANEL_DATA_CAMEL_RE.sub(lambda m: '-' + m.group(1).lower(),
+                                   name).lower()
+
+
+def _panel_data_classify(line):
+    """[(имя, 'offer' | 'read' | 'TRUNC')] по dataset-упоминаниям строки.
+
+    Принадлежность решается остатком строки, а не трюком внутри regex: `=`, не
+    `==` -> объявление, иначе чтение. 'TRUNC' — сразу после имени идёт буква:
+    признак того, что разбор режет имя (ловушка, купленная красным прогоном).
+    """
+    out = []
+    for match in PANEL_DATASET_RE.finditer(line):
+        tail = line[match.end():]
+        if tail and PANEL_DATA_TAIL_RE.match(tail[0]):
+            out.append((match.group(1), 'TRUNC'))
+        elif PANEL_DATA_ASSIGN_RE.match(tail):
+            out.append((match.group(1), 'offer'))
+        else:
+            out.append((match.group(1), 'read'))
+    return out
+
+
+def _panel_data_parse(text, rel='?'):
+    """(offers, reads, truncations) — {имя: [(файл, строка)]} по одному тексту.
+
+    Пропускаются JS-комментарии (PANEL_COMMENT_PREFIX — тот же критерий, что в
+    id-зоне и зоне action-ов: комментарий ничего не читает и не объявляет) и
+    строки внутри <style>: CSS-правило не трогает DOM для скрипта.
+    """
+    offers, reads, trunc = {}, {}, []
+    in_style = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if in_style:
+            if PANEL_STYLE_CLOSE_RE.search(line):
+                in_style = False
+            continue
+        if PANEL_STYLE_OPEN_RE.search(line):
+            in_style = True
+            continue
+        if line.strip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        for regex, bag in ((PANEL_DATA_OFFER_RE, offers),
+                           (PANEL_DATA_SETAPI_RE, offers),
+                           (PANEL_DATA_SEL_RE, reads)):
+            for match in regex.finditer(line):
+                bag.setdefault(_panel_data_kebab(match.group(1)), []).append(
+                    (rel, lineno))
+        for name, kind in _panel_data_classify(line):
+            if kind == 'TRUNC':
+                trunc.append((rel, lineno, name))
+                continue
+            bag = offers if kind == 'offer' else reads
+            bag.setdefault(_panel_data_kebab(name), []).append((rel, lineno))
+    return offers, reads, trunc
+
+
+def _panel_data_contract(texts=None):
+    """(offers, reads, truncations) по всем носителям контракта панели.
+
+    Набор имён ОБЩИЙ, а не «в том же файле»: ms-conference.js грузится тегом
+    после инлайн-скрипта и попадает в тот же DOM, поэтому объявление в одном
+    носителе закрывает чтение в другом (на этом держится форма data-ms).
+    """
+    if texts is None:
+        texts = [(rel, (PANEL_DIR / rel).read_text(encoding='utf-8'))
+                 for rel in PANEL_CONTRACT_FILES]
+    offers, reads, trunc = {}, {}, []
+    for rel, text in texts:
+        parsed_offers, parsed_reads, parsed_trunc = _panel_data_parse(text, rel)
+        for bag, src in ((offers, parsed_offers), (reads, parsed_reads)):
+            for name, where in src.items():
+                bag.setdefault(name, []).extend(where)
+        trunc.extend(parsed_trunc)
+    return offers, reads, trunc
+
+
+def _panel_data_gaps(offers, reads):
+    """(сверенные имена, находки) — чистая функция для probe-кейса."""
+    checked, bad = [], []
+    for name in sorted(reads):
+        if name in offers:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{lineno}' for rel, lineno in reads[name][:3])
+        bad.append(f'панель читает data-ключ {name!r} по местам {where}, но '
+                   f'никто его не объявляет: dataset отдаст undefined, '
+                   f'селектор не найдёт узел — кнопка видна и молчит')
+    return checked, bad
+
+
+def _panel_data_read_sites(reads):
+    """Число мест чтения — мера мощности замка (не схемы, а покрытия)."""
+    return sum(len(where) for where in reads.values())
+
+
+def test_panel_data_reads_have_declarations():
+    """Каждое чтение data-ключа обязано иметь объявление в носителях.
+
+    Замер боевого дерева: 5 объявленных ключей, 5 читаемых, 11 мест чтения, 0
+    находок. Нижние границы обязательны: без них переезд панели или правка
+    PANEL_CONTRACT_FILES дала бы «ноль чтений, ноль находок» и зелёное молчание
+    вместо развалившегося замка.
+    """
+    offers, reads, trunc = _panel_data_contract()
+    assert not trunc, ('разбор режет dataset-имена, ложные находки неизбежны: '
+                       + '; '.join(f'{rel}:{lineno} {name}'
+                                   for rel, lineno, name in trunc[:3]))
+    checked, bad = _panel_data_gaps(offers, reads)
+    sites = _panel_data_read_sites(reads)
+    assert len(checked) >= 4, (f'сверено лишь {len(checked)} читаемых '
+                               f'data-ключей — разбор ослеп')
+    assert sites >= 8, (f'мест чтения {sites} — ниже замеренной мощности '
+                        f'(11), сверка потеряла носители')
+    assert not bad, ('панель читает data-ключи, которых никто не объявляет:\n'
+                     + '\n'.join(bad))
+
+
+def test_panel_data_read_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить мёртвый ключ и не красить легитимные формы.
+
+    Формы, которые НЕ являются дефектом, сняты с падений мерителя и с живого
+    дерева, а не с догадки: именно на них первая метрика красила правду.
+    """
+    def gaps(text, rel='probe.js'):
+        offers, reads, trunc = _panel_data_parse(text, rel)
+        assert not trunc, ('посев вскрыл усечение имени: разбор битый', trunc)
+        return _panel_data_gaps(offers, reads)
+
+    # Дефект: селектор читает ключ, которого никто не объявляет. Имя обязано
+    # быть полным, не усечённым до подчёркивания. Литерал пишется прямо: страж
+    # читает носители контракта, а не самого себя, прятать имя не от чего.
+    checked, bad = gaps(
+        "const b = e.target.closest('button[data-ghost_key]');\n")
+    assert len(bad) == 1 and 'ghost_key' in bad[0], bad
+    assert checked == [], checked
+    # Легитимно: форма ms-conference.js — в одной строке чтение селектором и
+    # объявление присваиванием dataset. На этой форме v2 красил правду.
+    checked, bad = gaps('let a = q(`audio[data-ms="${id}"]`);\n'
+                        '  a.dataset.ms = producerId;\n')
+    assert not bad and checked == ['ms'], (checked, bad)
+    # Легитимно: одиночная установка — ОДНО объявление и ни одного чтения.
+    # Именно здесь v2 породил теневое чтение 'm' (backtracking lookahead-а).
+    checked, bad = gaps('a.dataset.ms = producerId;\n')
+    assert not bad and checked == [], checked
+    # Легитимно: dataset.rowId читает data-row-id (две именные формы, один ключ).
+    checked, bad = gaps('<div class="t" data-row-id="7"></div>\n'
+                        '  const k = el.dataset.rowId;\n', 'probe.html')
+    assert not bad and checked == ['row-id'], (checked, bad)
+    # Дефект в той же форме: чтение составным именем без объявления.
+    checked, bad = gaps('const k = el.dataset.rowId;\n')
+    assert len(bad) == 1 and 'row-id' in bad[0], bad
+    # Легитимно: объявление внутри JS-строки шаблона (runtime-разметка), имя с
+    # подчёркиванием — атрибут появится в DOM после innerHTML.
+    checked, bad = gaps('pad.innerHTML = keys.map(k => '
+                        '`<button data-runtime_probe="${k}">${k}</button>`);\n'
+                        '  const v = btn.dataset.runtime_probe;\n')
+    assert not bad and checked == ['runtime_probe'], (checked, bad)
+    # Легитимно: только запись — запись не обязана быть прочитанной.
+    checked, bad = gaps('el.dataset.writeonly_probe = 1;\n')
+    assert not bad and checked == [], checked
+    # Сравнение — чтение, а не объявление: `===` не должен стать установкой.
+    checked, bad = gaps("if (a.dataset.ghost_cmp === 'x') { go(); }\n")
+    assert len(bad) == 1 and 'ghost_cmp' in bad[0], bad
+    # Легитимно: CSS-правило ничего не читает из DOM (строки внутри <style>
+    # вне обоих множеств), комментарий — тоже.
+    checked, bad = gaps('<style>\n.tile[data-css_probe] { color: red }\n'
+                        '</style>\n<div class="tile"></div>\n', 'probe.html')
+    assert not bad and checked == [], (checked, bad)
+    checked, bad = gaps('// el.dataset.ghost_in_comment = 1;\n')
+    assert not bad and checked == [], (checked, bad)
+    # Боевое дерево не деградировало до молчания.
+    offers, reads, _trunc = _panel_data_contract()
+    checked, bad = _panel_data_gaps(offers, reads)
+    assert not bad and len(checked) >= 4 and _panel_data_read_sites(reads) >= 8
