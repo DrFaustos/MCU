@@ -2693,3 +2693,139 @@ def test_panel_action_probe_recognizes_the_real_defect_shape():
     # Боевая проверка не деградировала до молчания.
     live, _bad = _panel_action_gaps()
     assert len(live) >= 6, live
+
+
+# #: --- замок: один id обязан быть объявлен один раз ---------------------
+# #:
+# #: Панель объявляет id разметкой (`id="x"`) и теоретически скриптом
+# #: (`el.id = 'x'`), а читает их через `$`, то есть через getElementById.
+# #: При дубликате getElementById молча возвращает ПЕРВЫЙ элемент: второй
+# #: объявленный блок становится невидимым для скрипта — обработчик висит не
+# #: на том узле, поле на экране есть и не обновляется. В логе сервера и в
+# #: ответе API этого нет вообще: запрос уходит, ответ корректный. Отличие от
+# #: замка выше (мёртвая ссылка) в направлении: там виноват читатель, здесь —
+# #: объявление, и чинится оно удалением дубля, а не правкой вызова.
+# #:
+# #: Метрика куплена двумя красными прогонами мерителя, а не выбрана:
+# #:  - union PANEL_ID_DECL_RE и PANEL_ID_SET_RE дал 3 «объявления» на двух:
+# #:    DECL начинается с границы слова перед `id`, а граница стоит и после
+# #:    точки, поэтому DECL ловит и разметку, и `tile.id = 'x'`; SET тем самым
+# #:    — подмножество и лишь удваивает счётчик;
+# #:  - дедуп по (файл, смещение) дал 2 места для ОДНОЙ скриптовой установки:
+# #:    regex'ы стартуют с разных смещений (0 и 5).
+# #: Значит вхождение = ровно один match PANEL_ID_DECL_RE. Что при этом ничего
+# #: не теряется — замерено, а не предполагается: set(SET) минус set(DECL) пуст,
+# #: состав имён совпадает с _panel_declared_ids (55 = 55), а сравнения вида
+# #: `part.id == me.id` DECL не матчит (у него нет `(?!=)`, проверено посевом
+# #: ДО вставки замка — иначе замок краснел бы на правде тем же грехом,
+# #: который этот страж и вырезает).
+# #:
+# #: Объявленная слепая зона: id, попадающий в DOM из JS-строки в цикле
+# #: (innerHTML / insertAdjacentHTML), — рантайм-дубликат, литерал которого
+# #: встречается один раз. По замеру таких строк в носителях контракта ноль;
+# #: молча расширять покрытие на несуществующую конструкцию означало бы
+# #: ослаблять замок ради вида полноты.
+
+
+def _panel_id_occurrences(text, rel='?'):
+    """{имя: [(файл, смещение)]} — места объявлений id, вхождение = DECL.
+
+    Шаблоны `${...}` и склейки с `+` исключены по той же причине, что и в
+    id-замке выше: их имя — не литерал, а значение рантайма, и два «одинаковых»
+    шаблона дают РАЗНЫЕ id, то есть дубликатом не являются.
+    """
+    out = {}
+    for match in PANEL_ID_DECL_RE.finditer(text):
+        name = match.group(2)
+        if '${' in name or '+' in name:
+            continue
+        out.setdefault(name, []).append((rel, match.start()))
+    return out
+
+
+def _panel_id_declaration_map():
+    """{имя: [(файл, смещение)]} по всем носителям контракта панели.
+
+    Набор общий, а не «в том же файле»: `ms-conference.js` грузится тегом
+    после инлайн-скрипта (замер id-замка) и попадает в ТОТ ЖЕ DOM, поэтому
+    дубликат через носители — тот же дефект, а не две независимые области.
+    """
+    out = {}
+    for rel in PANEL_CONTRACT_FILES:
+        text = (PANEL_DIR / rel).read_text(encoding='utf-8')
+        for name, where in _panel_id_occurrences(text, rel).items():
+            out.setdefault(name, []).extend(where)
+    for name in out:
+        out[name] = sorted(out[name])
+    return out
+
+
+def _panel_dup_id_gaps(by_name=None):
+    """(уникальные имена, находки) — чистая функция для probe-кейса."""
+    if by_name is None:
+        by_name = _panel_id_declaration_map()
+    checked, bad = [], []
+    for name in sorted(by_name):
+        where = by_name[name]
+        if len(where) < 2:
+            checked.append(name)
+            continue
+        places = '; '.join(f'{rel}:{pos}' for rel, pos in where[:3])
+        bad.append(f'Панель объявляет id {name!r} {len(where)} раза по '
+                   f'местам {places}: getElementById молча вернёт первый, '
+                   f'второй блок невидим для скрипта')
+    return checked, bad
+
+
+def test_panel_declares_each_id_once():
+    """Один id — один элемент: дубликат обязан красить прогон.
+
+    Замер боевого дерева: 55 объявлений-вхождений, 55 уникальных имён, 0
+    дубликатов. Нижняя граница мощности обязательна: без неё потеря разметки
+    (переезд панели, правка PANEL_CONTRACT_FILES) дала бы «ноль объявлений,
+    ноль дубликатов» и зелёное молчание вместо развалившегося замка.
+
+    f-строки, а не %-формат: в pyproject.toml ruff selects включает UP, а
+    дельта измеряется по строкам, добавленным диффом, — прошлый замер
+    «рабочая копия против HEAD, выгруженного в /tmp» проверял HEAD
+    дефолтным набором правил (без UP) и давал ложное «новых ноль».
+    """
+    checked, bad = _panel_dup_id_gaps()
+    assert len(checked) >= 40, (
+        f'сверено лишь {len(checked)} объявлений id — разбор ослеп')
+    assert not bad, ('панель объявляет один id несколько раз:\n'
+                     + '\n'.join(bad))
+
+
+def test_panel_duplicate_id_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить дубль и не красить легитимные формы.
+
+    Формы, которые НЕ являются дефектом, сняты с падений мерителя, а не с
+    догадки: именно на них первые две метрики красили правдивое дерево.
+    """
+    def gaps(html):
+        return _panel_dup_id_gaps(_panel_id_occurrences(html, 'probe.html'))
+
+    # Дефект: имя объявлено дважды, рядом — уникальное (замок обязан
+    # именовать мёртвое имя и не потерять живое из сверки).
+    checked, bad = gaps('<div id="dup_id_probe"></div>\n'
+                        '<div id="dup_id_probe"></div>\n'
+                        '<div id="uniq_probe"></div>')
+    assert len(bad) == 1 and 'dup_id_probe' in bad[0], bad
+    assert checked == ['uniq_probe'], checked
+    # Легитимно: каждое имя объявлено один раз.
+    checked, bad = gaps('<div id="a1"></div><div id="a2"></div>')
+    assert not bad and checked == ['a1', 'a2'], (checked, bad)
+    # Легитимно: скриптовая установка — ОДНО объявление. На этой форме
+    # провалились обе первые метрики (union regex'ей и дедуп по смещению).
+    checked, bad = gaps("tile.id = 'made_once';")
+    assert not bad and checked == ['made_once'], (checked, bad)
+    # Дефект в одной строке: метрика обязана считать позиции, а не имена.
+    checked, bad = gaps("a.id = 'twice'; b.id = 'twice';")
+    assert len(bad) == 1 and 'twice' in bad[0], bad
+    # Легитимно: шаблоны рантайма не могут быть дубликатами по построению.
+    checked, bad = gaps('<div id="${p.id}"></div>\n<div id="${p.id}"></div>')
+    assert not bad and checked == [], (checked, bad)
+    # Боевое дерево не деградировало до молчания.
+    live, _bad = _panel_dup_id_gaps()
+    assert len(live) >= 40, live
