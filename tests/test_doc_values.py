@@ -2348,3 +2348,182 @@ def test_panel_call_probe_recognizes_the_real_defect_shape():
     # Боевая проверка не деградировала до молчания.
     live, _bad = _panel_call_gaps()
     assert len(live) >= 30, live
+
+
+#
+# #: Зона id: ссылки панели против объявленных панелью элементов. Обёртка
+# #: `$(x)` в панели — это `document.getElementById(x)` (замер по боевому
+# #: `index.html:214`: `const $ = (id) => document.getElementById(id);`),
+# #: поэтому литеральный аргумент есть обещание, что элемент существует.
+# #: Нарушение — не стиль, а `null.textContent`: кнопка на экране есть и
+# #: молча не делает ничего. До этого среза алфавит id панели не сверялся
+# #: ничем, и боевой подсов `$('ghost_dead_id')` в живом файле прогон
+# #: оставлял зелёным (самопроверка, сценарий `ghost_dead_id`).
+# #:
+# #: Литерал обязан быть ЕДИНСТВЕННЫМ аргументом вызова: после закрывающей
+# #: кавычки сразу `)`. Иначе `$('tile-' + peerId)` даёт имя `tile-` (дефис
+# #: входит в класс допустимых символов) и замок красит правдивую сборку
+# #: имени — тот же ложноположительный класс, что отвергнутый замок клавиш
+# #: ответа на `transport`.
+PANEL_ID_REF_SOURCES = (
+    ('$(id)',
+     re.compile(r'''(?<![A-Za-z0-9_$.])\$\(\s*(['"])(.+?)\1\s*\)''')),
+    ('getElementById', re.compile(
+        r'''getElementById\(\s*(['"])([A-Za-z0-9_\-]+)\1\s*\)''')),
+    ('querySelector("#id")', re.compile(
+        r'''querySelector(?:All)?\(\s*(['"])#([A-Za-z0-9_\-]+)\1\s*\)''')),
+)
+
+#: Объявление id разметкой (`id="x"`). Значения с `${` — шаблон рантайма, а
+#: не имя: в покрытие они брать нельзя, иначе динамический id закрыл бы
+#: мёртвую ссылку (в живом `index.html` таких два: `${p.id}` и
+#: `${esc(p.id)}`). `id=` без кавычек в покрытие тоже не идёт: по замеру
+#: ссылок на такие нет, а молча расширять покрытие — значит ослаблять замок.
+PANEL_ID_DECL_RE = re.compile(r'''\bid\s*=\s*(['"])(.+?)\1''')
+
+#: То же объявление, но сделанное скриптом (`tile.id = 'x'`). `(?!=)`
+#: обязательно: без него regex матчит и сравнения, и в живом файле даёт 4
+#: «объявления» вида `part.id == me.id` (замер), то есть замок краснеет на
+#: правде ровно тем же грехом, который этот страж и вырезает.
+PANEL_ID_SET_RE = re.compile(
+    r'''[A-Za-z_$][\w$]*\.id\s*=(?!=)\s*(['"])([A-Za-z0-9_\-]+)\1''')
+
+
+def _panel_id_refs(text, rel='?'):
+    """{имя: [(файл, строка, чем вызвано)]} — литеральные ссылки на id.
+
+    Построчно и с пропуском комментариев по той же причине, что и вызовы
+    API: комментарий ничего не читает, значит ничего и не обещает. Формы
+    не-литералы (`$(id)` внутри определения обёртки, `'#a, #b'`, шаблоны с
+    `${`) в результат не попадают — это объявленная слепая зона, а не
+    «ссылок нет».
+    """
+    out = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        for how, rx in PANEL_ID_REF_SOURCES:
+            for match in rx.finditer(line):
+                name = match.group(2)
+                if not re.fullmatch(r'[A-Za-z0-9_\-]+', name):
+                    continue
+                out.setdefault(name, []).append((rel, lineno, how))
+    return out
+
+
+def _panel_declared_ids(text):
+    """{имя} — что панель объявляет: разметка (`id="x"`) и скрипт
+    (`el.id = "x"`), без шаблонов `${...}`."""
+    out = set()
+    for match in PANEL_ID_DECL_RE.finditer(text):
+        name = match.group(2)
+        if '${' not in name and '+' not in name:
+            out.add(name)
+    out |= {m.group(2) for m in PANEL_ID_SET_RE.finditer(text)}
+    return out
+
+
+def _panel_id_contract():
+    """(ссылки, покрытие) по всем носителям контракта панели.
+
+    Покрытие намеренно общее, а не «в том же файле»: `ms-conference.js`
+    не определяет `$` (замер: 0 определений, 9 вызовов) и грузится тегом
+    `<script src="/ms-conference.js">` (строка 795) после объявления `$`
+    (строка 214) в `index.html`, то есть его ссылки на id разметки —
+    легальны. Сверять по файлу означало бы 9 ложных находок на правде.
+    """
+    refs, declared = {}, set()
+    for rel in PANEL_CONTRACT_FILES:
+        text = (PANEL_DIR / rel).read_text(encoding='utf-8')
+        for name, where in _panel_id_refs(text, rel).items():
+            refs.setdefault(name, []).extend(where)
+        declared |= _panel_declared_ids(text)
+    for name in refs:
+        refs[name] = sorted(refs[name])
+    return refs, declared
+
+
+def _panel_id_gaps(refs=None, declared=None):
+    """(сверенные имена, находки) — чистая функция для probe-кейса."""
+    if refs is None:
+        refs, declared = _panel_id_contract()
+    if declared is None:
+        _r, declared = _panel_id_contract()
+    checked, bad = [], []
+    for name in sorted(refs):
+        if name in declared:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{ln} [{how}]'
+                          for rel, ln, how in refs[name][:3])
+        bad.append(f'Панель {where} читает элемент {name!r}, а панель его не '
+                   f'объявляет: нет ни id="{name}" в разметке, ни '
+                   f'.id = "{name}" в скриптах — getElementById вернёт null')
+    return checked, bad
+
+
+def test_panel_element_ids_exist_where_the_panel_can_see_them():
+    """Каждый литеральный id панели обязан быть объявленным элементом.
+
+    Мёртвый id — это не косметика: обработчик вешается на `null` и элемент
+    просто не реагирует, причём только на одном сценарии, который ещё
+    надо поймать руками. Ссылок в зоне 113, уникальных имён 51 (замер по
+    боевому дереву) — правило закрывает их все разом.
+
+    Нижняя граница обязательна: без неё переименование обёртки `$` или
+    переезд панели в собранный бандл дал бы «ноль ссылок, ноль находок» и
+    зелёный прогон вместо развалившегося замка.
+    """
+    checked, bad = _panel_id_gaps()
+    assert len(checked) >= 40, (
+        f'сверено лишь {len(checked)} имён id — разбор ослеп')
+    assert not bad, ('панель ссылается на несуществующие элементы:\n'
+                     + '\n'.join(bad))
+
+
+def test_panel_id_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить мёртвый id и не ловить каждую живую форму.
+
+    Легитимные конструкции взяты не «для полноты», а из того, на чём
+    разбор спотыкался при допуске: сравнение `.id == x`, динамический id в
+    шаблоне разметки, сборка имени склейкой и вызов обёртки с переменной.
+    """
+    def gaps(html):
+        return _panel_id_gaps(_panel_id_refs(html, 'probe.html'),
+                              _panel_declared_ids(html))
+
+    # Дефект — ссылка на id, которого панель не объявляет. Живая ссылка
+    # рядом обязана остаться нетронутой: замок обязан именовать мёртвое
+    # имя, а не красить всё вокруг него.
+    checked, bad = gaps('<div id="real"></div>\n'
+                        "$('real').hidden = 1;\n"
+                        "$('ghost_id').disabled = true;")
+    assert len(bad) == 1 and 'ghost_id' in bad[0], bad
+    assert checked == ['real'], checked
+    # Дефект в тех же формах, что `$`: прямой getElementById и #селектор.
+    _c, bad = gaps("document.getElementById('ghost_a');")
+    assert len(bad) == 1 and 'ghost_a' in bad[0], bad
+    _c, bad = gaps("""document.querySelector('#ghost_b');""")
+    assert len(bad) == 1 and 'ghost_b' in bad[0], bad
+    # Легитимно — объявлено разметкой.
+    checked, bad = gaps('<div id="real"></div>\n$("real").hidden = 1;')
+    assert not bad and checked == ['real'], (checked, bad)
+    # Легитимно — элемент создан скриптом литералом.
+    checked, bad = gaps("tile.id = 'made';\n$('made').textContent = '';")
+    assert not bad and checked == ['made'], (checked, bad)
+    # Легитимно — сравнение id не является объявлением и не является ссылкой.
+    checked, bad = gaps('if (part.id == me.id) { return; }')
+    assert not bad and checked == [], (checked, bad)
+    # Легитимно — динамический id в шаблоне разметки: имя не имя, сверять
+    # нечего (в живом файле таких два).
+    checked, bad = gaps('<div id="${p.id}"></div>')
+    assert not bad and checked == [], (checked, bad)
+    # Легитимно — имя собрано склейкой: литерала нет, зона вне правила.
+    checked, bad = gaps("$('tile-' + peerId);")
+    assert not bad and checked == [], (checked, bad)
+    # Легитимно — обёртка вызвана переменной (это её определение).
+    checked, bad = gaps('const $ = (id) => document.getElementById(id);')
+    assert not bad and checked == [], (checked, bad)
+    # Боевая проверка не деградировала до молчания.
+    live, _bad = _panel_id_gaps()
+    assert len(live) >= 40, live

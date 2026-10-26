@@ -280,6 +280,18 @@ def main() -> int:
                       "ghost_panel_route"):
         failed += 1
 
+    # Отдельный сценарий: ссылка панели на id, которого в разметке нет.
+    # Маршруты, таблицы документа и формы тела на месте (прежние сверители
+    # зелёные), а панель читает `$('ghost_dead_id')`: `getElementById`
+    # возвращает null и кнопка молча не работает. До этого среза подсов
+    # ПРОПУСКАЛСЯ: id панели не сверялись ничем.
+    if not _seed_edit("mcuclient/webui/index.html",
+                      "const $ = (id) => document.getElementById(id);",
+                      "const $ = (id) => document.getElementById(id);"
+                      "  $('ghost_dead_id').textContent = '';",
+                      "ghost_dead_id"):
+        failed += 1
+
     # Контроль чистоты: без подсовов прогон обязан быть зелёным, иначе весь
     # self-test — самообман (красный набор ловит что угодно).
     out = run_guard()
