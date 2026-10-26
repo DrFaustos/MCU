@@ -2151,3 +2151,200 @@ def test_post_body_probe_recognizes_the_real_defect_shape():
     # Боевая проверка не деградировала до молчания: 30+ сверяемых строк.
     checked, _bl, _ba = _post_body_gaps()
     assert len(checked) >= 30, checked
+
+
+# --- Вызовы панели против развилки сервера ---------------------------------
+#
+# Три мёртвых маршрута, чинившихся руками (`/api/webrtc/close`, `POST
+# /api/dtmf`, `/api/mediasoup/leave`), родились не в документации: сервер
+# маршрут уже различал, а строки в webui его не дёргали, либо наоборот —
+# панели нужен маршрут, которого сервер не знает. Направление «док против
+# сервера» заперто (`test_rest_api_tables_list_exactly_the_server_routes`),
+# проза markdown под сверку не годится: после снятия fenced-блоков и
+# инлайн-кода в ней остаётся 8 токенов путей (замер по боевому дереву), а
+# алфавит реальных вызовов панели не сверялся НИЧЕМ. Боевое repro: тот же
+# путь-призрак, вставленный в POST-таблицу, красит целевой кейс, а
+# `navigator.sendBeacon('/api/ghost_panel_check')` в панели — прогон
+# зелёный, красных кейсов ноль.
+#
+#: Носители контракта. Собранный бандл `mediasoup-client.js` вне зоны на
+#: законном основании: его кладёт esbuild из `mediasoup-sidecar/web`, и в
+#: нём ноль упоминаний `/api` (замер) — то есть исключением ничего не
+#: прячется. Если бандл начнёт звать API, правка обязана быть явной.
+PANEL_CONTRACT_FILES = ('index.html', 'ms-conference.js')
+PANEL_DIR = SERVER_FILE.parent / 'webui'
+
+#: Обёртка панели: `api('/status')` -> GET, `api('/call', 'POST', body)` ->
+#: POST, потому что `fetch('/api' + path + qs, opts)` собирает URL внутри.
+#: Метод по умолчанию взят из сигнатуры обёртки (замер: `method = 'GET'`),
+#: а не из догадки: присвоить всем GET означало бы краснить на каждом
+#: POST-вызове панели, то есть на правде.
+PANEL_WRAPPER_RE = re.compile(
+    r'''\bapi\(\s*['"](/[a-z0-9_./-]+)['"](?:\s*,\s*['"]([A-Za-z]+)['"])?''')
+PANEL_FULL_PATH_RE = re.compile(r'''['"](/api/[A-Za-z0-9_./-]+)['"]''')
+PANEL_CALLER_RE = re.compile(
+    r'\b(fetch|sendBeacon|EventSource|XMLHttpRequest)\s*\(')
+#: `fetch('/api/x', {method: 'POST'})`: метод лежит в опциях, а не в
+#: литерале пути. Не снимать его — значит получить ложную находку «шлёт
+#: GET» ровно там, где панель шлёт POST.
+PANEL_FETCH_METHOD_RE = re.compile(r'''method\s*:\s*['"]([A-Za-z]+)['"]''')
+PANEL_COMMENT_PREFIX = ('//', '*', '/*')
+#: Это не стиль кода, а контракт браузерного API: `sendBeacon` не умеет
+#: задавать метод (всегда POST), `EventSource` — всегда GET.
+PANEL_FORCED_METHODS = {'sendBeacon': 'POST', 'EventSource': 'GET'}
+
+
+def _panel_api_calls(text):
+    """[(метод, путь, строка, чем вызван)] — только строки, которые шлют.
+
+    Комментарий не шлёт запрос, поэтому не является обещанием: в живом
+    `index.html` в комментариях живут `/api/webrtc/offer`, `/api/dtmf` и
+    `/api/webrtc/close.` (с точкой конца предложения). Считать их вызовами
+    значило бы краснить правдивый файл — ровно тот грех подгонки, который
+    этот страж и вырезает.
+
+    Разбор обязан видеть подсов: иначе «зелёный страж» означал бы слепоту
+    парсера, а не отсутствие дефекта. Проверка этим же механизмом — в
+    probe-кейсе ниже и в восьмом сценарие самопроверки.
+    """
+    calls = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        for match in PANEL_WRAPPER_RE.finditer(line):
+            method = (match.group(2) or 'GET').upper()
+            calls.append((method, '/api' + match.group(1), lineno, 'api()'))
+        if not PANEL_CALLER_RE.search(line):
+            continue
+        for match in PANEL_CALLER_RE.finditer(line):
+            kind = match.group(1)
+            paths = PANEL_FULL_PATH_RE.findall(line)
+            if not paths:
+                # Строка самой обёртки: `fetch('/api' + path + qs, opts)`.
+                continue
+            forced = PANEL_FORCED_METHODS.get(kind)
+            if forced is not None:
+                method = forced
+            else:
+                opt = PANEL_FETCH_METHOD_RE.search(line)
+                method = opt.group(1).upper() if opt else 'GET'
+            calls += [(method, path, lineno, kind) for path in paths]
+    return calls
+
+
+def _panel_contract_calls():
+    """[(файл, метод, путь, строка, чем вызван)] по носителям контракта."""
+    out = []
+    for rel in PANEL_CONTRACT_FILES:
+        text = (PANEL_DIR / rel).read_text(encoding='utf-8')
+        out += [(rel,) + call for call in _panel_api_calls(text)]
+    return out
+
+
+def _panel_call_gaps(calls=None, server=None):
+    """(сверенные пары, находки) — чистая функция для probe-кейса.
+
+    Сверка парная, «метод + путь», а не «путь вообще»: сервер реализует
+    только `do_GET` и `do_POST` (замер по исходнику), поэтому вызов
+    `POST /api/status`, где сервер различает `/api/status` как GET, — это
+    мёртвый вызов, а не «маршрут существует». Проверять только путь —
+    значит пропустить ровно тот класс дефекта, который чинился в слайсе
+    про панель и DTMF.
+    """
+    if calls is None:
+        calls = _panel_contract_calls()
+    if server is None:
+        server = _server_api_routes()
+    checked, bad = [], []
+    for rel, method, path, lineno, how in calls:
+        if method not in server:
+            bad.append(f'Панель {rel}:{lineno} зовёт {method} {path} — '
+                       f'сервер не реализует такой метод (различает только '
+                       f'{" и ".join(sorted(server))})')
+            continue
+        if path in server[method]:
+            checked.append((method, path))
+            continue
+        other = sorted(name for name in server if path in server[name])
+        detail = (', но различает его как ' + ' / '.join(other)) if other \
+            else ''
+        bad.append(f'Панель {rel}:{lineno} зовёт {method} {path} — сервер '
+                   f'такой маршрут не различает{detail} (вызов: {how})')
+    return sorted(set(checked)), bad
+
+
+def test_panel_calls_hit_routes_the_server_actually_distinguishes():
+    """Каждый вызов панели обязан попадать в живой маршрут и метод.
+
+    Документ говорит «сервер различает», но панель — потребитель, а не
+    наблюдатель: если она зовёт маршрут, которого нет, человек получает
+    молчаливую 404 и кнопку, которая «ничего не делает». Именно так три
+    раза рождались мёртвые возможности, и каждый раз их находили руками
+    по исходнику. Правило ставит это в прогон.
+
+    Нижняя граница — не украшение: 38 пар (метод, путь) в зоне по замеру,
+    и требование «не меньше 30» не даст правилу притвориться зелёным,
+    если разбор ослепнет (обёртку переименуют, вызовы уедут в бандл).
+    """
+    checked, bad = _panel_call_gaps()
+    assert len(checked) >= 30, (
+        f'сверено лишь {len(checked)} вызовов панели — разбор ослеп')
+    assert not bad, ('панель зовёт маршруты, которых сервер не различает:\n'
+                     + '\n'.join(bad))
+
+
+def test_panel_call_probe_recognizes_the_real_defect_shape():
+    """Замок обязан ловить обе половины дефекта и не ловить норму.
+
+    Алфавит сервера подставлен намеренно узкий, чтобы каждая пара
+    «дефект/легитимно» проверялась против заведомо известного ответа.
+    Легитимные пары — не выдуманные формы, а те конструкции, на которых
+    разбор спотыкался при допуске: комментарий с мёртвым путём, строка
+    самой обёртки, метод в опциях fetch, браузерные методы beacon и SSE.
+    """
+    server = {'GET': {'/api/probe', '/api/only_get'},
+              'POST': {'/api/probe'}}
+
+    def gaps(row):
+        return _panel_call_gaps(
+            [('probe.html',) + call for call in _panel_api_calls(row)],
+            server)
+
+    # Дефект — маршрута нет вовсе (обёртка, метод по умолчанию GET).
+    checked, bad = gaps("  await api('/ghost_route');")
+    assert len(bad) == 1 and 'ghost_route' in bad[0], bad
+    assert 'не различает' in bad[0], bad[0]
+    assert checked == [], checked
+    # Дефект — путь есть, но другим методом: вызов мёртв ровно так же.
+    checked, bad = gaps("  await api('/only_get', 'POST');")
+    assert len(bad) == 1 and 'POST /api/only_get' in bad[0], bad
+    assert 'различает его как GET' in bad[0], bad[0]
+    assert checked == [], checked
+    # Дефект — метода сервер не реализует вовсе.
+    _c, bad = gaps("  await fetch('/api/probe', {method: 'PUT'});")
+    assert len(bad) == 1 and 'PUT' in bad[0], bad
+    # Легитимно — метод по умолчанию из сигнатуры обёртки.
+    checked, bad = gaps("  const s = await api('/probe');")
+    assert not bad and checked == [('GET', '/api/probe')], (checked, bad)
+    # Легитимно — явный POST в обёртке.
+    checked, bad = gaps("  await api('/probe', 'POST', body);")
+    assert not bad and checked == [('POST', '/api/probe')], (checked, bad)
+    # Легитимно — beacon всегда POST, даже без слова method.
+    checked, bad = gaps("  navigator.sendBeacon('/api/probe' + qs);")
+    assert not bad and checked == [('POST', '/api/probe')], (checked, bad)
+    # Легитимно — SSE всегда GET.
+    checked, bad = gaps("  const es = new EventSource('/api/probe' + qs);")
+    assert not bad and checked == [('GET', '/api/probe')], (checked, bad)
+    # Легитимно — метод в опциях fetch, а не в литерале пути.
+    checked, bad = gaps(
+        "  await fetch('/api/probe', {method: 'POST', body: x});")
+    assert not bad and checked == [('POST', '/api/probe')], (checked, bad)
+    # Легитимно — строка самой обёртки: путь собирается из переменной.
+    checked, bad = gaps("  const res = await fetch('/api' + path + qs, o);")
+    assert not bad and checked == [], (checked, bad)
+    # Легитимно — комментарий не шлёт запрос (в живом файле таких четыре).
+    checked, bad = gaps("  // раньше звали /api/dead_comment_route тут")
+    assert not bad and checked == [], (checked, bad)
+    # Боевая проверка не деградировала до молчания.
+    live, _bad = _panel_call_gaps()
+    assert len(live) >= 30, live
