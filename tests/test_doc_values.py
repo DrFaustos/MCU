@@ -3075,3 +3075,271 @@ def test_panel_data_read_probe_recognizes_the_real_defect_shape():
     offers, reads, _trunc = _panel_data_contract()
     checked, bad = _panel_data_gaps(offers, reads)
     assert not bad and len(checked) >= 4 and _panel_data_read_sites(reads) >= 8
+
+
+# --- Замок D: надетый класс обязан иметь правило в <style> -----------------
+#: Класс — единственная связь разметки с CSS: опечатка в имени или правка,
+#: переехавшая в <style> только наполовину, даёт элемент без стилей. Панель
+#: продолжает работать, кнопка остаётся кликабельной, но оператор теряет
+#: единственный признак состояния («говорит», «упал», «своё сообщение»); ни
+#: pytest, ни консоль браузера на это не жалуются — отсюда замок.
+#:
+#: Направление сверки ОДНО — «надето ⇒ объявлено». Обратное («правило без
+#: надевания») было замерено и отвергнуто: висячих правил в боевом дереве 0,
+#: лишний стиль оператору не вредит, зато красил бы прогон на каждом
+#: опережающем правку коммите.
+#:
+#: Значение class= читается ДО закрывающей кавычки ТОГО ЖЕ ВИДА. Живые
+#: значения содержат апострофы внутри: class="tile ${p.speaking ? 'speaking'
+#: : ''}" — а форма с классом из двух кавычек обрезала значение на первом
+#: апострофе. Ветки тернарника становились невидимы и «ноль находок» был
+#: неотличим от «разбор ослеп»; поэтому probe-кейс держит необъявленный класс
+#: ВНУТРИ тернарника — без такого посева правка недоказуема (запрещающий
+#: guard обязан иметь контрпример).
+PANEL_CLASS_ATTR_D_RE = re.compile(r'(?:^|(?<=[ \t]))class\s*=\s*"([^"]*)"')
+PANEL_CLASS_ATTR_S_RE = re.compile(r"(?:^|(?<=[ \t]))class\s*=\s*'([^']*)'")
+#: className присваивают не только литералом: в панели 7 присваиваний,
+#: `$('btnCam').className = status.camera ? 'on' : ''`. Форма, требующая
+#: кавычку сразу после =, теряла 5 из 7 таких мест (замер KV), а
+#: исчезновение правила .on прошло бы незамеченным (2 из 7 с кавычкой).
+PANEL_CLASS_ASSIGN_RE = re.compile(r'\bclassName\s*=[^;\n]*')
+PANEL_CLASS_LITERAL_RE = re.compile(r"'([^']+)'")
+#: Надевание CSS-селектором вне <style>: q('.danger') ищет узел по классу,
+#: значит имя обязано быть объявлено. ФОРМА ПЕРЕНЕСЕНА С МЕРИТЕЛЯ, а не с
+#: догадки. Прежний вариант «точка не после буквы/цифры/подчёркивания»
+#: пропускал `)` из `document.getElementById('x').value` и на обоих
+#: носителях вне <style> дал 157 вхождений, из них 152 без правила (27
+#: имён: onclick, text, value, catch, join — это члены, а не классы):
+#: 152 ложные находки на зелёном дереве (замеры KV, KW). Доказанный
+#: приём: точка обязана стоять сразу после границы
+#: (таб, пробел, `,`, `(`, `>`, `~`, `+`, `'`, `"`, backtick), а после имени
+#: не идёт `[-\w]` — иначе `.state` матчает префикс вызова `.stateLabel(`.
+#: Набор границы собран через chr(): литерал с кавычками внутри уже ронял
+#: ход на re.error: unbalanced parenthesis, а поведение этой конструкции
+#: подтверждено прогоном мерителя (q('.tile') -> tile, const half = 0.5 ->
+#: нет, el.closest(".danger") -> danger).
+PANEL_CLASS_SELECTOR_PREV = ''.join((chr(9), chr(32), chr(44), chr(40),
+                                     chr(62), chr(126), chr(43), chr(39),
+                                     chr(34), chr(96)))
+PANEL_CLASS_SELECTOR_RE = re.compile('(?:^|['
+                                     + re.escape(PANEL_CLASS_SELECTOR_PREV)
+                                     + '])' + chr(92) + '.([a-z][a-z0-9_-]*)'
+                                     + '(?![-' + chr(92) + 'w])')
+#: В <style> lookbehind НЕ нужен и даже вреден: композитный селектор
+#: .tile.speaking обязан давать ДВА имени. Черновая мера теряла вторые
+#: компоненты и выдавала speaking/dropped/me/ok/err «находками» на зелёном
+#: дереве; десятичные дроби отсекает сам класс ([a-z] после точки).
+PANEL_CSS_CLASS_RE = re.compile(r'\.([a-z][a-z0-9_-]*)')
+PANEL_CLASS_INTERP_RE = re.compile(r'\$\{([^}]*)\}')
+PANEL_CLASS_NAME_RE = re.compile(r'[a-z][a-z0-9_-]*')
+
+
+def _panel_class_style_body(text):
+    """Содержимое инлайн-<style> (пусто, если блока нет)."""
+    opened = PANEL_STYLE_OPEN_RE.search(text)
+    if not opened:
+        return ''
+    closed = PANEL_STYLE_CLOSE_RE.search(text, opened.end())
+    return text[opened.end():closed.start() if closed else len(text)]
+
+
+def _panel_class_off_style(text):
+    """Текст с выключенным содержимым <style>, номера строк сохранены.
+
+    Правила живут в <style>, надевания — вне его. Без разделения .tile из
+    селектора попадал бы и в правила, и в «надевания-селектором», и замок
+    терял бы способность различать направления.
+    """
+    opened = PANEL_STYLE_OPEN_RE.search(text)
+    if not opened:
+        return text
+    closed = PANEL_STYLE_CLOSE_RE.search(text, opened.end())
+    tail = closed.start() if closed else len(text)
+    body = text[opened.end():tail]
+    hidden = ''.join('\n' if ch == '\n' else ' ' for ch in body)
+    return text[:opened.end()] + hidden + text[tail:]
+
+
+def _panel_class_names(value):
+    """Имена классов из значения class=: литералы плюс ветки тернарников.
+
+    Из ${...} берётся только часть ПОСЛЕ первого «?»: до него лежит операнд
+    сравнения (m.direction === 'out'), классом он не является, и замок
+    краснел бы на правде. Литералы обязано чистить strip: живая форма
+    `? ' dropped' : ''` несёт класс с ведущим пробелом, без strip имя не
+    проходит проверку и уезжает в непоставимые — ложная слепота замка.
+    """
+    names = []
+    pos = 0
+    while True:
+        opened = PANEL_CLASS_INTERP_RE.search(value, pos)
+        if not opened:
+            return names + value[pos:].split()
+        names += value[pos:opened.start()].split()
+        branch = opened.group(1).split('?', 1)
+        if len(branch) > 1:
+            names += [lit.strip() for lit in
+                      PANEL_CLASS_LITERAL_RE.findall(branch[1])]
+        pos = opened.end()
+
+
+def _panel_class_parse(text, rel='?'):
+    """(правила, надевания) одного носителя: имена и места, где их взяли."""
+    body = re.sub(r'/\*.*?\*/', ' ', _panel_class_style_body(text),
+                  flags=re.DOTALL)
+    rules = {match.group(1) for match in PANEL_CSS_CLASS_RE.finditer(body)}
+    uses = {}
+
+    def add(name, lineno, form):
+        if PANEL_CLASS_NAME_RE.fullmatch(name):
+            uses.setdefault(name, []).append((rel, lineno, form))
+
+    outside = _panel_class_off_style(text)
+    for lineno, line in enumerate(outside.splitlines(), 1):
+        if line.lstrip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        for regex, form in ((PANEL_CLASS_ATTR_D_RE, 'class="'),
+                            (PANEL_CLASS_ATTR_S_RE, "class='")):
+            for value in regex.findall(line):
+                for name in _panel_class_names(value):
+                    add(name, lineno, form)
+        for tail in PANEL_CLASS_ASSIGN_RE.findall(line):
+            for literal in PANEL_CLASS_LITERAL_RE.findall(tail):
+                add(literal.strip(), lineno, 'className')
+        for name in PANEL_CLASS_SELECTOR_RE.findall(line):
+            add(name, lineno, 'selector')
+    return rules, uses
+
+
+def _panel_class_contract(texts=None):
+    """(правила, надевания) по всем носителям контракта панели.
+
+    Набор имён ОБЩИЙ, а не «в том же файле»: ms-conference.js грузится тегом
+    после инлайн-скрипта и попадает в тот же DOM, что и index.html, поэтому
+    правило из одного носителя закрывает надевание в другом.
+    """
+    if texts is None:
+        texts = [(rel, (PANEL_DIR / rel).read_text(encoding='utf-8'))
+                 for rel in PANEL_CONTRACT_FILES]
+    rules, uses = set(), {}
+    for rel, text in texts:
+        parsed_rules, parsed_uses = _panel_class_parse(text, rel)
+        rules |= parsed_rules
+        for name, where in parsed_uses.items():
+            uses.setdefault(name, []).extend(where)
+    return rules, uses
+
+
+def _panel_class_gaps(rules, uses):
+    """(сверенные имена, находки) — чистая функция для probe-кейса."""
+    checked, bad = [], []
+    for name in sorted(uses):
+        if name in rules:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{lineno}'
+                          for rel, lineno, _form in uses[name][:3])
+        bad.append(f'панель надевает класс {name!r} по местам {where}, но в '
+                   f'<style> нет ни одного правила с ним: элемент отрисуется '
+                   f'без состояния, оператор потеряет признак')
+    return checked, bad
+
+
+def _panel_class_use_sites(uses):
+    """Число мест надевания — мера мощности замка (покрытия, не схемы)."""
+    return sum(len(where) for where in uses.values())
+
+
+def test_panel_classes_have_rules():
+    """Каждый надетый класс обязан иметь правило в <style> носителей.
+
+    Замер боевого дерева: 24 правила, 24 надетых имени, 76 мест надевания,
+    0 находок. classList в носителях нет (замерено: 0), отдельного разбора
+    он не требует. Нижние границы обязательны: без них переезд панели или
+    правка PANEL_CONTRACT_FILES дала бы «ноль надеваний, ноль находок» и
+    зелёное молчание вместо развалившегося замка.
+    """
+    rules, uses = _panel_class_contract()
+    checked, bad = _panel_class_gaps(rules, uses)
+    sites = _panel_class_use_sites(uses)
+    assert len(rules) >= 16, (f'правил CSS {len(rules)} — ниже замеренной '
+                              f'мощности (24): разбор <style> ослеп')
+    assert len(checked) >= 16, (f'сверено лишь {len(checked)} надетых имён: '
+                                f'разбор значения class= ослеп')
+    assert sites >= 40, (f'мест надевания {sites} — ниже замеренной мощности '
+                         f'(76), сверка потеряла носители')
+    assert not bad, ('панель надевает классы, для которых нет правила:\n'
+                     + '\n'.join(bad))
+
+
+def test_panel_class_probe_recognizes_the_real_defect_shape():
+    """Посев вскрывает ровно тот дефект, ради которого написан замок."""
+
+    def gaps(markup, rel='probe.html'):
+        rules, uses = _panel_class_contract([(rel, markup)])
+        return _panel_class_gaps(rules, uses), uses
+
+    # Необъявленный класс: элемент отрисуется без состояния.
+    (checked, bad), uses = gaps('<style>\n.other { }\n</style>\n'
+                                '<div class="ghost_cls_probe"></div>\n')
+    assert len(bad) == 1 and 'ghost_cls_probe' in bad[0], bad
+    assert checked == [], checked
+    assert 'other' not in uses, 'правило без надевания не находка'
+
+    # Правило на месте — сверка обязана смолчать.
+    (checked, bad), _uses = gaps('<style>\n.probe_ok { }\n</style>\n'
+                                 '<div class="probe_ok"></div>\n')
+    assert not bad and checked == ['probe_ok'], (checked, bad)
+
+    # Композитный селектор объявляет ОБА имени: .tile.speaking закрывает
+    # speaking. Черновая мера правил теряла вторые компоненты и краснила
+    # зелёное дерево — этот посев - регресс-тест именно к той мере.
+    (checked, bad), _uses = gaps('<style>\n.tile.speaking { }\n</style>\n'
+                                 '<div class="tile speaking"></div>\n')
+    assert not bad and sorted(checked) == ['speaking', 'tile'], (checked, bad)
+
+    # ГЛАВНЫЙ контрпример: необъявленный класс ВНУТРИ тернарника в двойной
+    # кавычке — форма, снятая дословно с живых строк панели. Прежняя форма
+    # чтения значения резала её на первом апострофе и давала «ноль
+    # находок» вслепую.
+    (checked, bad), uses = gaps('<style>\n.tile { }\n</style>\n'
+                                '<div class="tile ${p.state === '
+                                "'ghost_cmp_probe' ? 'ghost_cls_probe' : ''}\""
+                                '></div>\n')
+    assert len(bad) == 1 and 'ghost_cls_probe' in bad[0], bad
+    assert 'ghost_cmp_probe' not in uses, 'операнд сравнения стал именем'
+    assert 'tile' in checked, checked
+
+    # className с тернарником: класс живёт в ветке, а не сразу после `=`.
+    (checked, bad), _uses = gaps("<script>\n$('btnX').className = ready ? "
+                                 "'ghost_cn_probe' : '';\n</script>\n")
+    assert len(bad) == 1 and 'ghost_cn_probe' in bad[0], bad
+
+    #: Комментированная разметка ничего не обещает оператору. Живой пример
+    #: строки 781 носителя: `// class="danger" у SIP-сброса` — без фильтра
+    #: префикса замок краснел бы на комментарии (и наоборот: без посева эта
+    #: ветка не проверена ничем, как было в первой версии зоны).
+    (checked, bad), uses = gaps('<script>\n'
+                                '// class="ghost_comment_probe"\n</script>\n')
+    assert not uses and not bad, (uses, bad)
+
+    # Закомментированное правило — не объявление.
+    (checked, bad), _uses = gaps('<style>\n/* .ghost_in_comment { } */\n'
+                                 '</style>\n<div class="ghost_in_comment">'
+                                 '</div>\n')
+    assert len(bad) == 1 and 'ghost_in_comment' in bad[0], bad
+
+    # Десятичные дроби классами не являются.
+    (checked, bad), uses = gaps('<script>\nconst half = 0.5;\n'
+                                'const r2 = x.toFixed(2);\n</script>\n')
+    assert not uses and not bad, (uses, bad)
+
+    # CSS-селектор вне <style> тоже надевает класс.
+    (checked, bad), _uses = gaps("<script>\nconst el = q('.sel_probe');\n"
+                                 '</script>\n')
+    assert len(bad) == 1 and 'sel_probe' in bad[0], bad
+
+    # Боевое дерево не деградировало до молчания.
+    rules, uses = _panel_class_contract()
+    checked, bad = _panel_class_gaps(rules, uses)
+    assert not bad and len(checked) >= 4 and _panel_class_use_sites(uses) >= 8
