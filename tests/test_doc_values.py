@@ -3834,3 +3834,166 @@ def test_panel_asset_probe_recognizes_the_real_defect_shapes():
     checked, bad = _panel_asset_gaps(refs, served,
                                      _panel_asset_mime_extensions())
     assert not bad and len(checked) >= 2, (checked, bad)
+
+
+# --- замок G: контракт длинных флагов командной строки ----------------------
+
+#: Единственная точка разбора продукта: `build_parser()` в `run.py`. По замеру
+#: `mcuclient/*.py` ни одного `add_argument` не объявляют (0 из 62 файлов),
+#: поэтому расширять область на пакет означало бы сверять несуществующее.
+CLI_ENTRY = ROOT / 'run.py'
+
+#: Реестр — раздел `docs/DEV_LOCAL.md`. Маркер строгий: заголовок раздела 8
+#: («Полезные флаги run.py») содержит подстроку «флаги run.py» и идёт раньше,
+#: поэтому свободный маркер прочитал бы 11 ходовых флагов вместо 41 реестра и
+#: выдал 30 ложных находок на чистом дереве.
+CLI_REGISTRY_DOC = ROOT / 'docs' / 'DEV_LOCAL.md'
+CLI_REGISTRY_MARK = 'Все флаги run.py'
+
+#: Обратное направление («реестр обещает флаг, которого парсер не принимает»)
+#: меряется только по реестру. По всем живым документам там живут чужие
+#: команды: `--appimage` (build.py разбирает argv вручную), `--collect-only`
+#: и `--system-site-packages` (pytest/venv) — замок красил бы правду.
+
+
+def _cli_declared_flags():
+    """Длинные флаги `build_parser()` — строго из AST вызовов `add_argument`."""
+    tree = ast.parse(CLI_ENTRY.read_text(encoding='utf-8'))
+    declared = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, 'attr', None) != 'add_argument':
+            continue
+        names = [a.value[2:] for a in node.args
+                 if isinstance(a, ast.Constant) and isinstance(a.value, str)
+                 and a.value.startswith('--')]
+        if not names:
+            continue
+        choices = ()
+        for kw in node.keywords:
+            if (kw.arg == 'choices'
+                    and isinstance(kw.value, (ast.List, ast.Tuple))):
+                choices = tuple(e.value for e in kw.value.elts
+                                if isinstance(e, ast.Constant)
+                                and isinstance(e.value, str))
+        for name in names:
+            declared[name] = choices
+    return declared
+
+
+def _cli_registry_text():
+    """Текст раздела-реестра; пустая строка означает, что реестра нет."""
+    if not CLI_REGISTRY_DOC.is_file():
+        return ''
+    lines = CLI_REGISTRY_DOC.read_text(encoding='utf-8').splitlines()
+    start = None
+    for n, line in enumerate(lines):
+        if line.startswith('##') and CLI_REGISTRY_MARK.lower() in line.lower():
+            start = n
+            break
+    if start is None:
+        return ''
+    body = []
+    for line in lines[start + 1:]:
+        if line.startswith('##'):
+            break
+        body.append(line)
+    return chr(10).join(body)
+
+
+def _cli_registry_flag_names(text):
+    """Имена флагов реестра: только форма `--flag` в бэктиках.
+
+    Проза без бэктиков не считается обещанием: в живых документах `--flag`
+    встречается в предложениях о чужих инструментах, и замок начал бы врать.
+    """
+    tick = chr(96)
+    return set(re.findall(tick + '--([a-z][a-z0-9-]+)' + tick, text))
+
+
+def _cli_flag_gaps(declared, documented):
+    """Две находки: обещанный реестром флаг и забытый в реестре флаг."""
+    bad = []
+    for name in sorted(documented - set(declared)):
+        bad.append('реестр обещает `--%s`, а `build_parser()` его не принимает'
+                   % name)
+    for name in sorted(set(declared) - documented):
+        bad.append('`build_parser()` принимает `--%s`, реестр о нём молчит'
+                   % name)
+    return bad
+
+
+def _cli_choice_gaps(declared, text):
+    """Допустимые значения `choices` обязаны быть в тексте реестра.
+
+    Оператор узнаёт режимы `--srtp` и `--transport` из документа, а не из
+    исходников: пропавшее значение = команда, которую нельзя составить.
+    """
+    bad = []
+    for name, values in sorted(declared.items()):
+        for value in values:
+            edge = ('(?<![A-Za-z0-9_])' + re.escape(value)
+                    + '(?![A-Za-z0-9_])')
+            if not re.search(edge, text):
+                bad.append('`--%s` принимает значение `%s`, которого нет в '
+                           'реестре' % (name, value))
+    return bad
+
+
+def test_cli_flags_are_documented():
+    declared = _cli_declared_flags()
+    registry = _cli_registry_text()
+    bad = _cli_flag_gaps(declared, _cli_registry_flag_names(registry))
+    bad += _cli_choice_gaps(declared, registry)
+    assert not bad, 'контракт флагов сломан:' + chr(10) + chr(10).join(bad)
+
+
+def test_cli_flag_guard_sees_the_flags_it_protects():
+    """Порог, а не точное число: пустой знаменатель обязан быть красным.
+
+    Без этого теста взаимная слепота (ни одного `add_argument`, ни одного
+    бэктика в реестре, либо подхват не того раздела) дала бы зелёный на
+    пустых множествах — тот же класс, что `>= 8` при 11 указателях.
+    """
+    declared = _cli_declared_flags()
+    names = _cli_registry_flag_names(_cli_registry_text())
+    assert len(declared) >= 40, len(declared)
+    assert len(names) >= 40, len(names)
+    assert {k: v for k, v in declared.items() if v}, \
+        'парсер перестал объявлять choices'
+
+
+def test_cli_flag_probe_recognizes_the_real_defect_shape():
+    """Правило ловит обе формы реального дефекта и молчит на легитимном.
+
+    Формы взяты из замера: оператор получил бы `unrecognized arguments`,
+    написав `--srtp-mode` (такого имени парсер не знает), либо не узнал бы о
+    `--h323-port`, который работает с самого начала.
+    """
+    declared = {'protocol': ('auto', 'sip'), 'proto': (),
+                'srtp': ('off', 'optional', 'mandatory')}
+    # Дефект 1: реестр обещает флаг с опечаткой в имени.
+    bad = _cli_flag_gaps(declared,
+                         {'protocol', 'proto', 'srtp', 'srtp-mode'})
+    assert len(bad) == 1 and '--srtp-mode' in bad[0], bad
+    # Дефект 2: парсер принимает флаг, которого в реестре нет.
+    wider = dict(declared)
+    wider['h323-port'] = ()
+    bad = _cli_flag_gaps(wider, {'protocol', 'proto', 'srtp'})
+    assert len(bad) == 1 and '--h323-port' in bad[0], bad
+    # Дефект 3: значение choices пропало из реестра, режим нельзя составить.
+    srtp_only = {'srtp': ('off', 'optional', 'mandatory')}
+    bad = _cli_choice_gaps(srtp_only, '`--srtp` — шифрование: off / optional')
+    assert len(bad) == 1 and 'mandatory' in bad[0], bad
+    # Легитимно: два имени одного флага в одной строке — оба настоящие.
+    text = '- `--protocol` / `--proto` — протокол исходящего вызова'
+    assert _cli_registry_flag_names(text) == {'protocol', 'proto'}, text
+    # Легитимно: проза о чужой команде без бэктиков не создаёт обещания.
+    assert _cli_registry_flag_names('pytest tests -q --collect-only') == set()
+    # Боевое дерево не деградировало до молчания.
+    real = _cli_declared_flags()
+    registry = _cli_registry_text()
+    gaps = _cli_flag_gaps(real, _cli_registry_flag_names(registry))
+    gaps += _cli_choice_gaps(real, registry)
+    assert not gaps and len(real) >= 40, (len(real), gaps)
