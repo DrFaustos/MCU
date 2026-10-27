@@ -3618,3 +3618,219 @@ def test_panel_css_probe_recognizes_the_real_defect_shapes():
     assert not bad and len(checked) >= 4
     assert not id_gaps('<style>#grid { }</style>',
                        _panel_id_contract()[1])[1]
+
+
+# --- Замок F: локальная ссылка панели обязана быть файлом -----------------
+#:
+#: `<script src="/ms-conference.js">` с опечаткой в имени - молчаливая ветка
+#: того же класса, что надетый класс (слайс D) и CSS-имена (слайс E): сервер
+#: в `_serve_static` видит `not target.is_file()` и отдаёт 404, браузер не
+#: роняет страницу, оператор получает пустой UI без признака причины. До
+#: этого среза существование подключаемого файла не сверялось ничем: подсов
+#: `<script src="/ghost_file_probe.js">` страж проглатывал молча (замер OJ6:
+#: GUARD_RC=0, красных кейсов ноль, метки в выводе ноль).
+#:
+#: Второй конец той же связи - таблица `_MIME` в web_server.py: `_serve_static`
+#: берёт из неё Content-Type через `.get(suffix, application-octet-stream)`.
+#: Для скрипта это не косметика: браузер отказывается исполнять скрипт,
+#: отданный не javascript-типом. Молчание то же - исключения нет.
+#:
+#: Направление сверки ОДНО - «ссылка => файл + тип». Обратное отвергнуто
+#: замером (OK6): файлов, которых панель не подключает, ноль, а таблица `_MIME`
+#: без подключения даёт 6 находок (css, html, ico, json, png, svg) - обратный
+#: замок красил бы прогон на каждой запасной MIME-строке.
+#:
+#: Допуск по замеру (OK2/OL2): разбирается только живая форма `src=` (3
+#: вхождения, из них 2 со значением). `href`, `<link`, `url(`, `<source`,
+#: `@import`, `import`, `new Worker(` и `createElement` со строкой script в
+#: носителях - ноль вхождений; расширять замок на несуществующую конструкцию
+#: означало бы ослаблять его ради вида полноты. Появится живое место - правка
+#: обязана быть явной, а не молчаливым допуском. Query-хвоста у ссылок ноль,
+#: поэтому расширение берётся от имени как есть.
+PANEL_ASSET_ATTR = 'src='
+PANEL_ASSET_QUOTES = (chr(34), chr(39))
+PANEL_ASSET_ROOT = chr(47)
+#: Внешняя ссылка ведёт не в webui, а в сеть: её существование локальным
+#: файлом не проверяется (без этого исключения замок краснел бы на CDN).
+PANEL_ASSET_EXTERNAL = ('http:', 'https:', 'blob:', 'data:', 'mailto:',
+                        chr(47) + chr(47))
+
+
+def _panel_asset_refs(text, rel):
+    """{имя ресурса: [(носитель, строка)]} из живой формы `src=`.
+
+    Пустое значение - НЕ ссылка: в живом index.html:89 стоит `<img
+    id="localVideo" alt="..." src="">`, рантайм-плейсхолдер, который браузер
+    обязан игнорировать. Считать его ссылкой значило бы краснить правдивое
+    дерево - ровно тот грех подгонки, который этот страж и вырезает.
+    """
+    refs = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith(PANEL_COMMENT_PREFIX):
+            continue
+        pos = 0
+        while True:
+            i = line.find(PANEL_ASSET_ATTR, pos)
+            if i < 0:
+                break
+            pos = i + len(PANEL_ASSET_ATTR)
+            j = pos
+            while j < len(line) and line[j] == ' ':
+                j += 1
+            if j >= len(line) or line[j] not in PANEL_ASSET_QUOTES:
+                continue
+            end = line.find(line[j], j + 1)
+            if end < 0:
+                continue
+            value = line[j + 1:end]
+            if not value or value.startswith(PANEL_ASSET_EXTERNAL):
+                continue
+            name = value[1:] if value.startswith(PANEL_ASSET_ROOT) else value
+            refs.setdefault(name, []).append((rel, lineno))
+    return refs
+
+
+def _panel_asset_served():
+    """Имена файлов, которые сервер реально отдаёт из webui.
+
+    Каталог берётся у PANEL_DIR, а не переписывается заново: `_serve_static`
+    разрешает путь как `(WEBUI_DIR / rel).resolve()` с guard'ом
+    `relative_to(WEBUI_DIR)`, т.е. раздача ровно отсюда и ничего вне.
+    """
+    served = set()
+    for path in sorted(PANEL_DIR.rglob('*')):
+        if path.is_file():
+            served.add(path.relative_to(PANEL_DIR).as_posix())
+    return served
+
+
+def _panel_asset_mime_extensions():
+    """{расширение, ...} из `_MIME` в web_server.py (ast, а не regexp)."""
+    tree = ast.parse(SERVER_FILE.read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == '_MIME':
+                table = ast.literal_eval(node.value)
+                assert isinstance(table, dict) and table, (
+                    '_MIME в web_server.py пуста или разучилась быть '
+                    'словарём: сверять тип содержимого нечем')
+                return set(table)
+    raise AssertionError('в web_server.py нет константы _MIME: сверка '
+                         'типа содержимого повисла в воздухе')
+
+
+def _panel_asset_contract(texts=None):
+    """(ссылки, отдаваемые файлы) по всем носителям контракта панели.
+
+    Набор файлов ОБЩИЙ, как в замках D и E: ms-conference.js грузится тегом
+    из webui в тот же DOM, поэтому подключённый из одного носителя ресурс
+    закрывает ссылку из другого.
+    """
+    if texts is None:
+        texts = [(rel, (PANEL_DIR / rel).read_text(encoding='utf-8'))
+                 for rel in PANEL_CONTRACT_FILES]
+    refs = {}
+    for rel, text in texts:
+        for name, where in _panel_asset_refs(text, rel).items():
+            refs.setdefault(name, []).extend(where)
+    for name in refs:
+        refs[name] = sorted(set(refs[name]))
+    return refs, _panel_asset_served()
+
+
+def _panel_asset_gaps(refs, served, extensions):
+    """(сверенные имена, находки) - чистая функция для probe-кейса.
+
+    Две ветки - оба конца одной связи: файл обязан лежать в webui (иначе
+    `_serve_static` отдаст 404) и его расширение обязано быть в `_MIME`
+    (иначе браузер получит octet-stream и откажется это исполнять).
+    """
+    checked, bad = [], []
+    for name in sorted(refs):
+        where = ', '.join(f'{a}:{b}' for a, b in refs[name])
+        checked.append(name)
+        if name not in served:
+            bad.append(f'панель подключает {name} по местам {where}, но в '
+                       'webui такого файла нет: сервер отдаст 404, UI '
+                       'останется пустым')
+            continue
+        suffix = Path(name).suffix
+        if suffix not in extensions:
+            bad.append(f'ресурс {name} (места {where}) с расширением '
+                       f'{suffix} отсутствует в _MIME: сервер отдаст '
+                       'octet-stream, браузер откажется это исполнять')
+    return checked, bad
+
+
+def test_panel_assets_are_served_files():
+    """Каждая локальная ссылка панели обязана быть файлом с известным типом.
+
+    Замер боевого дерева (OK5/OL4): локальных ссылок 2 - mediasoup-client.js и
+    ms-conference.js, обе резолвятся в файлы webui, расширение js есть в
+    `_MIME` (7 расширений); третья форма src= - пустой плейсхолдер img, он не
+    ссылка; находок ноль. Нижние границы обязательны: переезд панели или
+    правка PANEL_CONTRACT_FILES дали бы пустой набор и зелёное молчание.
+    """
+    refs, served = _panel_asset_contract()
+    extensions = _panel_asset_mime_extensions()
+    checked, bad = _panel_asset_gaps(refs, served, extensions)
+    assert len(refs) >= 2, (f'локальных ссылок {len(refs)} - ниже '
+                            'замеренной мощности (2): разбор src= ослеп')
+    assert len(served) >= 3, (f'файлов в webui {len(served)} - ниже '
+                              'замеренной мощности (3): PANEL_DIR смотрит не туда')
+    assert len(extensions) >= 7, (f'расширений в _MIME {len(extensions)} - '
+                                  'ниже замеренной мощности (7): разбор '
+                                  '_MIME ослеп')
+    assert len(checked) >= 2, (f'сверено лишь {len(checked)} имён: разбор '
+                               'ссылок ослеп')
+    assert not bad, ('панель ссылается на недоступные ресурсы:' + chr(10)
+                     + chr(10).join(bad))
+
+
+def test_panel_asset_probe_recognizes_the_real_defect_shapes():
+    """Посевы вскрывают ровно те дефекты, ради которых написан замок."""
+
+    def gaps(markup, extensions=None):
+        refs = _panel_asset_refs(markup, 'probe.html')
+        return _panel_asset_gaps(refs, {'ms-conference.js'},
+                                 extensions or {'.js'})
+
+    # Мёртвое имя файла: сервер отдаст 404, страница не упадёт, UI опустеет.
+    checked, bad = gaps('<script src="/ghost_file_probe.js"></script>')
+    assert len(bad) == 1 and 'ghost_file_probe.js' in bad[0], bad
+    assert checked == ['ghost_file_probe.js'], checked
+
+    # Контрпример: существующий файл не даёт находки - иначе замок краснел бы
+    # на живом дереве, где обе ссылки ведут в webui.
+    checked, bad = gaps('<script src="/ms-conference.js"></script>')
+    assert not bad and checked == ['ms-conference.js'], (checked, bad)
+
+    # Пустое src= - рантайм-плейсхолдер (живой index.html:89), не ссылка.
+    checked, bad = gaps('<img id="localVideo" src="">')
+    assert not bad and checked == [], (checked, bad)
+
+    # Внешняя ссылка ведёт не в webui: локальным файлом не проверяется.
+    checked, bad = gaps('<script src="https://cdn.example/x.js"></script>')
+    assert not bad and checked == [], (checked, bad)
+
+    # Вторая ветка: файл есть, расширения в _MIME нет - octet-stream.
+    checked, bad = gaps('<script src="/ms-conference.js"></script>',
+                        extensions={'.html'})
+    assert len(bad) == 1 and 'ms-conference.js' in bad[0], bad
+
+    # Контрпример той же ветки: с расширением js в таблице находки нет.
+    checked, bad = gaps('<script src="/ms-conference.js"></script>',
+                        extensions={'.js'})
+    assert not bad and checked == ['ms-conference.js'], (checked, bad)
+
+    # Строка комментария не подключает скрипт: `//` перед тегом - не обещание.
+    checked, bad = gaps('// <script src="/ghost_comment_probe.js"></script>')
+    assert not bad and checked == [], (checked, bad)
+
+    # Боевое дерево не деградировало до молчания.
+    refs, served = _panel_asset_contract()
+    checked, bad = _panel_asset_gaps(refs, served,
+                                     _panel_asset_mime_extensions())
+    assert not bad and len(checked) >= 2, (checked, bad)
