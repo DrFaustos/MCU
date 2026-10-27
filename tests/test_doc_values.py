@@ -3343,3 +3343,278 @@ def test_panel_class_probe_recognizes_the_real_defect_shape():
     rules, uses = _panel_class_contract()
     checked, bad = _panel_class_gaps(rules, uses)
     assert not bad and len(checked) >= 4 and _panel_class_use_sites(uses) >= 8
+
+
+# --- Замок E: ссылка внутри CSS обязана быть живой ------------------------
+#: var(--x) и #id внутри <style> - вторая половина того же молчания: правило
+#: просто перестаёт применяться, консоль браузера молчит, pytest не жалуется,
+#: а оператор теряет единственный признак состояния. Направление сверки ОДНО:
+#: ссылка => объявление. Обратное («объявлено, но не использовано») отвергнуто
+#: замером: висячая переменная ровно одна (--warn, index.html:8), висячих
+#: правил ноль - красить прогон на каждом опережающем правку коммите нельзя.
+#:
+#: var() ищется по ВСЕМУ носителю: 7 из 8 живых ссылок сидят в inline-атрибуте
+#: style= ВНЕ <style> (замер ED2: index.html:96,140,165,176,199,602,603).
+#: Искать их только в <style> - означало бы оставить слепой зоной, и «ноль
+#: находок» снова было бы следствием слепоты, а не чистоты дерева.
+#:
+#: #имя берётся ТОЛЬКО внутри <style>: вне него решётка - часть строки (5
+#: строк вне <style> с решёткой, замер FA2), а внутри первые же токены - это
+#: цвета (#0f1420, #182031, #202b40, #3b82f6). Токен целиком из hex-алфавита
+#: длиной 3/4/6/8 - цвет, а не id; hex-подобных объявленных id в боевом
+#: дереве ноль (замер ED3), поэтому такая обрезка не съедает настоящий id.
+#: Тот же урок, что .state против .stateLabel.
+#:
+#: Комментарии вырезаются ТЕМ ЖЕ приёмом, что в замке D: в живом <style> два
+#: CSS-комментария (замер FA2), и объявление внутри них объявлением не является.
+#: Бэкслешей в литералах нет намеренно: наборы собираются через chr(), потому
+#: что экранирование при переносе кода в файл уже рвало этот страж дважды.
+PANEL_CSS_BS = chr(92)
+PANEL_CSS_NAME = '[a-z][a-z0-9' + chr(45) + '_]*'
+PANEL_CSS_VAR_USE_RE = re.compile('var' + PANEL_CSS_BS + chr(40) + '--('
+                                  + PANEL_CSS_NAME + ')')
+PANEL_CSS_VAR_DECL_RE = re.compile('--(' + PANEL_CSS_NAME + ')' + PANEL_CSS_BS + 's*:')
+PANEL_CSS_COMMENT_RE = re.compile(chr(47) + PANEL_CSS_BS + '*.*?' + PANEL_CSS_BS
+                                  + '*' + chr(47), re.DOTALL)
+PANEL_CSS_HEX = set('0123456789abcdefABCDEF')
+PANEL_CSS_ID_CHARS = set('abcdefghijklmnopqrstuvwxyz'
+                         'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                         '0123456789' + chr(45) + chr(95))
+
+
+# Заглушка комментария: пробелы, НО переводы строк сохранены. Номера
+# строк уходят в текст находки, а схлопывание многострочного комментария
+# в один пробел сдвигал бы их; приём тот же, что _panel_class_off_style.
+def _panel_css_blank(match):
+    return ''.join(chr(10) if ch == chr(10) else ' '
+                   for ch in match.group(0))
+
+
+def _panel_css_stripped(text):
+    '''Носитель без комментариев; номера строк сохранены.
+
+    Строки-комментарии выключаются по тому же критерию PANEL_COMMENT_PREFIX,
+    что в зонах выше; CSS-комментарии - тем же приёмом, которым пользуется
+    замок D. Второй реализации фильтра здесь не место: два фильтра разъедутся
+    и дадут ложную находку на правдивом дереве.
+    '''
+    kept = []
+    for line in text.splitlines():
+        kept.append('' if line.lstrip().startswith(PANEL_COMMENT_PREFIX)
+                    else line)
+    return PANEL_CSS_COMMENT_RE.sub(_panel_css_blank, chr(10).join(kept))
+
+
+def _panel_css_style_span(text):
+    '''Границы тела <style> в очищенном тексте (None, если блока нет).'''
+    opened = PANEL_STYLE_OPEN_RE.search(text)
+    if not opened:
+        return None
+    closed = PANEL_STYLE_CLOSE_RE.search(text, opened.end())
+    return opened.end(), closed.start() if closed else len(text)
+
+
+def _panel_css_id_tokens(body, start, end):
+    '''Имена #id-селекторов тела <style>: hex-цвета отброшены.'''
+    names = []
+    pos = start
+    while pos < end:
+        pos = body.find(chr(35), pos, end)
+        if pos < 0:
+            return names
+        stop = pos + 1
+        while stop < end and body[stop] in PANEL_CSS_ID_CHARS:
+            stop += 1
+        name = body[pos + 1:stop]
+        pos = stop if stop > pos + 1 else pos + 1
+        if not name:
+            continue
+        if (len(name) in (3, 4, 6, 8)
+                and all(ch in PANEL_CSS_HEX for ch in name)):
+            continue
+        names.append((name, body[:pos].count(chr(10)) + 1))
+    return names
+
+
+def _panel_css_parse(text, rel='?'):
+    '''(переменные, var-ссылки, #id-ссылки) одного носителя, с местами.
+
+    Ответ - кортеж из ТРЁХ значений, и это не случайность: мера находок
+    обязана считаться как len(bad), а не как длина ответа. Мера, печатающая
+    длину кортежа, даёт константу при любом числе находок - «ноль находок»
+    становится неотличим от того, что разбор ослеп.
+    '''
+    clean = _panel_css_stripped(text)
+    span = _panel_css_style_span(clean)
+    declared = set()
+    id_uses = {}
+    if span:
+        start, end = span
+        declared = set(PANEL_CSS_VAR_DECL_RE.findall(clean[start:end]))
+        for name, lineno in _panel_css_id_tokens(clean, start, end):
+            id_uses.setdefault(name, []).append((rel, lineno, '#id'))
+
+    var_uses = {}
+    for lineno, line in enumerate(clean.splitlines(), 1):
+        for name in PANEL_CSS_VAR_USE_RE.findall(line):
+            var_uses.setdefault(name, []).append((rel, lineno, 'var()'))
+    return declared, var_uses, id_uses
+
+
+def _panel_css_var_contract(texts=None):
+    '''(объявленные CSS-переменные, ссылки var()) по всем носителям.
+
+    Набор имён ОБЩИЙ, как в замке D: ms-conference.js грузится в тот же DOM,
+    что и index.html, поэтому объявление из одного носителя закрывает ссылку
+    из другого.
+    '''
+    if texts is None:
+        texts = [(rel, (PANEL_DIR / rel).read_text(encoding='utf-8'))
+                 for rel in PANEL_CONTRACT_FILES]
+    declared, uses = set(), {}
+    for rel, text in texts:
+        parsed, parsed_var, _ids = _panel_css_parse(text, rel)
+        declared |= parsed
+        for name, where in parsed_var.items():
+            uses.setdefault(name, []).extend(where)
+    return declared, uses
+
+
+def _panel_css_id_contract(texts=None):
+    '''#id-ссылки из <style> по всем носителям.
+
+    Объявления id берёт существующая id-зона (_panel_id_contract): второго
+    разбора разметки здесь не заводится - два разъехавшихся разбора одного и
+    того же поля это будущая ложная находка.
+    '''
+    if texts is None:
+        texts = [(rel, (PANEL_DIR / rel).read_text(encoding='utf-8'))
+                 for rel in PANEL_CONTRACT_FILES]
+    uses = {}
+    for rel, text in texts:
+        _declared, _var, parsed_ids = _panel_css_parse(text, rel)
+        for name, where in parsed_ids.items():
+            uses.setdefault(name, []).extend(where)
+    return uses
+
+
+def _panel_css_var_gaps(declared, uses):
+    '''(сверенные имена, находки) - чистая функция для probe-кейса.'''
+    checked, bad = [], []
+    for name in sorted(uses):
+        if name in declared:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{lineno}'
+                          for rel, lineno, _form in uses[name][:3])
+        bad.append(f'панель ссылается на var(--{name}) по местам {where}, но '
+                   f'в <style> нет объявления --{name}: значение станет '
+                   f'пустым и стиль молча не применится')
+    return checked, bad
+
+
+def _panel_css_id_gaps(declared, uses):
+    '''(сверенные имена, находки) для #id-селекторов внутри <style>.'''
+    checked, bad = [], []
+    for name in sorted(uses):
+        if name in declared:
+            checked.append(name)
+            continue
+        where = '; '.join(f'{rel}:{lineno}'
+                          for rel, lineno, _form in uses[name][:3])
+        bad.append(f'в <style> есть селектор #{name} по местам {where}, но в '
+                   f'разметке нет элемента с таким id: правило молча не '
+                   f'применится ни к чему')
+    return checked, bad
+
+
+def test_panel_css_links_are_alive():
+    """Каждая ссылка CSS ведёт на объявленную переменную или объявленный id.
+
+    Замер боевого дерева: объявлено 9 переменных, используется 8, var() 30
+    вхождений; #id-селекторов 14 токенов (9 имён), все объявлены в разметке;
+    находок ноль. Нижние границы обязательны: без них переезд панели или
+    правка PANEL_CONTRACT_FILES дали бы пустой набор и зелёное молчание.
+    """
+    declared, var_uses = _panel_css_var_contract()
+    var_checked, var_bad = _panel_css_var_gaps(declared, var_uses)
+    assert len(declared) >= 8, (f'объявленных переменных {len(declared)} - '
+                                f'ниже замеренной мощности (9): разбор <style> '
+                                f'ослеп')
+    assert len(var_checked) >= 8, (f'сверено лишь {len(var_checked)} имён '
+                                   f'var(): разбор ссылок ослеп')
+    assert not var_bad, ('панель ссылается на необъявленные CSS-переменные:'
+                         + chr(10).join(var_bad))
+
+    id_uses = _panel_css_id_contract()
+    id_checked, id_bad = _panel_css_id_gaps(_panel_id_contract()[1], id_uses)
+    assert len(id_uses) >= 6, (f'#id-имён {len(id_uses)} - ниже замеренной '
+                               f'мощности (9): разбор решётки ослеп')
+    assert len(id_checked) >= 6, (f'сверено лишь {len(id_checked)} id: разбор '
+                                  f'разметки ослеп')
+    assert not id_bad, ('в <style> есть мёртвые id-селекторы:'
+                        + chr(10).join(id_bad))
+
+
+def test_panel_css_probe_recognizes_the_real_defect_shapes():
+    """Посевы вскрывают ровно те дефекты, ради которых написан замок."""
+
+    def var_gaps(markup, rel='probe.html'):
+        declared, uses = _panel_css_var_contract([(rel, markup)])
+        return _panel_css_var_gaps(declared, uses)
+
+    # Необъявленная переменная: значение станет пустым, стиль не применится.
+    checked, bad = var_gaps('<style>--ok:#fff;.x{color:var(--ok)}'
+                            '.y{color:var(--ghost_var_probe)}</style>')
+    assert len(bad) == 1 and 'ghost_var_probe' in bad[0], bad
+    assert checked == ['ok'], checked
+
+    # Ссылка ВНЕ <style> (inline style=) обязана сверяться: 7 из 8 живых мест
+    # именно такие, иначе замок был бы слеп к большей части носителя.
+    checked, bad = var_gaps('<style>--ok:#fff;</style>'
+                            '<div style="color:var(--ghost_inline_probe)">'
+                            '</div>')
+    assert len(bad) == 1 and 'ghost_inline_probe' in bad[0], bad
+
+    # Объявление внутри CSS-комментария - не объявление (в живом <style> два
+    # комментария, замер FA2; без фильтра замок краснел бы на них).
+    checked, bad = var_gaps('<style>/* --ghost_hidden_decl: #fff; */'
+                            '.x{color:var(--ghost_hidden_decl)}</style>')
+    assert len(bad) == 1 and 'ghost_hidden_decl' in bad[0], bad
+
+    # Объявление в строке-комментарии - тоже не объявление. Вторым посевом
+    # идёт контрпример: без префикса `//` объявление на месте и находки
+    # нет. Первая версия посева была собрана БЕЗ <style>: span=None,
+    # declared пуст при любом фильтре - посев краснел тривиально и не
+    # мерил ничего (запрещающий guard обязан иметь контрпример).
+    LINE = '--ghost_line_decl: #fff;'
+    VARX = '.x{color:var(--ghost_line_decl)}'
+    checked, bad = var_gaps('<style>' + chr(10) + '// ' + LINE + chr(10)
+                            + VARX + '</style>')
+    assert len(bad) == 1 and 'ghost_line_decl' in bad[0], bad
+    checked, bad = var_gaps('<style>' + chr(10) + LINE + chr(10) + VARX
+                            + '</style>')
+    assert not bad and checked == ['ghost_line_decl'], (checked, bad)
+
+    def id_gaps(markup, declared, rel='probe.html'):
+        uses = _panel_css_id_contract([(rel, markup)])
+        return _panel_css_id_gaps(declared, uses)
+
+    # Мёртвый id-селектор: правило не применяется ни к чему.
+    checked, bad = id_gaps('<style>#ghost_id_probe { } #live { }</style>',
+                           {'live'})
+    assert len(bad) == 1 and 'ghost_id_probe' in bad[0], bad
+    assert checked == ['live'], checked
+
+    # Hex-цвет - не id: без обрезки каждое правило с цветом дало бы находку
+    # (в живом <style> 40 решёток, из них id-токенов только 14).
+    checked, bad = id_gaps('<style>.x{background:#0b1018;color:#fff}'
+                           '#live{ }</style>', {'live'})
+    assert not bad and checked == ['live'], (checked, bad)
+
+    # Боевое дерево не деградировало до молчания.
+    declared, uses = _panel_css_var_contract()
+    checked, bad = _panel_css_var_gaps(declared, uses)
+    assert not bad and len(checked) >= 4
+    assert not id_gaps('<style>#grid { }</style>',
+                       _panel_id_contract()[1])[1]
