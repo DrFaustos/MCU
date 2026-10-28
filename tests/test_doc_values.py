@@ -3997,3 +3997,99 @@ def test_cli_flag_probe_recognizes_the_real_defect_shape():
     gaps = _cli_flag_gaps(real, _cli_registry_flag_names(registry))
     gaps += _cli_choice_gaps(real, registry)
     assert not gaps and len(real) >= 40, (len(real), gaps)
+
+
+# --- рваный перенос: строка markdown не имеет права обрываться на дефисе ---
+
+#: Причина замка: markdown склеивает строки абзаца при рендере, и в
+#: составное слово вставляется пробел. Дефект прожил две недели (коммит
+#: a66f93b), потому что прежняя мера требовала две и более кириллицы перед
+#: дефисом и не видела латинскую основу. Признак обязан быть буквенным и
+#: не зависеть от алфавита; одиночный дефис, набранный как тире, легален.
+HANGING_HYPHEN = re.compile('[А-Яа-яЁёA-Za-z]-[ \t]*$')
+
+#: Эллипсис — закрытый список основ-префиксоид, а не «после дефиса стоит
+#: союз»: признак по союзу объявляет эллипсисом разрезанное слово, чей
+#: хвост случайно совпал с союзом, и пропускает реальный дефект.
+ELLIPSIS_STEMS = {'аудио', 'видео', 'медиа', 'мульти', 'теле', 'кибер',
+                  'супер', 'одно', 'двух', 'трёх', 'много', 'мало', 'пост',
+                  'экстра'}
+
+
+def _hanging_hyphen_findings(lines):
+    """Находки: номер строки и её хвост, где обрыв склеится при рендере.
+
+    fenced-блок исключён по физике, а не ради зелёного прогона: внутри него
+    перевод строки сохраняется, дефекта склейки нет. Замер по живой цели
+    подтвердил, что исключение ничего не прячет: находок с ним и без него
+    одинаковое число. Пустая следующая строка — конец абзаца, склеивать там
+    тоже нечего.
+    """
+    bad = []
+    inside = False
+    for index, line in enumerate(lines):
+        if line.startswith('```'):
+            inside = not inside
+            continue
+        if inside or not HANGING_HYPHEN.search(line):
+            continue
+        nxt = lines[index + 1] if index + 1 < len(lines) else ''
+        if not nxt.strip():
+            continue
+        stem = re.search('([А-Яа-яЁёA-Za-z]+)-[ \t]*$', line)
+        if stem and stem.group(1).lower() in ELLIPSIS_STEMS:
+            continue
+        bad.append('%d:%s' % (index + 1, line[-38:]))
+    return bad
+
+
+def test_markdown_prose_has_no_hanging_hyphen():
+    """Живой markdown не имеет права обрываться на дефисе внутри абзаца.
+
+    Цель — ровно тот мешок файлов, что у сверки чисел: замок, который
+    смотрит в другой список, зелён по определению и ничего не сторожит.
+    Журнал в мешок не входит: править его задним числом значит стирать
+    историю, прецедент JOURNAL_DOCS.
+    """
+    bad = []
+    for path in COUNT_DOCS:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding='utf-8')
+        where = path.relative_to(ROOT).as_posix()
+        for finding in _hanging_hyphen_findings(text.splitlines()):
+            bad.append('%s:%s' % (where, finding))
+    assert not bad, ('строка обрывается на висячем дефисе и склеится '
+                     'при рендере:\n' + '\n'.join(bad))
+
+
+def test_hanging_hyphen_probe_recognizes_the_real_defect_shape():
+    """Замок обязан видеть дефект, пропускать легальное и не слепнуть.
+
+    Пары «дефект / легитимно» обязательны: без них зелёный прогон
+    неотличим от неработающего замка. Ровно так и случилось с прежним
+    узором, для которого латинская основа была невидима.
+    """
+    # Дефект: разрезанное составное слово, обе живые формы.
+    assert len(_hanging_hyphen_findings(['писателя не было никогда; web-',
+                                         'панель прокинула их в API.'])) == 1
+    assert len(_hanging_hyphen_findings(['фильтр (метаданные/encoder-',
+                                         'ноды отсеиваются)'])) == 1
+    # Легитимно: тире между словами, дефис отделён пробелом слева.
+    assert _hanging_hyphen_findings(['список точек -',
+                                     'и список камер']) == []
+    # Легитимно: эллипсис по закрытому списку основ.
+    assert _hanging_hyphen_findings(['аудио-', 'и видеозахват']) == []
+    # Легитимно: конец абзаца, склеивать нечего.
+    assert _hanging_hyphen_findings(['слово-', '', 'следующий абзац']) == []
+    # Легитимно: внутри fenced-блока перевод строки рендерится как есть.
+    assert _hanging_hyphen_findings(['```', 'web-', 'панель', '```']) == []
+    # Боевая цель чиста, но механизм жив: иначе ноль от слепоты.
+    total = 0
+    for path in COUNT_DOCS:
+        if not path.is_file():
+            continue
+        total += len(_hanging_hyphen_findings(
+            path.read_text(encoding='utf-8').splitlines()))
+    assert total == 0, total
+    assert len(_hanging_hyphen_findings(['web-', 'панель'])) == 1

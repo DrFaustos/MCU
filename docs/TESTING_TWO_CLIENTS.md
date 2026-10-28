@@ -291,8 +291,9 @@ python3 run.py --doctor      # секция «Камеры (ОС)» / «Микр
 
 Как это получается:
 
-* камеры: `v4l2-ctl --list-devices` + фильтр «Video Capture» (метаданные/encoder-
-  ноды отсеиваются) + имя из `v4l2-ctl --info`; fallback — `/dev/video*`;
+* камеры: `v4l2-ctl --list-devices` + фильтр «Video Capture»
+  (метаданные/encoder-ноды отсеиваются) + имя из `v4l2-ctl --info`;
+  fallback — `/dev/video*`;
 * микрофоны: `pactl list sources` (исключая `.monitor`-петли) → `arecord -l` →
   `/proc/asound`; имя карты берётся из `/proc/asound/cards`;
 * приоритет в UI — устройства PJSIP (реальные индексы для `set_video_device`),
