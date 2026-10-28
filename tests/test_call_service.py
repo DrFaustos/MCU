@@ -42,13 +42,25 @@ class _Pj:
         return _CallOpParam(*a)
 
 
+def _registrar(call, remote_uri, state):
+    """Фейк с сигнатурой движка: state обязателен (позиционно или по имени)."""
+    _registrar.calls.append((call, remote_uri, state))
+    return Participant(id=1, remote_uri=remote_uri, state=state)
+
+
+_registrar.calls: list = []
+
+
 def _service(events=None, calls=None, video=True, available=True, registered=None, dropped=None, live=None, audio_err=False):
     return CallService(
         events or _Events(),
         pj_module=_Pj(),
         is_available=lambda: available,
         get_participant=lambda pid: (calls or {}).get(pid),
-        register_participant=registered or (lambda call, uri: Participant(id=1, remote_uri=uri)),
+        # Фейк повторяет РЕАЛЬНУЮ сигнатуру движка
+        # (SipEngine._register_participant(call, remote_uri, state)) — иначе
+        # тесты проходят, а живой исходящий вызов падает на TypeError.
+        register_participant=registered or _registrar,
         drop_participant=dropped.append if dropped is not None else None,
         get_call_class=lambda: _Call,
         get_account=lambda: None,
@@ -127,3 +139,31 @@ def test_call_audio_error_falls_back_to_null():
     svc = _service(audio_err=True)
     pid = svc.call("sip:100@host")
     assert pid == 1
+
+
+# --- Регрессия: контракт регистратора участников -------------------------
+def test_call_passes_state_to_registrar():
+    """Исходящий вызов обязан передать состояние (регресс TypeError в рантайме).
+
+    Живой прогон MCU<->MCU падал на
+    `_register_participant() missing 1 required positional argument: 'state'` —
+    юнит-тесты это не ловили, потому что фейк принимал только (call, uri).
+    """
+    _registrar.calls.clear()
+    pid = _service().call("sip:100@host")
+    assert pid == 1
+    assert len(_registrar.calls) == 1
+    _, uri, state = _registrar.calls[0]
+    assert uri == "sip:100@host"
+    assert state is CallState.CONNECTING
+
+
+def test_call_survives_engine_style_registrar():
+    """Регистратор движка не имеет дефолта у state — вызов не должен падать."""
+    def strict(call, remote_uri, state):  # ровно как у SipEngine
+        return Participant(id=7, remote_uri=remote_uri, state=state)
+
+    ev = _Events()
+    svc = _service(events=ev, registered=strict, live=[])
+    assert svc.call("sip:100@host") == 7
+    assert not any(n == "call.error" for n, _ in ev.emitted)

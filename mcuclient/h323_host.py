@@ -31,10 +31,25 @@ DEFAULT_SOCKET = "/tmp/mcu_h323d.sock"
 HOST_BINARY = "mcu_h323d"
 
 # Соответствие событий хоста и событий шины (EventBus).
+# Перечислены ТОЛЬКО события, которые mcu_h323d реально отправляет (см.
+# emit_call_event/emit_error в tools/h323d/main.cpp). call.outgoing появился
+# вместе с командой call.make: хост шлёт его для исходящего соединения.
+# call.media добавлен вместе с PCM-медиа (Этап 1м/3): OpenAudioChannel сообщает
+# согласованный кодек и ЕГО ЧАСТОТУ. Частота — не украшение: G.711 даёт 8 кГц,
+# G.722 — 16 кГц, и без неё микшер сложил бы в один микс каналы разной частоты,
+# а терминал услышал бы замедленный голос без единой ошибки в логе.
 EVENT_MAP: dict[str, str] = {
     "call.incoming": "call.incoming",
+    "call.outgoing": "call.outgoing",
     "call.connected": "call.state",
     "call.disconnected": "call.state",
+    "call.media": "call.media",
+    # Тон/строка, принятые хостом (H.245 UserInputIndication либо in-band
+    # RFC 4733). В шину уходит под СВОИМ именем, а не под "dtmf.digits":
+    # ``dtmf.digits`` — формат журнала комнаты (mcuclient/dtmf.py), и владеть
+    # им обязан владелец журнала (DtmfService). Иначе у панели появляются два
+    # источника одних и тех же тонов с разными наборами полей.
+    "dtmf.in": "h323.dtmf",
 }
 
 
@@ -50,6 +65,24 @@ class HostEvent:
     port: int = 0
     reason: Any = ""
     message: str = ""
+    #: адрес вызова для исходящих (поле ``alias``/``ip`` события call.outgoing)
+    address: str = ""
+    #: --- аудио-канал (событие ``call.media``, Этап 1м/3) -------------------
+    #: Частота — не украшение: G.711 даёт 8 кГц, G.722 — 16 кГц, и без неё
+    #: микшер сложил бы в один микс каналы разной частоты.
+    codec: str = ""
+    sample_rate: int = 0
+    direction: str = ""
+    #: --- принятые тоны (событие ``dtmf.in``) --------------------------------
+    #: набранный тон или строка целиком (для H.245 alphanumeric)
+    digits: str = ""
+    #: ``tone`` (H.245 signal либо in-band RFC 4733 — различить в форке нельзя,
+    #: оба стекаются в H323Connection::OnUserInputTone) либо ``string``
+    #: (H.245 alphanumeric). Поле называется via, а не method: см.
+    #: emit_dtmf_event в tools/h323d/main.cpp.
+    via: str = ""
+    #: длительность тона, мс (0 — не передана)
+    duration_ms: int = 0
 
 
 @dataclass
@@ -85,15 +118,38 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         port = int(port or 0)
     except (TypeError, ValueError):
         port = 0
+    alias = str(obj.get("alias", "") or "")
+    ip = str(obj.get("ip", "") or "")
+    # Частота канала (call.media). Битое значение — 0, а не исключение: разбор
+    # событий не имеет права ронять читателя IPC.
+    try:
+        sample_rate = int(obj.get("rate", 0) or 0)
+    except (TypeError, ValueError):
+        sample_rate = 0
+    # Длительность тона (dtmf.in). Для H.245 alphanumeric её не бывает вовсе,
+    # поэтому 0 означает «не передана», а не «тон нулевой». Битое значение —
+    # тоже 0: разбор событий не имеет права ронять читателя IPC.
+    try:
+        duration_ms = int(obj.get("duration_ms", 0) or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
     return HostEvent(
         kind=kind,
         token=str(obj.get("token", "") or ""),
-        alias=str(obj.get("alias", "") or ""),
-        ip=str(obj.get("ip", "") or ""),
+        alias=alias,
+        ip=ip,
         uri=str(obj.get("uri", "") or ""),
         port=port,
         reason=obj.get("reason", ""),
         message=str(obj.get("message", "") or ""),
+        # Для call.outgoing хост кладёт набранный адрес в alias/ip.
+        address=str(obj.get("address", "") or "") or (alias if not ip else ""),
+        codec=str(obj.get("codec", "") or ""),
+        sample_rate=sample_rate,
+        direction=str(obj.get("direction", "") or ""),
+        digits=str(obj.get("digits", "") or ""),
+        via=str(obj.get("via", "") or ""),
+        duration_ms=duration_ms,
     )
 
 
@@ -117,6 +173,24 @@ def event_to_bus_payload(ev: HostEvent) -> dict[str, Any]:
         payload["reason"] = ev.reason
     if ev.message:
         payload["message"] = ev.message
+    # Параметры аудио-канала: без них событие call.media бесполезно и для UI
+    # (кодек в списке участников), и для микшера (частота).
+    if ev.codec:
+        payload["codec"] = ev.codec
+    if ev.sample_rate:
+        payload["rate"] = ev.sample_rate
+    if ev.direction:
+        payload["direction"] = ev.direction
+    # Принятые тоны (dtmf.in). Пустые поля опускаем: «тон не набран» обязан
+    # отличаться от «набран тон» (то же правило, что введено для codec).
+    # duration_ms == 0 в payload не едет — у H.245 alphanumeric длительности
+    # не бывает вовсе, 0 здесь означает «данных нет», а не «нулевой тон».
+    if ev.digits:
+        payload["digits"] = ev.digits
+    if ev.via:
+        payload["via"] = ev.via
+    if ev.duration_ms:
+        payload["duration_ms"] = ev.duration_ms
     return payload
 
 

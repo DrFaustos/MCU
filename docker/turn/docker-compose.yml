@@ -19,10 +19,14 @@
 #
 # Проверка: https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/
 
+# Имя compose-проекта задаётся явно: в двух worktree директория называется
+# одинаково (turn) - по умолчанию проекты столкнулись бы сетью и ресурсами.
+name: ${MCU_STACK_NAME:-mcu}-turn
+
 services:
   coturn:
     image: coturn/coturn:4.6
-    container_name: mcu-coturn
+    container_name: ${MCU_STACK_NAME:-mcu}-coturn
     restart: unless-stopped
     network_mode: host          # TURN требует широкий диапазон UDP-портов
     environment:
@@ -36,3 +40,4 @@ services:
       - /etc/coturn/turnserver.conf
       - --external-ip=${TURN_EXTERNAL_IP}
       - --user=${TURN_USER}:${TURN_PASSWORD}
+      - --listening-port=${TURN_LISTEN_PORT:-3478}

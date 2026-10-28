@@ -47,4 +47,7 @@
   UDP-портов. В облаке это обычно допустимо.
 * Control API mediasoup публикуется **только на 127.0.0.1** — наружу его
   выставлять не нужно и небезопасно.
+* **Две стойки на одной машине** (worktree линий sip и h323): задайте в `.env` разные
+ `MCU_STACK_NAME`, `MCU_MEDIASOUP_HTTP_PORT`, `TURN_LISTEN_PORT` и свой диапазон RTC-портов;
+ в `docker/turn/docker-compose.yml` — те же `MCU_STACK_NAME` и `TURN_LISTEN_PORT`.
 * Для прод-использования включите TLS для TURN (5349) и надёжный пароль.

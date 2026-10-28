@@ -12,7 +12,6 @@ pjsua2 допускает только ОДИН Endpoint на процесс, п
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 
 
 def _mk(port: int) -> SipEngine:
@@ -49,15 +49,18 @@ def main(argv: list[str]) -> int:
     print(f"[i] instance up on {port}, mode={mode}", flush=True)
 
     if mode == "listen":
-        deadline = time.time() + 40
-        while time.time() < deadline:
-            time.sleep(1)
-            if any(e == "call.incoming" for e, _ in events):
-                print("[+] входящий вызов получен", flush=True)
-                if any(e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events):
-                    print("[+] CONFIRMED (входящий)", flush=True)
-                    engine.stop()
-                    return 0
+        # Ждём ТОЛЬКО через pump: без libHandleEvents() пакеты не разбираются
+        # (PJSIP поднят с threadCnt=0), и стенд вечно ждал бы входящий INVITE.
+        got = pump(engine, 40, lambda: any(e == "call.incoming" for e, _ in events))
+        if got:
+            print("[+] входящий вызов получен", flush=True)
+            pump(engine, 10,
+                 lambda: any(e == "call.state" and p.get("state") == "CONFIRMED"
+                             for e, p in events))
+            if any(e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events):
+                print("[+] CONFIRMED (входящий)", flush=True)
+                engine.stop()
+                return 0
         print("[!] входящий вызов не получен", flush=True)
         engine.stop()
         return 1
@@ -67,15 +70,16 @@ def main(argv: list[str]) -> int:
         uri = f"sip:15062@127.0.0.1:{target_port}"
         cid = engine.call(uri)
         print(f"[i] called {uri}, id={cid}", flush=True)
-        deadline = time.time() + 25
-        while time.time() < deadline:
-            time.sleep(1)
-            if any(e == "call.confirmed" for e, _ in events) or any(
+        confirmed = pump(
+            engine, 25,
+            lambda: any(e == "call.confirmed" for e, _ in events) or any(
                 e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events
-            ):
-                print("[+] CONFIRMED (исходящий)", flush=True)
-                engine.stop()
-                return 0
+            ),
+        )
+        if confirmed:
+            print("[+] CONFIRMED (исходящий)", flush=True)
+            engine.stop()
+            return 0
         print("[!] вызов не подтверждён", flush=True)
         engine.stop()
         return 1

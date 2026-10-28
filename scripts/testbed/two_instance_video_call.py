@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 
 
 def _mk(port: int, video_dev: int) -> SipEngine:
@@ -74,15 +74,11 @@ def main(argv: list[str]) -> int:
     print(f"[i] instance up on {port}, mode={mode}, video_dev={video_dev}", flush=True)
 
     if mode == "listen":
-        deadline = time.time() + 40
-        while time.time() < deadline:
-            time.sleep(1)
-            if _video_active(events):
-                print("[+] VIDEO active (входящий)", flush=True)
-                engine.stop()
-                return 0
-            if any(e == "call.state" and p.get("state") == "CONFIRMED" for e, p in events):
-                print("[i] CONFIRMED, ждём видеопоток...", flush=True)
+        # Только pump: без libHandleEvents() ни INVITE, ни MEDIA не разбираются.
+        if pump(engine, 40, lambda: _video_active(events)):
+            print("[+] VIDEO active (входящий)", flush=True)
+            engine.stop()
+            return 0
         print("[!] видеопоток не получен (входящий)", flush=True)
         engine.stop()
         return 1
@@ -92,13 +88,10 @@ def main(argv: list[str]) -> int:
         uri = f"sip:15062@127.0.0.1:{target_port}"
         cid = engine.call(uri)
         print(f"[i] called {uri}, id={cid}", flush=True)
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            time.sleep(1)
-            if _video_active(events):
-                print("[+] VIDEO active (исходящий)", flush=True)
-                engine.stop()
-                return 0
+        if pump(engine, 30, lambda: _video_active(events)):
+            print("[+] VIDEO active (исходящий)", flush=True)
+            engine.stop()
+            return 0
         print("[!] видеопоток не получен (исходящий)", flush=True)
         engine.stop()
         return 1

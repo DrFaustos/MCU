@@ -29,6 +29,28 @@ class CallState(str, Enum):
     DISCONNECTED = "disconnected"
 
 
+#: Русские подписи состояния для `Participant.label` — строки списка участников
+#: в Qt (`mcuclient/ui.py`) и поля `label` в REST-ряду SIP/H.323. Ключи —
+#: СТРОКОВЫЕ значения enum, а не сами члены: `CallState` — str-enum, а наружу
+#: состояние уходит через `getattr(state, "value", ...)`, т.е. у участника может
+#: лежать строка; словарь по enum'ам на строке молчал бы без подписи.
+#:
+#: Термины обязаны совпадать со словарём панели `STATE_LABEL`
+#: (mcuclient/webui/index.html): один и тот же `CallState` показывают оба
+#: интерфейса, а разные названия одного состояния — та же путаница, что
+#: латинская подпись рядом с русской в одной строке (заперто
+#: tests/test_models.py). `IDLE` здесь отсутствует СОЗНАТЕЛЬНО: это дефолт
+#: участника («вызова ещё нет»), и подпись была бы утверждением о состоянии,
+#: которого нет (заперто тем же файлом).
+STATE_SIGNATURE = {
+    CallState.INCOMING.value: "входящий",
+    CallState.RINGING.value: "звонит",
+    CallState.CONNECTING.value: "соединение",
+    CallState.CONFIRMED.value: "в разговоре",
+    CallState.DISCONNECTED.value: "завершён",
+}
+
+
 @dataclass
 class Participant:
     """Участник конференции: удалённый URI, состояние вызова и медиа-флаги."""
@@ -39,8 +61,13 @@ class Participant:
     is_video: bool = True
     audio_codec: Optional[str] = None
     video_codec: Optional[str] = None
-    rx_bitrate_kbps: int = 0
-    tx_bitrate_kbps: int = 0
+    # Битрейт: None — «не измерено», 0 — «измерено и получилось ноль». Разница
+    # принципиальная: ноль наружу читается как «медиа нет» при активном звонке.
+    # Медиа-битрейт SIP-вызова в текущей сборке pjsua2 мерить нечем —
+    # rtcp.rxStat/txStat.bytes считают RTCP-канал (замер живьём: 1.5 кбит/с при
+    # G.711, который обязан давать ~64), поэтому False-измерение хуже None.
+    rx_bitrate_kbps: Optional[int] = None
+    tx_bitrate_kbps: Optional[int] = None
     is_muted: bool = False
     is_video_muted: bool = False
     is_speaking: bool = False
@@ -49,11 +76,20 @@ class Participant:
 
     @property
     def label(self) -> str:
-        state = ""
-        if self.state is CallState.CONFIRMED:
-            state = " [connected]"
-        elif self.state is CallState.INCOMING:
-            state = " [входящий]"
+        """Строка участника: URI, подпись состояния и флаги мутов.
+
+        Подписаны ВСЕ состояния, кроме `idle`. Замер 2026-10-22 (ветка h323)
+        перед правкой: `idle`, `ringing`, `connecting` и `disconnected` давали
+        ОДИН текст — голый URI, а `confirmed` подписывался латинским
+        `[connected]` рядом с русским `[входящий]`. Для оператора это четыре
+        разных события («вызова нет», «аппарат звонит», «соединение идёт»,
+        «вызов завершился»), неотличимых в списке Qt, где строки берутся
+        ровно отсюда. Тот же класс дыры, что в веб-ряду закрывали введением
+        `dropped`: «было и умерло» было неотличимо от «никогда не было».
+        """
+        key = getattr(self.state, "value", self.state)
+        sig = STATE_SIGNATURE.get(key)
+        state = f" [{sig}]" if sig else ""
         muted = " 🔇" if self.is_muted else ""
         video_muted = " 📷✕" if self.is_video_muted else ""
         return f"{self.remote_uri}{state}{muted}{video_muted}"
@@ -102,6 +138,19 @@ class EventBus:
     def subscribe(self, cb: EventCallback) -> None:
         with self._lock:
             self._subs.append(cb)
+
+    def unsubscribe(self, cb: EventCallback) -> None:
+        """Отписаться. Нужно владельцам временных подписок (мосты, панели).
+
+        Без этого подписчик переживает остановку движка и вызывается на
+        уже нерабочих объектах; повторная подписка того же колбэка давала бы
+        двойную обработку события.
+        """
+        with self._lock:
+            try:
+                self._subs.remove(cb)
+            except ValueError:
+                pass
 
     def emit(self, event: str, **payload: Any) -> None:
         # Диагностика: фиксируем КАЖДОЕ событие шины. Error-события —
