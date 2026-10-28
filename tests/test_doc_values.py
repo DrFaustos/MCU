@@ -4196,3 +4196,125 @@ def test_cjk_probe_recognizes_the_real_defect_shape():
     total = sum(len(_cjk_findings(text)) for _, text in _cjk_text_targets())
     assert total == 0, total
     assert len(_cjk_text_targets()) >= 5, len(_cjk_text_targets())
+
+
+#: Смесь алфавитов: латинская буква, прислонённая к кириллическому слову, —
+#: занос при правке, а не термин. Разделитель легален: «тот же guard» и
+#: «web-панель» — живые формы боевого дерева, на них мера краснеть не вправе.
+ALPHA_GLUE = re.compile('[\u0430-\u044f\u0410-\u042f\u0451][A-Za-z]'
+                        '|[A-Za-z][\u0430-\u044f\u0410-\u042f\u0451]')
+
+#: Выученные транслитные формы. Общий детектор не строится: замер по этой же
+#: цели дал 278 легальных «латинских слов подряд» (REST API, SFU mediasoup,
+#: Polycom RealPresence). Это регресс-замок по закрытому перечню, а не
+#: поисковик: он сторожит повторение того, что уже было внесено.
+TRANSLIT_FORMS = ('tira ne perenos', 'ne pamyati')
+
+
+def _prose_lines(text):
+    """Проза построчно: fenced-блок выброшен, инлайн-код вырезан боевым _prose.
+
+    Политика исключений та же, что у _glued_lines: внутри ```-блока напечатан
+    вывод команд, а в цитате команды живут «### » и флаги — это данные.
+    """
+    out = []
+    fenced = False
+    for index, raw in enumerate(text.splitlines(), 1):
+        if raw.lstrip().startswith('```'):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        out.append((index, _prose(raw)))
+    return out
+
+
+def _alphabet_findings(text):
+    """Находки смеси алфавитов: номер строки, класс и сама форма.
+
+    Класс называется в каждой находке: подсов обязан краснеть именно своим
+    сообщением, иначе «ПОЙМАНО» могло бы дать чужое правило.
+    """
+    bad = []
+    for index, line in _prose_lines(text):
+        for match in ALPHA_GLUE.finditer(line):
+            bad.append('%d: смесь алфавитов %s|%s'
+                       % (index, match.group(0), line[-30:]))
+        for form in TRANSLIT_FORMS:
+            if form in line:
+                bad.append('%d: транслитная форма %s|%s'
+                           % (index, form, line[-30:]))
+    return bad
+
+
+def test_prose_does_not_mix_alphabets():
+    """Проза базы знаний и живых документов набрана одним алфавитом.
+
+    Цель ровно та же, что у замка на иероглифы: glob по каталогу базы плюс
+    живые документы. Второго списка файлов нет по той же причине, что и
+    второго glob-а: новый файл обязан попасть в замер в первом же прогоне.
+    """
+    targets = _cjk_text_targets()
+    assert targets, 'цель замка пуста: нет ни базы знаний, ни живых доков'
+    bad = []
+    for where, text in targets:
+        for finding in _alphabet_findings(text):
+            bad.append('%s:%s' % (where, finding))
+    assert not bad, ('смесь алфавитов в прозе: латинская буква в '
+                     'кириллическом слове либо транслит:\n' + '\n'.join(bad))
+
+
+def test_alphabet_probe_recognizes_the_real_defect_shape():
+    """Замок видит живые формы и не считает ими легальный текст.
+
+    Обе дефектные формы взяты из реальной истории среза. Легальная часть пары
+    обязана включать то, что краснит наивный детектор: латинское слово,
+    отделённое пробелом; ту же форму внутри инлайн-кода; два латинских слова
+    подряд (название продукта).
+    """
+    tick = chr(96)
+    # Дефект 1: латинская буква прислонена к кириллическому слову.
+    assert len(_alphabet_findings('якорь контрольного подсовa')) == 1
+    # Дефект 2: заголовок урока, набранный транслитом.
+    assert len(_alphabet_findings('Урок 8, tira ne perenos')) == 1
+    # Легитимно: латинское термин-слово отделено пробелами.
+    assert _alphabet_findings('Тот же guard повторил падение') == []
+    # Легитимно: форма внутри инлайн-кода — данные команды, а не проза.
+    assert _alphabet_findings('команда ' + tick + 'echo tira ne perenos'
+                              + tick + ' напечатала текст') == []
+    # Легитимно: два латинских слова подряд — название, а не транслит.
+    assert _alphabet_findings('### Windows 10/11 и SFU mediasoup') == []
+    # Боевая цель чиста числом, но механизм жив: иначе ноль от слепоты.
+    total = sum(len(_alphabet_findings(text)) for _, text in _cjk_text_targets())
+    assert total == 0, total
+    assert len(_cjk_text_targets()) >= 5, len(_cjk_text_targets())
+
+
+def test_knowledge_cites_the_actual_case_count_of_this_guard():
+    """Число кейсов этого стража, заявленное в базе, обязано совпадать.
+
+    Общий сверитель цитируемых чисел ходит по COUNT_DOCS — только живые
+    документы; база знаний в его зону не входит, и её единственная ссылка на
+    этот файл не сверялась ни с чем. Число берётся у того же счётчика, что
+    печатает обязательная точка проверки: вторая копия истины расходится сама.
+    """
+    name = Path(__file__).name
+    counts = _collected_cases()
+    real = counts.get(name)
+    assert real, 'мини-раннер не собрал ни одного кейса ' + name
+    bad = []
+    found = 0
+    for path in sorted(KNOWLEDGE_DIR.glob('*.md')):
+        text = path.read_text(encoding='utf-8')
+        for cited, claimed, start in _cited(text):
+            if Path(cited).name != name:
+                continue
+            found += 1
+            where = path.relative_to(ROOT).as_posix()
+            lineno = text[:start].count('\n') + 1
+            if claimed != real:
+                bad.append('%s:%d: число кейсов в базе — заявлено %d, '
+                           'собирается %d' % (where, lineno, claimed, real))
+    assert found, 'в базе знаний нет ни одной цитаты на ' + name
+    assert not bad, ('число кейсов в базе знаний разошлось с раннером:\n'
+                     + '\n'.join(bad))
