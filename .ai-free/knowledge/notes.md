@@ -926,7 +926,7 @@ tmp_path, гоняется и pytest'ом, и самим раннером.
   дереве 11 в пяти файлах: markdown, комментарий сайдкара
   `mediasoup-sidecar/src/room.js`, база знаний. Переименование функции рвёт
   все одиннадцать молча.
-- **Заперто** в `tests/test_doc_values.py` (52 кейсов): главный
+- **Заперто** в `tests/test_doc_values.py` (54 кейсов): главный
   `test_doc_pointers_to_code_symbols_are_alive` плюс граница области
   `test_pointer_guard_scope_covers_the_files_that_carry_pointers`, мера
   «сканер не ослеп» `test_pointer_guard_sees_the_pointers_it_protects`
