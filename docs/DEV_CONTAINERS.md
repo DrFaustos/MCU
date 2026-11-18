@@ -115,6 +115,8 @@
 ./scripts/h323_in_container.sh video-live # живой видеостенд Этапа 4 (паттерн →
                                          # H.261 → RTP → PNG); PNG в --dump-dir
                                          # сохраняются только внутри /work
+./scripts/h323_in_container.sh video-panel # терминал + операторская панель
+                                         # (аргументы — через MCU_H323_EXTRA_ARGS)
 ./scripts/h323_in_container.sh tests     # python3 tests/_runner.py (в образе
                                          # есть pytest и ruff)
 ./scripts/h323_in_container.sh bash      # интерактив, репо смонтирован в /work

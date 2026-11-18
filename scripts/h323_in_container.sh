@@ -21,6 +21,8 @@
 #   ./scripts/h323_in_container.sh testbed            # h323d + стенд 2 хостов
 #   ./scripts/h323_in_container.sh video-live         # h323d + живой видеостенд
 #                                                      (Этап 4, PNG в dump-dir)
+#   ./scripts/h323_in_container.sh video-panel        # h323d + терминал с
+#                                                      операторской панелью
 #   ./scripts/h323_in_container.sh tests              # python3 tests/_runner.py
 #   ./scripts/h323_in_container.sh <cmd...>           # любая команда в контейнере
 #   ./scripts/h323_in_container.sh bash               # интерактив (репо в /work)
@@ -197,6 +199,16 @@ case "${1:-}" in
             set -e
             ./scripts/build_h323d.sh
             exec python3 scripts/testbed/h323_video_live.py ${MCU_H323_EXTRA_ARGS:-}
+        '
+        ;;
+    video-panel)
+        # Стенд «терминал + операторская панель» (браузер в контейнере, web-port
+        # 8099 по умолчанию). Аргументы — как в video-live; у стенда свой
+        # --dump-dir, дефолт которого уже внутри /work (tmp/ — в .gitignore).
+        run_isolated_h323d '
+            set -e
+            ./scripts/build_h323d.sh
+            exec python3 scripts/testbed/h323_video_panel.py ${MCU_H323_EXTRA_ARGS:-}
         '
         ;;
     tests)
