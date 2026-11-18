@@ -12,7 +12,7 @@
 (`ROYALTY_FREE_AUDIO_DENY`, `select_advertised`, `host_codec_args`), механика
 таблицы возможностей — в `tools/h323d/main.cpp` (`apply_codec_profile`,
 `ReorderCapabilities`), замок от расхождения языков и правил —
-`tests/test_codec_profile.py` — 35 кейсов.
+`tests/test_codec_profile.py` — 37 кейсов.
 
 ## 1. Чем этот документ не является
 
@@ -57,6 +57,11 @@ GSM 06.10, Opus). Грант в «безопасный» профиль по у�
   медиа-формата «G.711-ALaw-64k». Матчинг приоритета и снятия идёт по
   `GetFormatName()` (`src/h323caps.cxx:3560` и `:4156`), поэтому паттерны
   пишутся БЕЗ суффикса и попадают в оба вида имён;
+  Имя открытого канала приходит без суффикса («H.264-CIF» в `call.media` и в
+  `/api/status` панели), мостик между формами —
+  `mcuclient.codec_negotiation.strip_capability_suffix`, а вопрос «что за
+  лицензия у кодека, который согласовался» закрывает
+  `license_of_capability()` по тому же имени;
 * аудио-каталоги форка, которые **собираются** (есть `Makefile.in` и упоминание
   в `plugins/configure.ac`): G722, G.722.1, G.722.2, G726, GSM0610, gsm-amr,
   iLBC, IMA_ADPCM, LPC_10, SBC, Speex, celt;
@@ -123,7 +128,7 @@ media format, и размер вызова кодека — 1000 RTP-пакет�
 | Speex | свободно (Xiph, BSD) | плагин Speex, собирается | «Xiph BSD license» | объявляем |
 | CELT | свободно (Xiph, BSD) | плагин celt — при `--enable-celt` и pkg-config | «Xiph BSD license» | объявляем, если собран |
 | GSM 06.10 | свободно | плагин GSM0610 (`--enable-localgsm`) | код Degener/Bormann, TU Berlin | объявляем |
-| LPC-10, MS-IMA-ADPCM, SBC | свободно | собираются (SBC — при `--enable-sbc` + libsamplerate) | LPC-10 — public domain, SBC — Bluetooth SIG | объявляем по факту сборки |
+| LPC-10, IMA ADPCM (MS-IMA-ADPCM), SBC | свободно | собираются (SBC — при `--enable-sbc` + libsamplerate) | LPC-10 — public domain, SBC — Bluetooth SIG | объявляем по факту сборки |
 | Opus | свободно (RFC 6716) | **плагина нет** | — | только своим non-standard-путём, §7 |
 | T.38 | свободно как стандарт | плагинов факса в форке нет | — | вне Этапа 4 |
 
@@ -452,7 +457,7 @@ OpenH264, хотя configure рапортовал «H.264-OpenH264: yes». Пр�
 ## 12. Что осталось на живом стенде
 
 Локально (без H323Plus на машине) проверяется только логика и статические
-контракты — 35 кейсов `tests/test_codec_profile.py` плюс общий прогон раннера.
+контракты — 37 кейсов `tests/test_codec_profile.py` плюс общий прогон раннера.
 На стенде (`./scripts/h323_in_container.sh`) остаются:
 
 1. имена видео-возможностей сняты с исходников (§5.2) и теперь подтверждены

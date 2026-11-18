@@ -60,8 +60,12 @@ from mcuclient.codec_negotiation import (  # noqa: E402
     matches_pattern,
     preference_order,
     profile_patterns,
+    families_of_capability,
+    is_royalty_free_capability,
+    license_of_capability,
     select_advertised,
     split_patterns,
+    strip_capability_suffix,
     video_preference,
 )
 from mcuclient.config import Config, load_config, validate_config  # noqa: E402
@@ -725,3 +729,50 @@ def test_host_mirrors_the_protected_priority_rule():
     assert "g_opts.allow_codecs" in block
     assert "name_matches" in block
     assert "preference_order" in block, "блок больше не ссылается на Python-зеркало"
+
+
+def test_channel_name_and_table_name_are_the_same_codec():
+    """Формы одного и того же имени (с «{sw}» и без) ведут себя одинаково.
+
+    Таблица возможностей и имя открытого канала различаются суффиксом — это
+    замер: «H.264-CIF{sw}» в таблице, «H.264-CIF» в ``call.media`` и в
+    ``/api/status`` панели. Кейс держит сразу два контракта: статус лицензии по
+    имени не зависит от формы, и мостик ``strip_capability_suffix`` для этого
+    достаточно. Иначе где-нибудь всплывёт «панель показывает кодек, а профиль о
+    нём ничего не знает».
+    """
+    for name in list(LIVE_AUDIO) + list(PLUGIN_VIDEO):
+        bare = strip_capability_suffix(name)
+        assert "{sw}" not in bare
+        assert families_of_capability(bare) == families_of_capability(name), name
+        assert license_of_capability(bare) == license_of_capability(name), name
+        assert is_royalty_free_capability(bare) == is_royalty_free_capability(name)
+    assert strip_capability_suffix("G.711-ALaw-64k") == "G.711-ALaw-64k"
+
+
+def test_license_of_capability_answers_the_operators_question():
+    """«Что за лицензия у кодека, который согласовался» — ответ по имени из TCS.
+
+    Три конкретных замера, каждый из которых можно проверить на живом дампе:
+    G.722 — истёк, Siren — грант (не «свободно»!), H.264 — оплата. Последнее
+    важнее всего: имя возможности НЕ различает x264 и бинарник Cisco, поэтому
+    честный ответ — наихудший из кандидатов, а не удобная половина.
+    """
+    assert license_of_capability("G.722-64k{sw}") == LICENSE_EXPIRED
+    assert license_of_capability("G.722.1-24k{sw}") == LICENSE_GRANT
+    assert license_of_capability("H.264-CIF") == LICENSE_ROYALTY
+    assert license_of_capability("H.261-CIF{sw}") == LICENSE_EXPIRED
+    assert license_of_capability("iLBC{sw}") == LICENSE_FREE
+    assert set(families_of_capability("H.264-CIF{sw}")) == {
+        "H.264/AVC", "H.264 (Cisco OpenH264 binary)"}
+    # Неизвестное имя — «неизвестно», а не «свободно»: молча бесплатный ответ
+    # был бы худшим из возможных.
+    assert license_of_capability("ZZZ-Custom{sw}") == LICENSE_UNKNOWN
+    assert not is_royalty_free_capability("H.264-CIF")
+    assert is_royalty_free_capability("G.722-64k{sw}")
+    # Профиль и лицензия обязаны сходиться на всём замеренном дереве: всё, что
+    # royalty-free оставляет в себе, действительно свободно.
+    for name in LIVE_AUDIO:
+        if name in select_advertised(
+                LIVE_AUDIO, deny=ROYALTY_FREE_AUDIO_DENY).keep:
+            assert is_royalty_free_capability(name), name

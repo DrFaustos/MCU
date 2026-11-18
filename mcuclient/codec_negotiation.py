@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Dict, List, Optional, Tuple, Union
 
 from .log import get_logger
@@ -423,6 +424,12 @@ CODEC_LICENSE: Dict[str, str] = {
     "H.264 (Cisco OpenH264 binary)": LICENSE_GRANT,  # роялти платит Cisco за СВОИ бинарники
     "H.265/HEVC": LICENSE_ROYALTY,  # несколько пулов, кратно дороже AVC
     "T.38": LICENSE_FREE,
+    # Три семейства из строки «LPC-10, IMA ADPCM, SBC» матрицы §4: без ключей
+    # имя возможности «MS-IMA-ADPCM{sw}» не имело бы статуса, и вопрос
+    # «что за лицензия у согласовавшегося кодека» повис бы.
+    "LPC-10": LICENSE_FREE,
+    "IMA ADPCM": LICENSE_FREE,
+    "SBC": LICENSE_FREE,
 }
 
 # --- Таблицы профилей ---------------------------------------------------------
@@ -505,6 +512,9 @@ CODEC_LICENSE_PROFILES: Dict[str, Dict[str, Tuple[str, ...]]] = {
 }
 H323_CODEC_PROFILE_MODES = tuple(CODEC_LICENSE_PROFILES)
 DEFAULT_H323_CODEC_PROFILE = "compat"
+
+
+CAPABILITY_SUFFIX = "{sw}"
 
 
 def codec_license(family: str) -> str:
@@ -623,6 +633,84 @@ def video_preference(profile: str = "", video=None) -> Tuple[str, ...]:
     if explicit:
         return explicit
     return profile_patterns(profile)["video_prefer"]
+
+
+CAPABILITY_FAMILY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    # Имена, которые НЕ содержат название семейства из матрицы как подстроку.
+    # «H.264» сознательно ведёт в ОБА семейства: имя возможности не различает
+    # x264-плагин (GPL + пул AVC) и бинарник Cisco (грант), поэтому честный
+    # ответ — «худший из кандидатов», а не удобная половина.
+    "H.264": ("H.264/AVC", "H.264 (Cisco OpenH264 binary)"),
+    "GSM": ("GSM 06.10",),
+    "AMR-WB": ("G.722.2 (AMR-WB)",),
+    "AMR-NB": ("AMR-NB",),
+    "IMA-ADPCM": ("IMA ADPCM",),
+}
+
+#: Порядок «наихудший статус вперёд»: то, за что платят, хуже гранта, грант
+#: хуже истёкшего; неопознанное семейство в этом списке не участвует (см.
+#: license_of_capability).
+_LICENSE_SEVERITY: Tuple[str, ...] = (
+    LICENSE_ROYALTY, LICENSE_GRANT, LICENSE_EXPIRED, LICENSE_FREE,
+)
+
+
+def _norm(name: str) -> str:
+    """Имя для сравнения: без регистра, дефисов, точек, пробелов и «{sw}»."""
+    return re.sub(r"[^0-9a-zа-яё]+", "", name.lower())
+
+
+def families_of_capability(name: str) -> Tuple[str, ...]:
+    """Семейства лицензионной матрицы, к которым относится имя возможности.
+
+    Возвращает все совпадения (обычное дело: «G.722.1-24k» относится и к
+    «G.722», и к «G.722.1»), самые длинные первыми. Пустой кортеж — имя нам
+    неизвестно, и это честный ответ, а не «свободно».
+    """
+    target = _norm(strip_capability_suffix(name))
+    found = [key for key in CODEC_LICENSE if _norm(key) and _norm(key) in target]
+    for alias, families in CAPABILITY_FAMILY_ALIASES.items():
+        if _norm(alias) in target:
+            found.extend(f for f in families if f not in found)
+    return tuple(sorted(found, key=lambda key: -len(key)))
+
+
+def license_of_capability(name: str) -> str:
+    """Статус лицензии по ИМЕНИ ВОЗМОЖНОСТИ (то, что видно в TCS и `ready`).
+
+    Если имя подходит под несколько семейств, берётся наихудший статус: для
+    «H.264-CIF» это «нужна оплата», даже если в поставке стоит бинарник Cisco, —
+    потому что само имя этого не различает. Уточнить можно только источником
+    плагина, и это уже решение человека, а не строки из H.245.
+    """
+    families = families_of_capability(name)
+    if not families:
+        return LICENSE_UNKNOWN
+    for status in _LICENSE_SEVERITY:
+        if any(codec_license(key) == status for key in families):
+            return status
+    return LICENSE_UNKNOWN
+
+
+def is_royalty_free_capability(name: str) -> bool:
+    """True, если имя возможности относится только к истёкшим/свободным."""
+    return license_of_capability(name) in (LICENSE_FREE, LICENSE_EXPIRED)
+
+
+def strip_capability_suffix(name: str) -> str:
+    """Имя открытого канала приводится к имени из таблицы возможностей.
+
+    Таблица H.245 оперирует именами с суффиксом «{sw}» (его добавляет
+    `CreateCodecName` в плагин-менеджере), а имя формата, которое хост сообщает
+    в ``call.media`` при открытии канала, — без него: «H.264-CIF{sw}» в таблице
+    и «H.264-CIF» в событии (замер на :v129). Паттернам профилей это
+    безразлично — они пишутся без суффикса и матчатся как подстрока, — но
+    любому, кто сопоставляет «что согласовалось» со списком «что объявлено»
+    (панель отдаёт в ``/api/status`` именно форму без суффикса), нужен этот
+    единственный мостик. Иначе поиск «согласованного кодека» в списке
+    объявленного не находит ничего, и это выглядит как «кодек пропал».
+    """
+    return name.replace(CAPABILITY_SUFFIX, "")
 
 
 def preference_order(prefer: Tuple[str, ...], table, keep=()) -> Tuple[str, ...]:
