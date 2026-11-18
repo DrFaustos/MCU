@@ -58,6 +58,7 @@ from mcuclient.codec_negotiation import (  # noqa: E402
     host_codec_args,
     is_royalty_free,
     matches_pattern,
+    preference_order,
     profile_patterns,
     select_advertised,
     split_patterns,
@@ -689,3 +690,38 @@ def test_installer_lays_only_documented_video_plugins():
     # возвращаться в список молча — его отсутствие тоже задокументировано.
     assert "H.263-1998" not in laid
     assert "не собирается" in doc or "не собираются" in doc
+
+
+def test_protected_codecs_join_the_priority():
+    """Кодек, защищённый от снятия, обязан попадать в приоритет.
+
+    Иначе `--allow-codecs H.264` в «безопасном» профиле — это грант, который ни
+    на что не влияет: ReorderCapabilities переставляет только перечисленные
+    возможности, всё остальное остаётся позади, и согласуется H.261. Проверено
+    живьём на v129: без этого шага H.264-CIF лежал в таблице и не участвовал в
+    приоритете (замер env-h323, docs/CODECS.md §10).
+    """
+    plain = preference_order(ROYALTY_FREE_VIDEO_PREFER, PLUGIN_VIDEO)
+    assert not any("H.264" in name for name in plain)
+    granted = preference_order(ROYALTY_FREE_VIDEO_PREFER, PLUGIN_VIDEO, ("H.264",))
+    assert granted[:len(plain)] == plain, "профиль не должен терять свой порядок"
+    assert granted[len(plain):] == ("H.264{sw}", "H.264-CIF{sw}", "H.264-1080{sw}")
+    # Если паттерн профиля формат уже накрывает, дубликата в списке нет.
+    assert (preference_order(ROYALTY_FREE_VIDEO_PREFER, PLUGIN_VIDEO, ("H.261",))
+            == preference_order(ROYALTY_FREE_VIDEO_PREFER, PLUGIN_VIDEO))
+
+
+def test_host_mirrors_the_protected_priority_rule():
+    """C++-хост обязан переставлять защищённые имена так же, как Python-модель.
+
+    Кейс — про связь, а не про текст: блок в main.cpp ищется по имени
+    Python-функции, на которую он ссылается. Удаление или переименование зеркал
+    здесь краснеет, и следующий человек увидит, что правил про приоритет два.
+    """
+    src = HOST.read_text(encoding="utf-8")
+    start = src.find("Защищённые имена")
+    assert start >= 0, "в хосте пропало добавление защищённых имён в приоритет"
+    block = src[start:src.find("endpoint.ReorderCapabilities", start)]
+    assert "g_opts.allow_codecs" in block
+    assert "name_matches" in block
+    assert "preference_order" in block, "блок больше не ссылается на Python-зеркало"

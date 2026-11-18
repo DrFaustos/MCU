@@ -58,6 +58,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1017,7 +1018,12 @@ const char *const kCompatAudioDeny[] = { "G.719" };
 // «OpenH264» в приоритете бесполезен: плагин Cisco регистрируется под
 // family-именем «H.264*», поэтому возвращают H.264 флагом
 // --allow-codecs H.264.
-const char *const kCompatVideoPrefer[] = { "H.264", "H.261", "H.263" };
+const char *const kCompatVideoPrefer[] = {
+    // «H.264-CIF» впереди «H.264»: канал открываем мы, и порядок таблицы — это
+    // то, что МСУ попросит. 1080p остаётся вторым (замер на v129 без этого
+    // пункта: приоритет начинался с H.264-1080).
+    "H.264-CIF", "H.264", "H.261", "H.263"
+};
 const char *const kCompatVideoDeny[] = { "H.265", "HEVC" };
 
 template <std::size_t N>
@@ -1436,6 +1442,13 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
   const CodecPatterns patterns = codec_profile_patterns(g_opts.codec_profile);
   const H323Capabilities & caps = endpoint.GetCapabilities();
   PString preferred;
+  // Список приоритета не должен содержать одну запись дважды: паттерн «H.264»
+  // накрывает и «H.264-CIF», и «H.264-1080», поэтому перечисленные ниже циклы
+  // идут по таблице с множеством уже добавленных имён. Без дедупликации
+  // «H.264-CIF» попал бы в Reorder дважды, а оператор увидел бы в логе
+  // список, который не совпадает с тем, что реально переставлено (Python-
+  // зеркало preference_order дедуплицирует же).
+  std::set<std::string> listed;
   // Аудио — только записи с честным кадром (см. абзац выше), поэтому список
   // приоритета расширяется по ФАКТИЧЕСКОЙ таблице, а не задаётся вслепую.
   for (const std::string &pattern : audio_preference_patterns(g_opts, patterns)) {
@@ -1450,9 +1463,12 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
       // т.к. GetTimeUnits() = sampleRate/1000).
       if (cap.GetMediaFormat().GetFrameTime() < 10)
         continue;
+      if (listed.count(to_std(cap.GetFormatName())) > 0)
+        continue;
       if (!preferred.IsEmpty())
         preferred += ',';
       preferred += cap.GetFormatName();
+      listed.insert(to_std(cap.GetFormatName()));
     }
   }
   // Видео — кадр к этому не относится, порядок просто из списка профиля.
@@ -1464,9 +1480,31 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
         continue;
       if (!name_matches(to_std(cap.GetFormatName()), one))
         continue;
+      if (listed.count(to_std(cap.GetFormatName())) > 0)
+        continue;
       if (!preferred.IsEmpty())
         preferred += ',';
       preferred += cap.GetFormatName();
+      listed.insert(to_std(cap.GetFormatName()));
+    }
+  }
+  // Защищённые имена (--allow-codecs) доезжают до приоритета. Без этого шага
+  // «везём кодек по гранту правообладателя» означало бы «кодек в таблице лежит,
+  // а согласуется всё равно H.261»: ReorderCapabilities переставляет только
+  // перечисленные возможности, остальные остаются позади в порядке таблицы.
+  // Повторы не дублируются: если паттерн профиля формат уже накрывает, он
+  // остаётся на своём месте. Зеркало на Python — preference_order().
+  if (!g_opts.allow_codecs.empty()) {
+    const std::vector<std::string> keep = split_list(g_opts.allow_codecs);
+    for (PINDEX i = 0; i < caps.GetSize(); ++i) {
+      const H323Capability & cap = caps[i];
+      const std::string name = to_std(cap.GetFormatName());
+      if (!name_matches(name, keep) || listed.count(name) > 0)
+        continue;
+      if (!preferred.IsEmpty())
+        preferred += ',';
+      preferred += cap.GetFormatName();
+      listed.insert(name);
     }
   }
   if (!preferred.IsEmpty()) {

@@ -475,7 +475,15 @@ ROYALTY_FREE_VIDEO_DENY: Tuple[str, ...] = (
     "H.264", "OpenH264",   # OpenH264 защищается --allow-codecs (см. docs/CODECS.md)
     "H.265", "HEVC", "MPEG-2", "MPEG2", "MP4V",
 )
-COMPAT_VIDEO_PREFER: Tuple[str, ...] = ("H.264", "H.261", "H.263")
+COMPAT_VIDEO_PREFER: Tuple[str, ...] = (
+    # «H.264-CIF» первым — не косметика: мы сами открываем канал в порядке
+    # таблицы (H323Connection::SelectDefaultLogicalChannel), и без этого пункта
+    # МСУ запрашивал бы 1080p (замер на v129: H.264-1080 шёл раньше H.264-CIF).
+    # Для MCU на общей линии это ловушка по битрейту и совместимости, а
+    # 1080p остаётся в списке вторым — если терминал умеет только его, он
+    # согласуется.
+    "H.264-CIF", "H.264", "H.261", "H.263",
+)
 COMPAT_VIDEO_DENY: Tuple[str, ...] = ("H.265", "HEVC")
 
 #: Профиль -> (аудио-приоритет, аудио-снятие, видео-приоритет, видео-снятие).
@@ -615,6 +623,29 @@ def video_preference(profile: str = "", video=None) -> Tuple[str, ...]:
     if explicit:
         return explicit
     return profile_patterns(profile)["video_prefer"]
+
+
+def preference_order(prefer: Tuple[str, ...], table, keep=()) -> Tuple[str, ...]:
+    """Порядок `ReorderCapabilities`: приоритет профиля, затем защищённые имена.
+
+    Вторая половина не косметика: переставляются только перечисленные
+    возможности, всё остальное остаётся позади в порядке таблицы. Значит
+    `--allow-codecs H.264` без добавления в список означало бы «кодек в таблице
+    лежит, а согласуется всё равно H.261» — оператор получил бы грант, который
+    ни на что не влияет. Повторяющиеся имена не дублируются: если паттерн
+    профиля уже накрывает защищённый формат, он остаётся на своём месте.
+
+    Зеркало на C++ — блок «защищённые имена доезжают до приоритета» в
+    tools/h323d/main.cpp (он работает по фактической таблице возможностей,
+    которую из Python не видно).
+    """
+    order: list = []
+    for patterns in (tuple(prefer), tuple(split_patterns(keep))):
+        for pattern in patterns:
+            for name in table:
+                if matches_pattern(name, (pattern,)) and name not in order:
+                    order.append(name)
+    return tuple(order)
 
 
 def codec_denials(profile: str = "", audio=None, disable=None, allow=None,
