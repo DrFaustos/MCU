@@ -125,3 +125,9 @@ mediasoup-sidecar/node_modules/
 
 # scratch для агентов (одноразовые скрипты/логи)
 .agent/
+
+# hw_emu: одноразовые диагностические прогоны стендов в контейнере (scratch)
+/tmp_labdiag/
+
+# артефакты стендов (--dump-dir внутри /work)
+tmp/
