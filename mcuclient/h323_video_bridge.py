@@ -923,8 +923,8 @@ class H323VideoBridge:
             self._latest[frame.token] = frame
             on_frame = self._on_frame
         # Ни один приёмник не имеет права уронить поток кадров: панель упала —
-        # кадры всё равно должны идти в шину, иначе «пропало видео» наступит из-
-        # за стороннего подписчика.
+        # кадры всё равно должны идти в шину. Иначе «пропало видео» наступит по
+        # вине стороннего подписчика.
         if bus is not None:
             try:
                 bus.publish_video(key, panel, frame.width, frame.height)
