@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 import sys
 import time
@@ -242,6 +243,21 @@ def main() -> int:
     ap.add_argument("--no-video-flag", action="store_true",
                     help="прогон с --no-video: ожидаем, что видео НЕ согласуется")
     args = ap.parse_args()
+
+    if args.no_video_flag:
+        # Флаг обязан не только «ждать другого результата», но и СДЕЛАТЬ его:
+        # хосты поднимает start_host, а аргументы ему передаются одной-единственной
+        # переменной H323_CODEC_ARGS (scripts/testbed/h323_native_two_hosts.py).
+        # Без этой строки --no-video-flag лишь разворачивал ожидание чекера, а
+        # хосты жили с видео — то есть проверка врала в удобную сторону.
+        os.environ["H323_CODEC_ARGS"] = (
+            os.environ.get("H323_CODEC_ARGS", "") + " --no-video").strip()
+    elif "--no-video" in os.environ.get("H323_CODEC_ARGS", ""):
+        # Обратная сторона той же ловушки: профиль без видео + стенд, который
+        # ждёт видео, краснеет СПРАВЕДЛИВО — но по выводу это неотличимо от
+        # «видео сломалось». Подсказка стоит того, чтобы红 не разбирали заново.
+        print("[i] H323_CODEC_ARGS содержит --no-video: запусти с --no-video-flag, "
+              "иначе стенд честно требует картинку, которой нет", flush=True)
 
     binary = args.binary or find_host_binary()
     if not binary or not Path(binary).exists():

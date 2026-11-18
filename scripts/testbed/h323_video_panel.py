@@ -268,11 +268,20 @@ def main() -> int:
 
         # (3) имя канала шины сверяем с id ряда по строке видео-моста в логе
         # панели: другой id = картинка в шине, до которой видеостена не дотянется.
+        # Строку ждём ПОВТОРОМ, а не читаем лог один раз: ряд участника появляется
+        # в тот же миг, что согласование TCS, а первый кадр — на полсекунды-секунду
+        # позже. Однократное чтение давало «канала нет» при живом кабеле (стенд
+        # поймал это на себе: те же 2 ошибки в одном прогоне, 0 в другом).
         bus_key = ""
-        for line in panel_log.read_text(encoding="utf-8",
-                                        errors="replace").splitlines():
-            if "лёг в шину панели" in line and "(канал " in line:
-                bus_key = line.rsplit("(канал ", 1)[1].rstrip(")")
+        deadline = time.monotonic() + args.video_wait
+        while time.monotonic() < deadline and not bus_key:
+            for line in panel_log.read_text(encoding="utf-8",
+                                            errors="replace").splitlines():
+                if "лёг в шину панели" in line and "(канал " in line:
+                    bus_key = line.rsplit("(канал ", 1)[1].rstrip(")")
+                    break
+            if not bus_key:
+                time.sleep(0.5)
         ck.check(bool(bus_key), "кадр лёг в шину медиа (лог панели)",
                  f"канал={bus_key or 'строчки нет'}")
         ck.check(bus_key == pid,

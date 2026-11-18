@@ -1539,16 +1539,25 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
   // Поднимаем ДО слушателя H.323: Python подключается к IPC и сразу хочет видеть
   // кадры. Поднять не удалось — не беда и не остановка: канал честно уходит в
   // base64-запасной путь (video.frame), просто дорого.
-  std::string video_path = g_opts.video_socket;
-  if (video_path.empty()) video_path = g_opts.socket_path + ".video";
-  g_video = std::make_unique<mcu_video::FrameServer>(video_path);
-  if (!g_video->start()) {
-    log_info("видео-сокет " + video_path +
-             " не поднят — кадры пойдут base64 в общий JSON (медленно)");
+  if (!g_opts.video) {
+    // При --no-video сокет не поднимается: кадры тут не появятся НИКОГДА (видео
+    // снято из таблицы возможностей, видеоканал не откроется), а висящий файл
+    // сокета и строчка «видео-сокет: …, до 5 к/с» в логе читались бы как
+    // «видео работает». Проверка признака --no-video — счёт в таблице
+    // возможностей (29 против 31 с H.261), а не наличие сокета.
+    log_info("--no-video: сокет кадров не поднимается, видео-каналы не открываются");
   } else {
-    log_info("видео-сокет: " + video_path + " (YUV420P, до " +
-             std::to_string(g_opts.video_fps) + " к/с, ширина до " +
-             std::to_string(g_opts.video_max_width) + ")");
+    std::string video_path = g_opts.video_socket;
+    if (video_path.empty()) video_path = g_opts.socket_path + ".video";
+    g_video = std::make_unique<mcu_video::FrameServer>(video_path);
+    if (!g_video->start()) {
+      log_info("видео-сокет " + video_path +
+               " не поднят — кадры пойдут base64 в общий JSON (медленно)");
+    } else {
+      log_info("видео-сокет: " + video_path + " (YUV420P, до " +
+               std::to_string(g_opts.video_fps) + " к/с, ширина до " +
+               std::to_string(g_opts.video_max_width) + ")");
+    }
   }
 
  H323ListenerTCP *listener = new H323ListenerTCP(
