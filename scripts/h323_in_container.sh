@@ -11,12 +11,16 @@
 #   python3 scripts/h323d_smoke.py                      (ready + ping/pong)
 #   python3 scripts/testbed/h323_native_two_hosts.py    (2 хоста: сигнализация
 #                                                        + медиа + DTMF, RC=0)
+#   python3 scripts/testbed/h323_video_live.py          (живое видео: паттерн →
+#                                                        H.261 → RTP → PNG)
 #
 # Использование:
 #   ./scripts/h323_in_container.sh build              # собрать/обновить образ
 #   ./scripts/h323_in_container.sh h323d              # собрать mcu_h323d
 #   ./scripts/h323_in_container.sh smoke              # h323d + дымовой тест
 #   ./scripts/h323_in_container.sh testbed            # h323d + стенд 2 хостов
+#   ./scripts/h323_in_container.sh video-live         # h323d + живой видеостенд
+#                                                      (Этап 4, PNG в dump-dir)
 #   ./scripts/h323_in_container.sh tests              # python3 tests/_runner.py
 #   ./scripts/h323_in_container.sh <cmd...>           # любая команда в контейнере
 #   ./scripts/h323_in_container.sh bash               # интерактив (репо в /work)
@@ -182,6 +186,17 @@ case "${1:-}" in
             set -e
             ./scripts/build_h323d.sh
             exec python3 scripts/testbed/h323_native_two_hosts.py ${MCU_H323_EXTRA_ARGS:-}
+        '
+        ;;
+    video-live)
+        # Живой стенд Этапа 4 (паттерн -> H.261 -> RTP -> PNG на второй стороне).
+        # Артефакты: PNG пишутся в --dump-dir; /tmp контейнера одноразовый, для
+        # сохранения кадров передавай свой каталог внутри /work:
+        #   MCU_H323_EXTRA_ARGS="--dump-dir /work/tmp/video_live" ... video-live
+        run_isolated_h323d '
+            set -e
+            ./scripts/build_h323d.sh
+            exec python3 scripts/testbed/h323_video_live.py ${MCU_H323_EXTRA_ARGS:-}
         '
         ;;
     tests)

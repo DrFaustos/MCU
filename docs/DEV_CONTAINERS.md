@@ -112,6 +112,9 @@
 ./scripts/h323_in_container.sh smoke     # собрать mcu_h323d + ready/pong-дымь
 ./scripts/h323_in_container.sh testbed   # стенд двух хостов (сигнализация,
                                          # медиа, DTMF) — обязан дать RC=0
+./scripts/h323_in_container.sh video-live # живой видеостенд Этапа 4 (паттерн →
+                                         # H.261 → RTP → PNG); PNG в --dump-dir
+                                         # сохраняются только внутри /work
 ./scripts/h323_in_container.sh tests     # python3 tests/_runner.py (в образе
                                          # есть pytest и ruff)
 ./scripts/h323_in_container.sh bash      # интерактив, репо смонтирован в /work
