@@ -29,7 +29,6 @@ import re
 import socket
 import struct
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -522,20 +521,33 @@ def test_bridge_start_without_client_is_false():
     assert H323VideoBridge(None).start() is False  # type: ignore[arg-type]
 
 
-def test_frame_lands_in_media_bus_under_h323_channel():
+def test_frame_lands_in_media_bus_under_the_call_token():
+    """Пока вызова нет в комнате, каналом служит токен хоста.
+
+    Имя токена («call-N») не пересекается с id комнаты («web-N», числа), так что
+    анонимный кадр не может притвориться чужим участником.
+    """
     bus = _BusSpy()
     bridge, _ = _bridge(bus=bus)
     bridge.start()
     assert bridge.on_frame_data(record(token="call-1", width=8, height=8)) == 1
     assert len(bus.frames) == 1
     key, frame, width, height = bus.frames[0]
-    assert key == "h323v-call-1", "канал именуется по образцу sip-<слот>"
+    assert key == "call-1", "без участника комнаты канал именуется токеном"
     assert (width, height) == (8, 8)
     assert tuple(frame.shape[:2]) == (8, 8)
 
 
-def test_channel_key_prefers_room_participant_id():
-    """Зритель подписывается на id участника — канал обязан называться им."""
+def test_channel_key_is_the_room_participant_id_verbatim():
+    """Имя канала = id участника БЕЗ префикса: иначе панель кадр не видит.
+
+    Кросс-языковый страж против живой проверки (scripts/testbed/h323_video_panel.py
+    поймал ровно это: вызов стоит, кадр в шине, а ``video_frames`` у участника 0).
+    Панель читает шину по id ряда: mcuclient/web_server.py:947
+    (``bus.video_version(row["id"])``) и mcuclient/webrtc_ingest.py:361-362
+    (трек зрителя на id из ``subscribe``), аудио-мост H.323 льёт под тем же id
+    (mcuclient/h323_audio_bridge.py:454-460).
+    """
 
     class _Ep:
         @staticmethod
@@ -547,13 +559,16 @@ def test_channel_key_prefers_room_participant_id():
                             connect=_no_socket)
     bridge.start()
     bridge.on_frame_data(record(token="call-1", width=8, height=8))
-    assert bus.frames[0][0] == "h323v-17"
+    assert bus.frames[0][0] == "17", "ряд панели читает канал по id участника"
+    assert "h323v" not in bus.frames[0][0], "префикс прячет кадр от панели"
 
 
-def test_channel_key_is_resolved_once_and_never_flips():
-    """Канал, выбранный по токену, не обязан переезжать, когда вызов встал в комнату.
+def test_channel_key_moves_to_participant_id_and_old_channel_is_dropped():
+    """Вызов встал в комнату позже первого кадра: канал переезжает, старший — убран.
 
-    Два имени у одного вызова = два канала шины, и картинка прыгает между ними.
+    Оставить кадр в канале по токену нельзя: панель этот канал не читает, и
+    «видео пропало» было бы неотличимо от «кодек не согласовался». Но и бросить
+    старый канал в шине нельзя — зритель досматривал бы труп вызова.
     """
 
     class _LateEp:
@@ -570,7 +585,10 @@ def test_channel_key_is_resolved_once_and_never_flips():
     bridge.on_frame_data(record(token="call-9", width=8, height=8))
     ep.found = True
     bridge.on_frame_data(record(token="call-9", width=8, height=8))
-    assert [f[0] for f in bus.frames] == ["h323v-call-9", "h323v-call-9"]
+    assert [f[0] for f in bus.frames] == ["call-9", "5"]
+    assert bus.dropped == ["call-9"], "старый канал обязан исчезнуть из шины"
+    bridge.on_frame_data(record(token="call-9", width=8, height=8))
+    assert [f[0] for f in bus.frames][-1] == "5", "переезд одноразовый"
 
 
 def test_media_event_registers_video_channel_only_for_video():
@@ -655,7 +673,7 @@ def test_disconnect_drops_the_bus_channel():
     bridge.start()
     bridge.on_frame_data(record(token="call-5", width=8, height=8))
     client.emit("call.disconnected", token="call-5")
-    assert bus.dropped == ["h323v-call-5"]
+    assert bus.dropped == ["call-5"]
     assert bridge.channels() == {}
 
 
@@ -667,7 +685,7 @@ def test_connection_closed_forgets_every_channel():
     bridge.on_frame_data(record(token="call-1", width=8, height=8))
     bridge.on_frame_data(record(token="call-2", width=8, height=8))
     client.emit("connection.closed")
-    assert sorted(bus.dropped) == ["h323v-call-1", "h323v-call-2"]
+    assert sorted(bus.dropped) == ["call-1", "call-2"]
     assert bridge.channels() == {}
 
 
@@ -701,7 +719,7 @@ def test_reader_thread_reads_a_real_unix_socket():
         deadline = time.monotonic() + 3.0
         while len(bus.frames) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert [f[0] for f in bus.frames] == ["h323v-call-1", "h323v-call-2"]
+        assert [f[0] for f in bus.frames] == ["call-1", "call-2"]
         assert bridge.stats().socket_connected is True
     finally:
         bridge.stop()
@@ -907,8 +925,8 @@ def test_sinks_provider_is_reevaluated_after_panel_restart():
     bridge.on_frame_data(record(token="call-1", width=8, height=8))
     state["bus"] = second
     bridge.on_frame_data(record(token="call-2", width=8, height=8))
-    assert [f[0] for f in first.frames] == ["h323v-call-1"]
-    assert [f[0] for f in second.frames] == ["h323v-call-2"]
+    assert [f[0] for f in first.frames] == ["call-1"]
+    assert [f[0] for f in second.frames] == ["call-2"]
 
 
 def test_broken_sinks_provider_does_not_stop_the_stream():
@@ -1061,7 +1079,7 @@ def _cpp_bar_tables() -> list:
         vals = [int(x) for x in re.findall(r"\d+", m.group(1))]
         assert len(vals) == 7, "%s: %d значений, должно быть 7" % (name, len(vals))
         tables.append(vals)
-    return list(zip(*tables))
+    return list(zip(*tables, strict=True))
 
 
 def test_cpp_bar_table_decodes_to_real_colors():
@@ -1081,11 +1099,11 @@ def test_cpp_bar_table_decodes_to_real_colors():
         ("красный", (191, 0, 0)),
         ("синий", (0, 0, 191)),
     ]
-    for (y, u, v), (name, want) in zip(_cpp_bar_tables(), expected):
+    for (y, u, v), (name, want) in zip(_cpp_bar_tables(), expected, strict=True):
         rgb = yuv420p_to_rgb(bytes([y] * 4 + [u] + [v]), 2, 2)
         assert rgb is not None
         got = tuple(rgb[:3])
-        assert all(abs(a - b) <= 4 for a, b in zip(got, want)), (
+        assert all(abs(a - b) <= 4 for a, b in zip(got, want, strict=True)), (
             "полоса %s: хост кодит Y=%d U=%d V=%d, панель показывает %s, ждём %s"
             % (name, y, u, v, got, want)
         )
@@ -1159,6 +1177,21 @@ def test_every_host_command_has_a_python_sender():
         senders |= set(re.findall(r'send_command\(\s*"([a-z._]+)"', path.read_text(encoding="utf-8")))
     missing = commands - senders
     assert not missing, f"хост принимает, а Python не умеет отправлять: {sorted(missing)}"
+
+
+def test_bus_channel_naming_is_documented_in_readme():
+    """Решение «без префикса» обязано быть записано там же, где формат кадра.
+
+    Имя канала — единственная деталь интеграции с панелью, которую нельзя
+    вывести из кода: ID есть ID, а префикс выглядит «как у SIP». Без строки в
+    README следующий читатель вернёт префикс через неделю.
+    """
+    text = _text(ROOT / "tools" / "h323d" / "README.md")
+    assert "Имя канала в шине панели" in text
+    assert "id участника комнаты" in text
+    # Граница векторной конвертации — тоже задокументированное решение.
+    assert "Граница: кто конвертирует YUV420P" in text
+    assert "parity" in text or "самопроверка" in text
 
 
 def test_wire_format_documented_in_readme():

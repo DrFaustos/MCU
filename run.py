@@ -104,8 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--h323-video-socket", metavar="PATH",
                    help="unix-сокет бинарных кадров mcu_h323d "
                         "(по умолчанию к сокету хоста добавляется .video)")
-    p.add_argument("--h323-video-fps", type=float,
-                   help="потолок кадров на вызов в панель (по умолчанию 5)")
+    p.add_argument("--h323-video-fps", type=float, default=5.0,
+                   help="потолок кадров на вызов в панель (по умолчанию 5; "
+                        "0 — без своего лимита)")
     p.add_argument("--h323-video-preview", action="store_true",
                    help="кадр H.323 в единственную ячейку панели (/api/frame.png); "
                         "перекрывает картинку локального источника МСУ")
@@ -345,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
             # слать кадры base64 в общую очередь, где живёт аудио.
             video=True if args.h323_video is None else bool(args.h323_video),
             video_socket=args.h323_video_socket or "",
-            video_fps=args.h323_video_fps or 0.0,
+            video_fps=float(args.h323_video_fps),
         )
         # Чтобы accept/reject/hangup из UI/web доезжали до H.323-хоста
         # (у этих участников нет pjsua2-объекта, CallService их не видит).

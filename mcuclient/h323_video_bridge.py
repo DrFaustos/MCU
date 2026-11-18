@@ -20,7 +20,7 @@ JSON. Этот модуль:
 (``webrtc_ingest._make_video_track`` читает ``bus.latest_video(pid)``). Туда же
 кладёт звук аппаратный SIP-терминал — :class:`mcuclient.sip_web_bridge.
 SipWebAudioBridge` (``bus.publish_audio("sip-<слот>", ...)``). Видео H.323
-встраивается ровно в ту же точку: ``bus.publish_video("h323v-<канал>", rgb, w,
+встраивается ровно в ту же точку: ``bus.publish_video(<id участника>, rgb, w,
 h)``, имя канала — по образцу ``sip-<слот>``.
 
 Третий вход — ``frame_hub`` (:class:`mcuclient.video_stream.FrameHub`), и он
@@ -559,12 +559,28 @@ class H323VideoBridge:
     #: :class:`mcuclient.sip_web_bridge.SipWebAudioBridge`.
     H323_PUBLISHER_ID = "h323"
     #: Префикс ИНДИВИДУАЛЬНОГО канала видео: один вызов = один канал.
-    H323_CHANNEL_PREFIX = "h323v-"
+    #: Префикс имени канала СОЗНАТЕЛЬНО не нужен (см. :meth:`channel_of`).
+    H323_CHANNEL_PREFIX = ""
 
     @classmethod
     def channel_of(cls, key: Any) -> str:
-        """Имя канала шины для вызова (стабильно до конца вызова)."""
-        return f"{cls.H323_CHANNEL_PREFIX}{key}"
+        """Имя канала шины для вызова: id участника комнаты, без украшений.
+
+        Панель читает шину ПО ID УЧАСТНИКА: ``/api/participants`` берёт
+        ``bus.video_version(row["id"])`` (mcuclient/web_server.py:947), а
+        исходящий видео-трек зрителя строится на id из ``subscribe`` — тех же
+        id, что отдаёт ``/api/conference/join``
+        (mcuclient/webrtc_ingest.py:361-362, 622-644). Аудио-мост H.323 льёт в
+        ту же шину под тем же id (mcuclient/h323_audio_bridge.py:454-460).
+
+        Префикс «h323v-» прятал кадр в канал, который панель не читает: живой
+        стенд (scripts/testbed/h323_video_panel.py) показал вызов установлен,
+        кадр в шине, а ``video_frames`` участника — 0. Префикс SIP-моста
+        (``sip-<слот>``) копировать нельзя: он сделан специально, чтобы кадры
+        SIP-вызова НЕ ложились на ряд веб-участника; H.323-вызов таким рядом
+        является по смыслу, а не по ошибке.
+        """
+        return str(key)
 
     def __init__(
         self,
@@ -602,6 +618,8 @@ class H323VideoBridge:
         # token -> (имя канала шины, размеры канала, направление, кодек)
         self._channels: Dict[str, Dict[str, Any]] = {}
         self._latest: Dict[str, VideoFrame] = {}
+        #: каналы, по которым уже сказан info про первый кадр (одна строка на канал)
+        self._seen_bus: set = set()
         self._tx_frames = 0
         self._tx_bytes = 0
         self._converted = 0
@@ -626,11 +644,12 @@ class H323VideoBridge:
                 target=self._reader_loop, name="h323-video", daemon=True
             )
             self._thread.start()
-        log.info(
-            "H.323: видео-мост включён (кадры: %s, до %.1f к/с на вызов)",
-            self._socket_path or "общий JSON-сокет",
-            (1.0 / self._throttle.min_interval) if self._throttle.min_interval else 0.0,
-        )
+        # Темп в логе обязан читаться как НАСТРОЙКА, а не как ноль: «до 0.0 к/с»
+        # выглядит сломанным и подталкивает включать видео заново.
+        limit = ("до %.1f к/с на вызов" % (1.0 / self._throttle.min_interval)
+                 if self._throttle.min_interval else "без своего лимита")
+        log.info("H.323: видео-мост включён (кадры: %s, %s)",
+                 self._socket_path or "общий JSON-сокет", limit)
         return True
 
     def stop(self) -> None:
@@ -743,22 +762,34 @@ class H323VideoBridge:
             height = int(fields.get("height") or 0)
         except (TypeError, ValueError):
             width = height = 0
+        # Имя канала считаем ДО лока: find_by_token — чужой объект, и держать
+        # лок моста на время чужого кода не за что.
+        key, by_pid = self._resolve_key(token)
+        migrate = ""
         with self._lock:
-            ch = self._channels.setdefault(token, {"key": self._key_of(token)})
+            ch = self._channels.setdefault(token, {"key": key, "by_pid": by_pid})
+            if by_pid and not ch.get("by_pid"):
+                # Первый же event мог прийти раньше кадра по токену: переезд.
+                old = str(ch.get("key") or "")
+                ch["key"], ch["by_pid"] = key, True
+                migrate = old if old and old != key else ""
             ch.update({"direction": direction, "codec": codec,
                        "width": width, "height": height})
+            shown = str(ch["key"])
+        if migrate:
+            self._drop_bus_channel(migrate)
         log.info("H.323: видеоканал %s (%s, %s, %dx%d) -> канал %s",
                  token, direction or "?", codec or "?", width, height,
-                 self.channel_of(self._key_of(token)))
+                 self.channel_of(shown))
 
-    def _key_of(self, token: str) -> str:
-        """Ключ канала: id участника комнаты, иначе токен хоста.
+    def _resolve_key(self, token: str) -> Tuple[str, bool]:
+        """(имя канала, это id участника комнаты?) — id важнее токена.
 
-        РАЗЫМЁНОВЫВАЕТСЯ ОДИН РАЗ и запоминается (:meth:`_channel_key`): два
-        источника имени для одного вызова дали бы два канала шины на один вызов,
-        и зритель увидел бы картинку, прыгающую между ними.
+        Id участника — единственное имя, которое панель умеет читать
+        (:meth:`channel_of`). Если вызова в комнате ещё нет, каналом становится
+        токен хоста: имена токенов («call-N») не пересекаются с id комнаты
+        («web-N» и числа), так что второй участник под это имя не подйдёт.
         """
-        pid = None
         finder = getattr(self._endpoint, "find_by_token", None)
         if callable(finder):
             try:
@@ -766,16 +797,46 @@ class H323VideoBridge:
             except Exception:  # noqa: BLE001 — имя канала не важнее вызова
                 part = None
             pid = getattr(part, "id", None)
-        return str(pid) if pid is not None else token
+            if pid is not None:
+                return str(pid), True
+        return token, False
 
     def _channel_key(self, token: str) -> str:
+        """Имя канала вызова; стабильно, но доезжает до панели.
+
+        Стабильность нужна, чтобы на один вызов не появилось два канала; но
+        если участник объявился в комнате ПОЗЖЕ первого кадра, канал обязан
+        переехать на его id — иначе кадр останется в канале по токену, который
+        панель не читает, и «видео пропало» будет неотличимо от «кодек не
+        согласовался».
+        """
+        new_key, is_pid = self._resolve_key(token)
+        migrate = ""
         with self._lock:
-            ch = self._channels.get(token)
-            if ch is not None and ch.get("key"):
-                return str(ch["key"])
-            key = self._key_of(token)
-            self._channels[token] = {"key": key}
-            return key
+            ch = self._channels.setdefault(token, {})
+            key = ch.get("key")
+            if key is None:
+                ch["key"], ch["by_pid"] = new_key, is_pid
+                return new_key
+            if not ch.get("by_pid") and is_pid and str(key) != new_key:
+                migrate = str(key)
+                ch["key"], ch["by_pid"] = new_key, True
+        if migrate:
+            self._drop_bus_channel(migrate)
+            with self._lock:
+                self._seen_bus.discard(migrate)
+        return str(self._channels[token]["key"])
+
+    def _drop_bus_channel(self, key: str) -> None:
+        """Убрать канал из шины (панель обязана перестать показывать труп)."""
+        bus = self._sinks()[0]
+        drop = getattr(bus, "drop", None)
+        if not key or not callable(drop):
+            return
+        try:
+            drop(key)
+        except Exception:  # noqa: BLE001 — уборка не роняет мост
+            log.debug("H.323: уборка канала %s не удалась", key, exc_info=True)
 
     # --- приём кадров ---------------------------------------------------------
     def _reader_loop(self) -> None:
@@ -865,8 +926,18 @@ class H323VideoBridge:
                 bus.publish_video(key, panel, frame.width, frame.height)
                 with self._lock:
                     self._published += 1
+                    first = key not in self._seen_bus
+                    if first:
+                        self._seen_bus.add(key)
             except Exception:  # noqa: BLE001
                 log.debug("H.323: публикация в шину не удалась", exc_info=True)
+            else:
+                if first:
+                    # Ровно одна строка на канал: «вызов согласован» (см. выше) и
+                    # «кадр реально лёг в шину» — это РАЗНЫЕ отказы, и без второй
+                    # строки их не развести ни в логе, ни в стенде.
+                    log.info("H.323: первый кадр %dx%d лёг в шину панели (канал %s)",
+                             frame.width, frame.height, key)
         if hub is not None:
             try:
                 hub.on_frame(panel)
@@ -930,16 +1001,15 @@ class H323VideoBridge:
         with self._lock:
             ch = self._channels.pop(token, None)
             self._latest.pop(token, None)
-        bus = self._sinks()[0]
-        key = self.channel_of(ch.get("key")) if ch else None
+        key = str(ch["key"]) if ch and ch.get("key") else ""
+        if key:
+            # «первый кадр» сказался один раз на канал — при новом вызове с тем же
+            # ключом строка обязана появиться снова, иначе лог соврёт про второй
+            # вызов этого же участника.
+            with self._lock:
+                self._seen_bus.discard(key)
         self._throttle.forget(token)
-        if key and bus is not None:
-            drop = getattr(bus, "drop", None)
-            if callable(drop):
-                try:
-                    drop(key)
-                except Exception:  # noqa: BLE001 — уборка не роняет мост
-                    log.debug("H.323: уборка канала %s не удалась", key, exc_info=True)
+        self._drop_bus_channel(key)
 
     def forget_all(self) -> None:
         """Хост потерян целиком: зачищаем все свои каналы."""
