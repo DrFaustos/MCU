@@ -97,3 +97,49 @@
   `/tmp/.X11-unix`. На чистом Wayland без XWayland GUI не вывести — используйте
   headless-режим и `scripts/dev/test_call.sh`.
 * Перед первым запуском проверьте окружение: `python3 run.py --doctor`.
+
+---
+
+## 7. H.323-стенд в контейнере на Bazzite/podman
+
+Хостовые грабли Bazzite/Silverblue: нет `apt`, пакеты в систему не ставятся,
+а PTLib/H323Plus (Этап 0 из `docs/ADR-0002-h323plus-unified-media.md`) требует
+именно их. Решение — образ `docker/mcu-dev-h323.Dockerfile` (Ubuntu 24.04,
+`podman` или `docker`) и единая точка входа `scripts/h323_in_container.sh`:
+
+```bash
+./scripts/h323_in_container.sh build     # собрать образ (один раз, ~15 мин)
+./scripts/h323_in_container.sh smoke     # собрать mcu_h323d + ready/pong-дымь
+./scripts/h323_in_container.sh testbed   # стенд двух хостов (сигнализация,
+                                         # медиа, DTMF) — обязан дать RC=0
+./scripts/h323_in_container.sh tests     # python3 tests/_runner.py (в образе
+                                         # есть pytest и ruff)
+./scripts/h323_in_container.sh bash      # интерактив, репо смонтирован в /work
+./scripts/h323_in_container.sh <cmd...>  # любая команда в контейнере
+```
+
+Репо монтируется в `/work` читаемо-записываемо: артефакты (`tools/h323d/build`)
+переживают прогоны и видны с хоста своими правами (podman rootless пишет
+наружу от вашего uid). Переменные: `MCU_H323_IMAGE` (имя образа),
+`MCU_H323_ENGINE` (`podman`/`docker`), `PORT_A`/`PORT_B`/`KEEP_LOGS` —
+пробрасываются в стенд, `MCU_H323_RUN_ARGS` — дополнительные аргументы
+`run` (например `--cap-add NET_ADMIN` для tc/netem-экспериментов).
+
+Стек в образе собирается **тем же** `scripts/install_h323plus.sh`, что и на
+голом хосте (PTLib 2.10.9.6 + H323Plus 1.28.0 в `/usr/local`, аудио-плагины,
+патч кадра plugin-G.722 на 20 мс) — расхождение образа и хоста означало бы,
+что стенд проверяет не то, что работает у пользователя.
+
+Три грабли, уже учтённые в скрипте (при ручной работе всплывут снова):
+
+* **SELinux** (Bazzite/Fedora): bind-mount без `:z` контейнером не виден.
+* **podman 6 + устаревший `~/.config/containers/containers.conf`** со
+  `default_rootless_network_cmd = "slirp4netns"` — сеть не поднимается вообще;
+  скрипт подменяет конфиг через `CONTAINERS_CONF` (файл пользователя не трогает).
+* **чужие артефакты cmake** в `tools/h323d/build`: `find_host_binary()` берёт
+  первый попавшийся бинарь, и контейнер начал бы тестировать сборку с другого
+  хоста; режимы h323d/smoke/testbed монтируют поверх `build/` именованный том.
+
+Знания о версиях стека (теги форков с подчёркиваниями `v2_10_9_6`/`v1_28_0`,
+тихий fallback на master, `ENV PREFIX`, ломающий сборку H323Plus) —
+в `docs/H323_STATUS.md` и `docs/AI_CONTEXT.md`.

@@ -59,6 +59,11 @@ XWayland (`QT_QPA_PLATFORM=xcb`). Это делается автоматичес
 
  
 
+Для нативного H.323 (PTLib + H323Plus, ADR-0002) — отдельный образ и единая
+точка входа: `./scripts/h323_in_container.sh smoke|testbed|tests`
+(раздел 7 в [DEV_CONTAINERS.md](DEV_CONTAINERS.md)); нужно там, где на хосте
+нельзя поставить пакеты (Bazzite/Silverblue, CI-контейнеры).
+
 ## 6. Локальный прогон CI через act
 
 [nektos/act](https://github.com/nektos/act) запускает GitHub Actions локально:

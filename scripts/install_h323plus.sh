@@ -43,6 +43,27 @@ JOBS="$(nproc 2>/dev/null || echo 2)"
 
 log() { printf '[install-h323plus] %s\n' "$*"; }
 
+# Клон по тегу с обеими записи тегов форков: v2.10.9.6 НЕ существует, теги
+# пишутся подчёркиваниями — v2_10_9_6, v1_28_0 (замер по GitHub API
+# /repos/willamowius/{ptlib,h323plus}/tags, 2026-11). РАНЬШЕ при неудаче шёл
+# второй `git clone` без --branch и молча брал ветку по умолчанию: сборка
+# «проходила» на PTLib master вместо закреплённой версии, а H323Plus master
+# в такой сборке падает (ASN.1-заголовки не на месте) — т.е. тихий fallback
+# ломал и воспроизводимость, и диагностику. Теперь неизвестный тег = ошибка.
+clone_pinned() {
+    local repo="$1" version="$2" dst="$3"
+    if ! git clone --depth 1 --branch "v${version}" "${repo}" "${dst}" 2>/dev/null; then
+        git clone --depth 1 --branch "v${version//./_}" "${repo}" "${dst}" || {
+            log "ОШИБКА: в ${repo} нет тега v${version} (ни v${version//./_})"
+            log "Список тегов: https://github.com/${repo#https://github.com/}/tags"
+            exit 1
+        }
+    fi
+    # Громкая печать реального ref: молчаливый «не тот коммит» — мать всех
+    # «собралось, но ведёт себя странно».
+    log "клон ${repo##*/}: $(git -C "${dst}" describe --tags --always)"
+}
+
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
@@ -85,9 +106,7 @@ build_ptlib() {
     if [ ! -d "${src}/.git" ]; then
         log "Клонирование PTLib ${PTLIB_VERSION} -> ${src}"
         rm -rf "${src}"
-        git clone --depth 1 --branch "v${PTLIB_VERSION}" \
-            "${PTLIB_REPO}" "${src}" 2>/dev/null \
-            || git clone --depth 1 "${PTLIB_REPO}" "${src}"
+        clone_pinned "${PTLIB_REPO}" "${PTLIB_VERSION}" "${src}"
     fi
     cd "${src}"
     log "configure PTLib (PREFIX=${PREFIX})"
@@ -104,9 +123,7 @@ build_h323plus() {
     if [ ! -d "${src}/.git" ]; then
         log "Клонирование H323Plus ${H323PLUS_VERSION} -> ${src}"
         rm -rf "${src}"
-        git clone --depth 1 --branch "v${H323PLUS_VERSION}" \
-            "${H323PLUS_REPO}" "${src}" 2>/dev/null \
-            || git clone --depth 1 "${H323PLUS_REPO}" "${src}"
+        clone_pinned "${H323PLUS_REPO}" "${H323PLUS_VERSION}" "${src}"
     fi
     cd "${src}"
     # Санитарная проверка: ASN.1-заголовки должны быть в дереве исходников.
@@ -124,13 +141,17 @@ build_h323plus() {
     fi
     log "configure H323Plus (PREFIX=${PREFIX})"
     # H323Plus ищет PTLib через PTBUILDDIR/PKGCONFIG. Передаём явно.
-    ./configure --prefix="${PREFIX}" \
+    # env -u PREFIX — не косметика: openh323u.mak при PREFIX в ОКРУЖЕНИИ
+    # подставляет заголовкам -I$(PREFIX)/include/openh323, каталога до
+    # make install не существует, и вся сборка падает на «h225.h: No such
+    # file» при целом include/ в дереве. Внутри дерева include/ всегда есть.
+    env -u PREFIX ./configure --prefix="${PREFIX}" \
         --with-ptlib="${PREFIX}" \
         --enable-shared >/dev/null
     log "make H323Plus -j${JOBS} (может занять несколько минут)"
-    make -j"${JOBS}" >/dev/null
+    env -u PREFIX make -j"${JOBS}" >/dev/null
     log "make install H323Plus"
-    $SUDO make install >/dev/null
+    env -u PREFIX $SUDO make install >/dev/null
 }
 
 # --- 3b. Plugin-кодеки (БЕЗ них H.323 = только G.711) -------------------------
