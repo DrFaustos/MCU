@@ -26,6 +26,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # `make install` нет, и вся сборка падает на «h225.h: No such file».
 # Префикс передаётся только как аргумент команды ниже.
 
+# Версии стека и набор видео-плагинов — build-аргументы со значениями по
+# умолчанию, равным закреплённой паре (PTLib 2.10.9.6 + H323Plus 1.28.0,
+# docs/ADR-0002). Дефолтная сборка не меняется; надстройки собираются явно,
+# например стенд H.264 (royalty-free, docs/CODECS.md §5.1):
+#   MCU_H323_IMAGE=mcu-dev-h323:v129 ./scripts/h323_in_container.sh build
+#   MCU_H323_BUILD_ARGS="--build-arg PTLIB_VERSION=2.10.9.8
+#                        --build-arg H323PLUS_VERSION=1.29.1
+#                        --build-arg MCU_H323_VIDEO_PLUGINS=H.261-vic,H.264-openh264"
+# (список плагинов через запятую; теги форков пишутся с подчёркиваниями —
+# v2_10_9_8, v1_29_1; обе записи подбирает clone_pinned в install_h323plus.sh).
+ARG PTLIB_VERSION=2.10.9.6
+ARG H323PLUS_VERSION=1.28.0
+ARG MCU_H323_VIDEO_PLUGINS=H.261-vic
+
 # Зависимости: ядро сборки + dev-пакеты, нужные plugin-кодекам (см. build_plugins
 # в install_h323plus.sh), + python3 с pytest (tests/_runner.py и 5 тестов
 # import-ят pytest напрямую) + ffmpeg.
@@ -35,18 +49,23 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
         libssl-dev libexpat1-dev libsasl2-dev libldap2-dev \
         libasound2-dev libv4l-dev \
         libspeexdsp-dev \
+        libopenh264-dev \
         libsdl2-dev libavcodec-dev libavformat-dev libavutil-dev \
         libswscale-dev libx264-dev libx265-dev libvpx-dev \
         python3 python3-venv python3-pip python3-pytest \
         ffmpeg iproute2 tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
-# PTLib 2.10.9.6 -> H323Plus 1.28.0 -> plugin-кодеки (порядок строго такой).
-# Дерево сборки (~1 ГБ) живёт в /tmp и удаляется в этом же слое, иначе образ
-# раздувается исходниками.
+# PTLib -> H323Plus -> plugin-кодеки (порядок строго такой; версии из ARG,
+# дефолт — 2.10.9.6 -> 1.28.0). Дерево сборки (~1 ГБ) живёт в /tmp и удаляется
+# в этом же слое, иначе образ раздувается исходниками.
 COPY scripts/install_h323plus.sh /tmp/install_h323plus.sh
 RUN chmod +x /tmp/install_h323plus.sh \
-    && PREFIX=/usr/local BUILD_DIR=/tmp/h323-build /tmp/install_h323plus.sh \
+    && PREFIX=/usr/local BUILD_DIR=/tmp/h323-build \
+       PTLIB_VERSION="${PTLIB_VERSION}" \
+       H323PLUS_VERSION="${H323PLUS_VERSION}" \
+       MCU_H323_VIDEO_PLUGINS="${MCU_H323_VIDEO_PLUGINS}" \
+       /tmp/install_h323plus.sh \
     && rm -rf /tmp/h323-build /tmp/install_h323plus.sh
 
 # Проверка, что библиотеки и аудио-плагины на месте (без них хост — 2 кодека).

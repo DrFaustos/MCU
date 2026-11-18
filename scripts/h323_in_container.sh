@@ -25,6 +25,17 @@
 #   MCU_H323_IMAGE   имя образа (по умолчанию mcu-dev-h323:latest)
 #   MCU_H323_ENGINE  podman|docker (по умолчанию что первый найдётся)
 #   MCU_H323_RUN_ARGS доп. аргументы run, по словам (--cap-add NET_ADMIN ...)
+#   MCU_H323_BUILD_ARGS доп. аргументы build, по словам; сборка надстроек,
+#                    напр. v129 (H.264, см. docker/mcu-dev-h323.Dockerfile):
+#                      MCU_H323_IMAGE=mcu-dev-h323:v129 \
+#                      MCU_H323_BUILD_ARGS="--build-arg PTLIB_VERSION=2.10.9.8
+#                        --build-arg H323PLUS_VERSION=1.29.1
+#                        --build-arg MCU_H323_VIDEO_PLUGINS=H.261-vic,H.264-openh264" \
+#                      ./scripts/h323_in_container.sh build
+#   MCU_H323_H323D_VOL имя тома для tools/h323d/build (по умолчанию
+#                    mcu-h323-h323d-build). Для образа с ДРУГИМ ABI стека
+#                    (v129) заведите отдельный том — иначе инкрементальная
+#                    сборка смешивает объекты двух стеков.
 #   PORT_A/PORT_B/KEEP_LOGS/H323_LIB_DIR — пробрасываются в testbed как есть.
 #
 # Репо монтируется в /work читаемо-записываемо: артефакты сборки
@@ -75,7 +86,7 @@ fi
 
 # Переменные стендов внутрь (только если заданы снаружи — дефолты оставляет себе скрипт).
 ENV_ARGS=()
-for v in PORT_A PORT_B KEEP_LOGS H323_LIB_DIR MCU_H323_EXTRA_ARGS; do
+for v in PORT_A PORT_B KEEP_LOGS H323_LIB_DIR MCU_H323_EXTRA_ARGS H323_CODEC_ARGS; do
     if [ -n "${!v:-}" ]; then ENV_ARGS+=(-e "${v}=${!v}"); fi
 done
 
@@ -95,31 +106,43 @@ run() { # run <bash-строка> — выполнить в контейнере
         "${IMAGE}" bash -c "$1"
 }
 
-# Режимы, собирающие/запускающие h323d, монтируют ТОМ поверх tools/h323d/build.
-# Причина: find_host_binary() берёт ПЕРВЫЙ попавшийся build/mcu_h323d, а в
-# репозитории может лежать бинарь/кэш cmake с ДРУГОГО хоста (пути и стек
-# /usr/local другие) — контейнер тогда тестирует чужой бинарь, и зелёный прогон
-# ничего не доказывает. Том наружу не виден: хостовые артефакты остаются
+# Режимы, собирающие/запускающие h323d, и passthrough монтируют ТОМ поверх
+# tools/h323d/build. Причина: find_host_binary() берёт ПЕРВЫЙ попавшийся
+# build/mcu_h323d, а в репозитории может лежать бинарь/кэш cmake с ДРУГОГО
+# хоста (пути и стек /usr/local другие) — контейнер тогда тестирует чужой
+# бинарь, и зелёный прогон ничего не доказывает (практика: passthrough видел
+# месячной давности бинарь и «Неизвестный аргумент: --codecs-profile» при
+# свежей сборке). Том наружу не виден: хостовые артефакты остаются
 # нетронутыми, а внутри каждый раз честная инкрементальная сборка текущего
-# образа (том переживает прогоны, имя — MCU_H323_H323D_VOL).
+# образа (том переживает прогоны, имя — MCU_H323_H323D_VOL). Passthrough —
+# тоже: иначе «проверил флаг в bash» ≠ «проверил то, что собрал режим h323d».
+H323D_VOL_ARG=(-v "${MCU_H323_H323D_VOL:-mcu-h323-h323d-build}:/work/tools/h323d/build")
+
 run_isolated_h323d() {
     "${ENGINE}" run --rm -i \
         -v "${MOUNT}" -w /work \
-        -v "${MCU_H323_H323D_VOL:-mcu-h323-h323d-build}:/work/tools/h323d/build" \
+        "${H323D_VOL_ARG[@]}" \
         "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}" \
         "${ENV_ARGS[@]}" \
         "${IMAGE}" bash -c "$1"
 }
 
 usage() {
-    sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # Печатать шапку без хрупкой нумерации: от 2-й строки до `set -euo`.
+    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '/^set -euo/d; s/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
 case "${1:-}" in
     build)
         log "сборка образа ${IMAGE} (${ENGINE})"
-        "${ENGINE}" build -f "${ROOT}/docker/mcu-dev-h323.Dockerfile" -t "${IMAGE}" "${ROOT}"
+        BUILD_ARGS=()
+        if [ -n "${MCU_H323_BUILD_ARGS:-}" ]; then
+            # shellcheck disable=SC2206
+            BUILD_ARGS=(${MCU_H323_BUILD_ARGS})
+        fi
+        "${ENGINE}" build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
+            -f "${ROOT}/docker/mcu-dev-h323.Dockerfile" -t "${IMAGE}" "${ROOT}"
         log "готово: ${ENGINE} images ${IMAGE}"
         ;;
     h323d)
@@ -169,8 +192,11 @@ case "${1:-}" in
         ;;
     *)
         # Passthrough: любая команда внутри контейнера, репо в /work.
+        # Том h323d монтируется и здесь — иначе «проверил флаг в bash» означает
+        # «проверил бинарь с другого хоста» (см. комментарий H323D_VOL_ARG).
         "${ENGINE}" run --rm -i \
             -v "${MOUNT}" -w /work \
+            "${H323D_VOL_ARG[@]}" \
             "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}" \
             "${ENV_ARGS[@]}" \
             "${IMAGE}" "$@"
