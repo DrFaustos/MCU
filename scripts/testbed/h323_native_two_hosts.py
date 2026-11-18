@@ -187,6 +187,17 @@ def start_host(
         # Медиа обязано быть проверяемым вне Python: WAV обоих направлений на
         # диск. Он пишется независимо от целостности IPC.
         argv += ["--dump-pcm", str(dump_dir)]
+    # Лицензионный профиль кодеков на стенде задаётся извне, а не правкой argv:
+    # в H323_CODEC_ARGS кладётся ровно то, что отдаёт
+    # mcuclient.codec_negotiation.host_codec_args (то есть та же строка флагов,
+    # с которой хост стартует в бою). Так «royalty-free не ломает вызов»
+    # проверяется на реальном согласовании, а не только в юнитах. Пустая
+    # переменная = поведение стенда не меняется вовсе.
+    extra = os.environ.get("H323_CODEC_ARGS", "").split()
+    if extra:
+        argv += extra
+        log.write(f"[testbed] кодек-аргументы хоста {name}: {' '.join(extra)}\n")
+        log.flush()
     proc = subprocess.Popen(
         argv,
         cwd=str(ROOT),

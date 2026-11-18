@@ -87,7 +87,12 @@
   },
   "h323": {
     "enabled": false,
-    "port": 1720
+    "port": 1720,
+    "codec_profile": "compat",
+    "audio_codecs": [],
+    "disable_codecs": [],
+    "allow_codecs": [],
+    "video_codecs": []
   },
   "features": {
     "allow_screen_share": true,

@@ -132,6 +132,9 @@ class H323Endpoint:
         registry: Optional[CallRegistry] = None,
         audio_mix: bool = True,
         mix_sample_rate: Optional[int] = None,
+        video: bool = True,
+        video_socket: str = "",
+        video_fps: float = 5.0,
     ) -> None:
         # Участники заводятся через CallRegistry — ТОТ ЖЕ реестр, что у
         # SipEngine. Причина не в удобстве: у реестра единый счётчик id на
@@ -154,6 +157,22 @@ class H323Endpoint:
         self._audio: Optional[Any] = None
         self._audio_mix = bool(audio_mix)
         self._mix_rate = int(mix_sample_rate) if mix_sample_rate else None
+        # Этап 4 (ADR-0002): видеокадры вызовов H.323. Мост НЕ заводит второй
+        # путь видео — он кладёт кадр в ту же MediaBus, откуда браузер-зритель
+        # берёт трек (и откуда SIP-терминал берёт звук), см. docstring
+        # :class:`~mcuclient.h323_video_bridge.H323VideoBridge`.
+        self._video: Optional[Any] = None
+        self._video_enabled = bool(video)
+        #: Путь сокета кадров; пусто → «как общий сокет + .video» (так же
+        #: поступают аргументы по умолчанию у самого mcu_h323d).
+        self._video_socket = video_socket or ""
+        self._video_fps = float(video_fps or 0.0)
+        #: Одна warning-заметка о кадрах без моста (см. ветку video.frame).
+        self._video_frame_warned = False
+        #: Приёмники, присланные ПОСЛЕ :meth:`start`: веб-сервер (а с ним
+        #: шина медиа и FrameHub) поднимается после H.323, поэтому мост обязан
+        #: принять их на лету, а не требовать другого порядка запуска.
+        self._video_sinks: Dict[str, Any] = {}
         #: Журнал DTMF комнаты (:class:`~mcuclient.dtmf_service.DtmfService`).
         #: Ставится из run.py через :meth:`set_dtmf_service`. Он НЕ заводится
         #: здесь: журнал обязан быть один на SIP и H.323, а его владелец —
@@ -444,6 +463,11 @@ class H323Endpoint:
             # старой сборке и вовсе не шлёт). Иначе «фантом» продолжает
             # попадать в микс всех остальных.
             self._audio.forget(host_token)
+        if self._video is not None and host_token:
+            # Тот же урок, что с микшером, только фантом виден глазами: кадр
+            # остаётся в MediaBus до drop(), и панель показывает застывшую
+            # картинку ушедшего терминала (mcuclient/sip_web_bridge.py, forget).
+            self._video.forget(host_token)
         participant.state = CallState.DISCONNECTED
         self._registry.drop(participant.id)
         for token, p in list(self._calls.items()):
@@ -510,6 +534,32 @@ class H323Endpoint:
                         p.audio_codec = codec
                     elif kind == "video":
                         p.video_codec = codec
+        elif name == "video.frame":
+            # Кадры в панель кладёт видео-мост — он подписан на клиента
+            # напрямую (H323VideoBridge.start), поэтому здесь ВТОРАЯ доставка
+            # была бы двойной работой. Ветка нужна не для доставки, а чтобы
+            # событие никогда не оставалось необработанным: если моста нет (или
+            # он выключен), кадр дошёл до Python и был выброшен молча — ровно
+            # тот класс «видео пропало, а в логе тишина», который в этом
+            # проекте принято закрывать явным сообщением.
+            if self._video is None:
+                if not self._video_frame_warned:
+                    self._video_frame_warned = True
+                    # Хост шлёт кадры base64 в ОБЩИЙ JSON-сокет только когда к
+                    # бинарному сокету кадров никто не подключился. Мост и есть
+                    # тот подключившийся: без него каждый кадр идёт base64 в
+                    # очередь, где живёт аудио, — прямой путь к паузам звука.
+                    # Сообщение ОДНО на прогон: дальше счётчик в логах только
+                    # шумит, а факт оператор уже видит.
+                    log.warning(
+                        "H.323: кадр видео пришёл (токен %s, %sx%s), но "
+                        "видео-мост не поднят: картинка в панель не попадёт, а "
+                        "base64-кадры занимают очередь общего сокета, где живёт "
+                        "аудио. Проверьте флаг видео, пути сокетов и наличие "
+                        "plugin-кодеков видео у mcu_h323d",
+                        data.get("token", ""), data.get("width", "?"),
+                        data.get("height", "?"),
+                    )
         elif name == "dtmf.in":
             token = str(data.get("token", "") or "")
             digits = str(data.get("digits", "") or "")
@@ -621,6 +671,7 @@ class H323Endpoint:
             return False
         self._client = client
         self._start_audio_bridge()
+        self._start_video_bridge()
         return True
 
     def _start_audio_bridge(self) -> None:
@@ -671,11 +722,89 @@ class H323Endpoint:
             "speaker_pid": st.speaker_pid,
         }
 
+    # --- видео (Этап 4) ------------------------------------------------------
+    def _start_video_bridge(self) -> None:
+        """Поднимает :class:`~mcuclient.h323_video_bridge.H323VideoBridge`.
+
+        Импорт здесь, а не на уровне модуля — та же причина, что у аудио-моста:
+        мост тянет конвертацию цвета (numpy, когда он есть), а эндпоинт обязан
+        импортироваться и без научных зависимостей, и без собранного H323Plus.
+        """
+        if not self._video_enabled:
+            log.info("H.323: видео-мост выключен — картинки в панели не будет")
+            return
+        try:
+            from .h323_video_bridge import H323VideoBridge  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 — без видео приём H.323 всё ещё полезен
+            log.exception("H.323: модуль видео-моста не загрузился")
+            return
+        bridge = H323VideoBridge(
+            self._client,
+            self,
+            bus=self._video_sinks.get("bus"),
+            frame_hub=self._video_sinks.get("frame_hub"),
+            sinks_provider=self._video_sinks.get("sinks_provider"),
+            socket_path=self._video_socket,
+            max_fps=self._video_fps,
+        )
+        if not bridge.start():
+            log.warning("H.323: видео-мост не подписался на события хоста")
+            return
+        self._video = bridge
+
+    def set_video_sinks(self, bus: Any = None, frame_hub: Any = None,
+                        sinks_provider: Any = None) -> None:
+        """Прислать мосту шину медиа (и, опционально, FrameHub) после запуска.
+
+        Вызывается из run.py/веб-сервера: они поднимаются ПОСЛЕ H.323-эндпоинта,
+        а заставлять порядок запуска наоборот — значит выключить видео при любом
+        другом порядке. Повторный вызов допустим (перезапуск веб-сервера).
+        """
+        if bus is not None:
+            self._video_sinks["bus"] = bus
+        if frame_hub is not None:
+            self._video_sinks["frame_hub"] = frame_hub
+        if sinks_provider is not None:
+            self._video_sinks["sinks_provider"] = sinks_provider
+        if self._video is not None:
+            self._video.set_sinks(bus=bus, frame_hub=frame_hub,
+                                  sinks_provider=sinks_provider)
+
+    @property
+    def video(self) -> Optional[Any]:
+        """Видео-мост (Этап 4) или None, если видео выключено/мост не поднялся."""
+        return self._video
+
+    def video_stats(self) -> Dict[str, Any]:
+        """Счётчики видео-моста для логов и веб-панели (пустой dict без моста)."""
+        if self._video is None:
+            return {"enabled": False}
+        return self._video.stats().as_dict()
+
+    def send_video_frame(self, token: str, data: bytes, width: int, height: int) -> bool:
+        """Кадр YUV420P в исходящий видеоканал вызова (``video.out``).
+
+        Наружу — чтобы стенд/панель могли отдать картинку в вызов, не зная
+        протокола хоста. False, если канала нет или мост не поднят.
+        """
+        if self._video is None:
+            return False
+        return self._video.send_frame(token, data, width, height)
+
+    def send_video_pattern(self, token: str, on: bool = True) -> bool:
+        """Тест-паттерн в исходящий видеоканал вызова (``video.pattern``)."""
+        if self._video is None:
+            return False
+        return self._video.send_pattern(token, on)
+
     def stop(self) -> None:
         """Снимает всех H.323-участников и отключается от хоста."""
-        # Мост гасим ПЕРВЫМ: он читает события того же клиента. Если закрыть
-        # клиент раньше, pcm.in перестанет прибывать, а буферы микшера останутся
-        # висеть на завершённых вызовах.
+        # Мосты гасим ПЕРВЫМИ: они читают события того же клиента. Если закрыть
+        # клиент раньше, pcm.in и кадры видео перестанут прибывать, а буферы
+        # микшера и каналы шины останутся висеть на завершённых вызовах.
+        if self._video is not None:
+            self._video.stop()
+            self._video = None
         if self._audio is not None:
             self._audio.stop()
             self._audio = None

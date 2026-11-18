@@ -11,6 +11,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+# Имена лицензионных профилей H.323-кодеков берутся из codec_negotiation, а не
+# переписываются здесь: валидатор конфига и хост должны знать ОДИН набор, иначе
+# конфиг пропустит профиль, который хост потом истолкует как compat (молча
+# объявив Siren/x264 вместо «безопасного» набора).
+from .codec_negotiation import (
+    DEFAULT_H323_CODEC_PROFILE,
+    H323_CODEC_PROFILE_MODES,
+    host_codec_args,
+    split_patterns,
+)
+
 
 # --- Границы допустимых значений (используются валидацией и сеттерами) ---
 PORT_MIN, PORT_MAX = 1, 65535
@@ -300,7 +311,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "audio": {"bitrate_kbps": 48, "echo_cancel": True, "noise_suppress": True},
         "bandwidth_kbps": 4000,
     },
-    "h323": {"enabled": False, "port": 1720},
+    # codec_profile — лицензионный профиль набора кодеков для C++-хоста
+    # mcu_h323d (матрица и смысл профилей — docs/CODECS.md): royalty-free не
+    # объявляет ничего, кроме семейств с истёкшими патентами или без пулов;
+    # compat = всё, что собирается, лицензионные вопросы решает заказчик.
+    # Пустые списки = «набор и порядок задаёт профиль»; непустой --audio-codecs
+    # работает и белым списком, и приоритетом одновременно.
+    "h323": {
+        "enabled": False,
+        "port": 1720,
+        "codec_profile": DEFAULT_H323_CODEC_PROFILE,
+        "audio_codecs": [],
+        "disable_codecs": [],
+        "allow_codecs": [],
+        "video_codecs": [],
+    },
     "features": {
         "allow_screen_share": True,
         # Встроенный коммутатор источников (аналог OBS): приложение
@@ -588,6 +613,27 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     _check_bool("h323.enabled", raw["h323"].get("enabled"))
     _check_int("h323.port", raw["h323"].get("port"), PORT_MIN, PORT_MAX)
+    h323 = raw["h323"]
+    h323_profile = str(h323.get("codec_profile") or DEFAULT_H323_CODEC_PROFILE).strip().lower()
+    if h323_profile not in H323_CODEC_PROFILE_MODES:
+        raise ConfigError(
+            f"h323.codec_profile: '{h323.get('codec_profile')}' не поддерживается, "
+            f"ожидается одно из {H323_CODEC_PROFILE_MODES} (см. docs/CODECS.md)"
+        )
+    # Опечатка в профиле дороже, чем в порт: молча «compat» вместо
+    # «royalty-free» = объявить патентно-обременённое семейство, думая, что
+    # включён безопасный набор. Поэтому — отказ старта, а не дефолт.
+    for key in ("audio_codecs", "disable_codecs", "allow_codecs", "video_codecs"):
+        value = h323.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) or isinstance(value, (list, tuple)):
+            _check_str_list(f"h323.{key}", [value] if isinstance(value, str) else list(value))
+        else:
+            raise ConfigError(
+                f"h323.{key}: ожидается строка «G.711,G.722-*» или список строк, "
+                f"получено {type(value).__name__}"
+            )
 
     features = raw["features"]
     _check_str("features.recording_path", features.get("recording_path"))
@@ -1008,6 +1054,29 @@ class Config:
     @property
     def h323_port(self) -> int:
         return int(self.raw["h323"]["port"])
+
+    @property
+    def h323_codec_profile(self) -> str:
+        """Лицензионный профиль кодеков C++-хоста: royalty-free | compat."""
+        return str(self.raw["h323"].get("codec_profile")
+                   or DEFAULT_H323_CODEC_PROFILE).strip().lower()
+
+    def h323_codec_list(self, key: str) -> List[str]:
+        """Список паттернов h323.<key> («G.711,G.722-*» или массив) без пустых."""
+        return list(split_patterns(self.raw["h323"].get(key)))
+
+    @property
+    def h323_host_codec_args(self) -> List[str]:
+        """Аргументы mcu_h323d из конфига — единой функцией, чтобы «как мы
+        запустили хост» не приходилось додумывать: то же самое печатается в
+        лог и используется стендами."""
+        return host_codec_args(
+            profile=self.h323_codec_profile,
+            audio=self.h323_codec_list("audio_codecs"),
+            disable=self.h323_codec_list("disable_codecs"),
+            allow=self.h323_codec_list("allow_codecs"),
+            video=self.h323_codec_list("video_codecs"),
+        )
 
     @property
     def features(self) -> Dict[str, Any]:
