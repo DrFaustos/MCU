@@ -570,8 +570,12 @@ class H323VideoBridge:
         ``bus.video_version(row["id"])`` (mcuclient/web_server.py:947), а
         исходящий видео-трек зрителя строится на id из ``subscribe`` — тех же
         id, что отдаёт ``/api/conference/join``
-        (mcuclient/webrtc_ingest.py:361-362, 622-644). Аудио-мост H.323 льёт в
-        ту же шину под тем же id (mcuclient/h323_audio_bridge.py:454-460).
+        (mcuclient/webrtc_ingest.py:361-362, 622-644). Публикатор веба делает
+        ровно так же: релей льёт под `publish_id = participant or sid`, то есть
+        под id участника конференции (mcuclient/webrtc_ingest.py:346-349).
+        Аудио-мост H.323 прецедентом не является — он вообще не в шине, у него
+        свой :class:`~mcuclient.audio_mixer.AudioMixer` с числовыми id участников
+        (mcuclient/h323_audio_bridge.py:286, 297).
 
         Префикс «h323v-» прятал кадр в канал, который панель не читает: живой
         стенд (scripts/testbed/h323_video_panel.py) показал вызов установлен,

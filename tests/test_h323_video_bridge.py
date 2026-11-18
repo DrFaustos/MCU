@@ -545,8 +545,8 @@ def test_channel_key_is_the_room_participant_id_verbatim():
     поймал ровно это: вызов стоит, кадр в шине, а ``video_frames`` у участника 0).
     Панель читает шину по id ряда: mcuclient/web_server.py:947
     (``bus.video_version(row["id"])``) и mcuclient/webrtc_ingest.py:361-362
-    (трек зрителя на id из ``subscribe``), аудио-мост H.323 льёт под тем же id
-    (mcuclient/h323_audio_bridge.py:454-460).
+    (трек зрителя на id из ``subscribe``); веб-релей публикуется тем же id
+    (mcuclient/webrtc_ingest.py:346-349).
     """
 
     class _Ep:
