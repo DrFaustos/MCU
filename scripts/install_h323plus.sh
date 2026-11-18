@@ -275,16 +275,74 @@ build_plugins() {
     # 2026-10-20: "G.722*" + "*" с video-плагинами = exit=120/139). Приоритет
     # задаёт штатный H323EndPoint::ReorderCapabilities() — с ним одно
     # AddAllCapabilities("*") и порядок не важен.
-    # Видео-плагины укладываются сюда, когда хост получит видео-канал.
-    local n=0 v=0 f
+    # Видео: укладываем РОВНО royalty-free набор (docs/CODECS.md, §5). Причина,
+    # по которой раньше не укладывалось ничего, отпала: OpenVideoChannel в
+    # tools/h323d реализован (Этап 4), а хост по-прежнему снимает H.239
+    # (RemoveCapability(e_ExtendVideo)) и всё видео по --no-video.
+    #
+    # Почему royalty-free, а не «все видеоплагины подряд»: патенты H.261 и H.263
+    # истекли по возрасту, обёртки плагинов — MPL 1.0, кодеры — VIC (Berkeley,
+    # 1994) и код Bellard под LGPL 2.1. H.264 здесь сознательно НЕТ: в v1_28_0
+    # это x264 (GPLv2) + libavcodec, то есть и патентный пул AVC, и GPL в нашем
+    # процессе. Легальный H.264 появляется только вместе с H.264-openh264 из
+    # 1.29.x (бинарник Cisco, роялти за свой бинарник платит Cisco) — см.
+    # docs/CODECS.md, §5.1 и §10, и он добавляется отдельным явным решением, а
+    # не по умолчанию.
+    #
+    # Состав по умолчанию — результат замера, а не список каталогов: в этом
+    # образе реально собирается только H.261-vic. У H.263-1998 есть Makefile.in
+    # (то есть configure его заводит), но компиляция падает на современном
+    # libavcodec: FF_INPUT_BUFFER_PADDING_SIZE, CodecID, CODEC_ID_H263P,
+    # rc_qsquish/rc_eq, lmin/lmax, CODEC_FLAG_* — это API FFmpeg 2.x (замер
+    # 2026-11-19 в контейнере, make -C video/H.263-1998). Каталог в списке надо
+    # вернуть ТОЛЬКО вместе с починкой плагина, иначе мы объявляем кодек,
+    # которого в поставке нет.
+    #
+    # MCU_H323_VIDEO_PLUGINS=none отключает укладку видео целиком — для сборок,
+    # где видеоканала быть не должно.
+    local video_plugins="${MCU_H323_VIDEO_PLUGINS:-H.261-vic}"
+    # Список можно через пробел или запятую: запятая нужна docker --build-arg
+    # (mcu-dev-h323.Dockerfile), где пробел внутри значения не сохранить.
+    video_plugins="${video_plugins//,/ }"
+    # Выключатель надо распознавать, а не ругаться на него: иначе сборка без
+    # видеоканала завершается предупреждением «плагин none не найден».
+    case "${video_plugins}" in
+        none|off|no|"") video_plugins="" ;;
+    esac
+    local n=0 v=0 vn=0 f want found
     while IFS= read -r f; do
         case "${f}" in
             *_audio_pwplugin.so) $SUDO cp -f "${f}" "${dst}/audio/" && n=$((n+1)) ;;
             *_video_pwplugin.so) v=$((v+1)) ;;
         esac
     done < <(find "${src}" -name '*_pwplugin.so' 2>/dev/null)
+    for want in ${video_plugins}; do
+        found=0
+        # Пересобираем запрошенный видео-плагин ЯВНО, по каталогу. Причина,
+        # из-за которой «make -k» тут не спасает: цель all в plugins/Makefile.in
+        # — ОДНА shell-рецептура `@set -e; $(foreach dir,...)`, и первый же
+        # упавший плагин (в 1.29.x это video/H.264, x264+FFmpeg-2.x API) рвёт
+        # её целиком: всё, что идёт в SUBDIRS после H.264, не собирается даже
+        # с -k (замер 2026-11-20: H.264-openh264 не собран, .so нет, при
+        # HAVE_H264_OPENH264=yes в Makefile). Аудио-хвост от того же хвоста
+        # SUBDIRS не страдает: порядок каталогов таков, что нужные аудио
+        # плагины стоят до H.264.
+        if [ -f "video/${want}/Makefile" ]; then
+            make -C "video/${want}" -j"${JOBS}" >/dev/null 2>&1 \
+                || log "  видео-плагин ${want}: явная пересборка упала (смотрели лог make)"
+        fi
+        while IFS= read -r f; do
+            $SUDO cp -f "${f}" "${dst}/video/" && { vn=$((vn+1)); found=$((found+1)); }
+        done < <(find "${src}/video/${want}" -name '*_video_pwplugin.so' 2>/dev/null)
+        if [ "${found}" -eq 0 ]; then
+            # Молчаливое отсутствие здесь = «картинки нет, а все думают, что
+            # кодек есть»: H.263-1998 как раз в таком состоянии.
+            log "ПРЕДУПРЕЖДЕНИЕ: видео-плагин ${want} не найден среди собранных,"
+            log "  в ${dst}/video он не окажется (H.245 TCS его не покажет)."
+        fi
+    done
     if [ "${v}" -gt 0 ]; then
-        log "video-плагинов собрано ${v}, НЕ уложено (намеренно, см. комментарий)"
+        log "video-плагинов собрано ${v}, уложено ${vn} (набор: ${video_plugins})"
     fi
 
     if [ "${n}" -eq 0 ]; then
