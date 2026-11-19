@@ -13,7 +13,13 @@
 # Сборка:
 #   podman build -t mcu-dev-base -f docker/mcu-dev-base.Dockerfile .
 #   (или docker build ...)
+#
+# APT_MIRROR=mirrors.edge.kernel.org — зеркало по умолчанию (archive.ubuntu.com)
+# в некоторых сетях деградирует до десятков КБ/с; зеркала на CDN (kernel.org,
+# steadyfast, osuosl) отдают те же файлы в разы быстрее. Пустое значение =
+# стандартное зеркало Ubuntu (как в CI).
 
+ARG APT_MIRROR=
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -21,6 +27,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUTF8=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PJSIP_VERSION=2.16
+
+# --- Зеркало apt (см. APT_MIRROR выше) --------------------------------------
+# Ubuntu 24.04 использует deb822-формат (ubuntu.sources) с двумя URI.
+# ARG после FROM обязателен: глобальный ARG в стадию не наследуется.
+ARG APT_MIRROR
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        sed -i \
+            -e "s|http://archive.ubuntu.com/ubuntu/|http://${APT_MIRROR}/ubuntu/|g" \
+            -e "s|http://security.ubuntu.com/ubuntu/|http://${APT_MIRROR}/ubuntu/|g" \
+            /etc/apt/sources.list.d/ubuntu.sources; \
+        grep -m2 URIs /etc/apt/sources.list.d/ubuntu.sources; \
+    fi
 
 # --- Системные зависимости ---------------------------------------------------
 # Базовый набор для сборки PJSIP ставит сам install_pjsua2.sh, но часть пакетов
