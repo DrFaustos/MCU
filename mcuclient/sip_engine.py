@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from . import version_string
 from .config import Config
 from .log import get_logger
 from .media_devices import (
@@ -655,7 +656,7 @@ class SipEngine:
         except Exception:  # noqa: BLE001
             pass
         if hasattr(ep_cfg.uaConfig, "userAgent"):
-            ep_cfg.uaConfig.userAgent = "MCUClient/0.1"
+            ep_cfg.uaConfig.userAgent = f"MCU/{version_string()}"
         # КРИТИЧНО: отключаем внутренние worker-потоки PJSUA2.
         # pjsua2-из-Python не переносит их: потоки PJSUA2 вызывают Python-колбэки
         # и приводят к нативному assertion/segfault в pjlib (часто через ~10 c

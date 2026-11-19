@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Точка входа MCU Client.
+"""Точка входа MCU.
 
 Примеры:
     python run.py --listen 0.0.0.0:5060 --display-name "MCU Room"
@@ -13,7 +13,7 @@
     python run.py --no-camera --no-mic         # старт с выключенными устройствами
 
 Логирование настраивается ДО тяжёлых импортов (pjsua2, PySide6), чтобы
-аварийное завершение на этапе импорта тоже попало в mcu-client.log.
+аварийное завершение на этапе импорта тоже попало в mcu.log.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import traceback
 
 #: Заметки о запуске, собранные ДО настройки логирования. Пишущих сюда
 #: веток две, и обе - про «приложение появилось и исчезло»: заметка
-#: ждёт, пока main() настроит логгер, и перельётся в mcu-client.log
+#: ждёт, пока main() настроит логгер, и перельётся в mcu.log
 #: (тот же приём, что _startup_notice в mcuclient/log.py).
 _EARLY_NOTICES: list[str] = []
 
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     # молчание, из-за которого их и собирали.
     _flush_early_notices(log)
     log.info("=" * 64)
-    log.info("MCU Client: старт. Лог-файл: %s", log_file_path())
+    log.info("MCU: старт. Лог-файл: %s", log_file_path())
     log.info("Аргументы: %s", argv if argv is not None else sys.argv[1:])
 
     try:
@@ -643,7 +643,7 @@ def _run_cli() -> int:
         )
         _exit_code = 1
     logging.getLogger("mcuclient.main").info(
-        "MCU Client: процесс завершается, код=%s, uptime=%.1f c",
+        "MCU: процесс завершается, код=%s, uptime=%.1f c",
         _exit_code, _time.time() - _start,
     )
     return _exit_code

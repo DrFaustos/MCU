@@ -27,7 +27,7 @@ def test_app_dir_frozen():
     saved_exe = mcu_log.sys.executable
     try:
         with tempfile.TemporaryDirectory() as d:
-            exe = pathlib.Path(d) / "MCU-Client.exe"
+            exe = pathlib.Path(d) / "MCU.exe"
             exe.write_text("x", encoding="utf-8")
             mcu_log.sys.frozen = True  # type: ignore[attr-defined]
             mcu_log.sys.executable = str(exe)

@@ -77,12 +77,14 @@ cython_debug/
 .DS_Store
 config.json
 
-# runtime log
+# runtime log (mcu-client.log — legacy имя до ренима MCU-Client → MCU)
 mcu-client.log
+mcu.log
 *.log
 
-# generated icon
+# generated icon (mcu-client.ico — legacy имя до ренима)
 packaging/mcu-client.ico
+packaging/mcu.ico
 
 # GitHub token (локально, не коммитить)
 .gh_token

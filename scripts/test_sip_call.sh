@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Дымовой тест SIP: запускает MCU Client (headless) и звонит ему
+# Дымовой тест SIP: запускает MCU (headless) и звонит ему
 # тестовым клиентом pjsua. Проверяет, что входящий вызов дошёл.
 #
 # Использование:  ./scripts/test_sip_call.sh
@@ -21,7 +21,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[test] запуск MCU Client на 0.0.0.0:${PORT}"
+echo "[test] запуск MCU на 0.0.0.0:${PORT}"
 "${PYTHON}" run.py --headless --listen "0.0.0.0:${PORT}" >"${SRV_LOG}" 2>&1 &
 SRV_PID=$!
 
@@ -54,7 +54,7 @@ sleep 20
 echo
 
 echo '================ РЕЗУЛЬТАТ ================'
-echo '--- MCU Client: входящий вызов? ---'
+echo '--- MCU: входящий вызов? ---'
 grep -iE 'call.incoming|входящ|call.confirmed|INVITE' "${SRV_LOG}" | tail -n 10 || echo '(нет записей о вызове)'
 echo
 echo '--- pjsua: статус звонка ---'

@@ -8,7 +8,7 @@ Python-приложение (System of Record) запускает Node.js-сай
 
 * один вход — приложение само поднимает SFU, если он включён в конфиге;
 * корректный останов (SIGTERM) при выходе, без висящих worker'ов;
-* единый лог: stdout/stderr сайдкара перенаправляются в ``mcu-client.log``;
+* единый лог: stdout/stderr сайдкара перенаправляются в ``mcu.log``;
 * проверка доступности через :class:`~mcuclient.mediasoup_client.MediasoupClient`.
 
 Модуль тестируется без Node: процесс и клиент внедряются (``popen``/``client``).

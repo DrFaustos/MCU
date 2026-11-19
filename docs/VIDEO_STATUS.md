@@ -46,4 +46,4 @@
 Связано с `mcuclient/ui.py` (`ParticipantTile.attach_native_video`,
 `resizeEvent`, `_rebuild_video_grid`, `_paint_vsource_frame`) и
 `mcuclient/video_preview_service.py`. Тесты видео-пути зелёные, поэтому
-причину искать в конкретном окружении/устройстве (см. `mcu-client.log`).
+причину искать в конкретном окружении/устройстве (см. `mcu.log`).
