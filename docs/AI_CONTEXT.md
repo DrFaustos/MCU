@@ -6,6 +6,16 @@
 
 Дата последнего обновления: **2026-10-07 (сессия 5)**, версия проекта **0.2.33**.
 
+> **Номенклатура (2026-11-19).** Продукт — **MCU**: сервер (комната,
+> микшеры, `/admin`) и терминал (набор/приём). Витрина под новым именем:
+> бинарь и артефакты `MCU-<variant>-debug[.exe]`, заголовок окна
+> «MCU <версия>-<variant>», лог `mcu.log`, desktop/иконка/бандлы. Движок
+> нарочно остался старым: python-пакет `mcuclient`, пространство имён
+> логгера, env `MCU_DEBUG`/`MCU_WEB_TOKEN`, каталоги данных (`MCU-Client`,
+> `mcu-client`, `~/.mcu-client`), flatpak id `ru.mcu.McuClient`, dev-образы
+> `mcu-dev*`, тома `mcu-h323-*`. Не «забыли переименовать» — см. запись
+> 2026-11-19 в журнале STATUS.md.
+
 ---
 
 ## 1. Куда смотреть в первую очередь
@@ -79,9 +89,9 @@
 ### 2.5. Сборка: debug-бинарники
 
 - `packaging/_debug_hook.py` — runtime-hook PyInstaller выставляет `MCU_DEBUG=1`.
-- `build.py --debug` → `MCU-Client-debug` (консольный, подробные логи).
+- `build.py --debug` → `MCU-h323-debug` (консольный, подробные логи).
 - CI (`.github/workflows/release.yml`) собирает debug для Windows
-  (`MCU-Client-debug.exe`) и Linux (`MCU-Client-debug`).
+  (`MCU-h323-debug.exe`) и Linux (`MCU-h323-debug`).
 
 ### 2.6. Локальный тайл «Вы» и единый источник видео
 
@@ -150,7 +160,7 @@
 * **ICE (STUN/TURN)**: `features.web.ice_servers/turn_user/turn_password`,
   `Config.web_ice_servers`, для интернета/NAT. По умолчанию — только LAN.
 * **Диагностика падений (Windows)**: `report_fatal()` в `mcuclient/log.py`
-  показывает MessageBox с текстом и путём к логу; `mcu-client.log` пишется
+  показывает MessageBox с текстом и путём к логу; `mcu.log` пишется
   рядом с `.exe`.
 * **Микширование аудио** (MCU-стиль): `AudioMixSession` (`webrtc_sfu.py`) —
   зритель получает ОДИН смешанный аудио-трек (голоса всех, кроме себя);
@@ -538,7 +548,7 @@ event loop` в `test_mixed_audio_track.py` (в 3.14 `asyncio.get_event_loop()`
 - **Wayland:** встраивание видео в тайл через X11 может не работать — есть фолбэк
   на отдельное окно (`restart_local_preview_window`).
 - **Windows-сборка:** при падении на старте появляется MessageBox с путём к
-  `mcu-client.log` (рядом с `.exe`); причина видна без консоли.
+  `mcu.log` (рядом с `.exe`); причина видна без консоли.
 - **WebRTC/SFU:** есть ingest, fan-out видео, **микширование аудио**,
   **запись web**, TURN/STUN, **нативная обвязка SIP↔WebRTC-моста**
   (`sip_bridge_service.py`, поднимается сама). Нет: **симулкаста**,

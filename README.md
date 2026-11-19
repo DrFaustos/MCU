@@ -1,12 +1,14 @@
-# MCU Client — кроссплатформенный ВКС-клиент (SIP / H.323)
+# MCU — кроссплатформенный ВКС (SIP / H.323)
 
 ![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 ![development: active](https://img.shields.io/badge/development-active-blue)
 ![releases: unstable](https://img.shields.io/badge/releases-unstable-red)
 
-Клиентское приложение для видеоконференцсвязи, реализующее функции MCU
-(Multipoint Control Unit) — проведение многосторонних ВКС-сессий с
-аппаратными и программными терминалами по протоколам SIP и H.323.
+Приложение **MCU** для видеоконференцсвязи, реализующее функции MCU
+(Multipoint Control Unit) — проведение многосторонних ВКС-сессий:
+**сервер** (комната, микшеры, web-админка `/admin`) и **терминал**
+(набор и приём вызовов) к аппаратным и программным ВКС по протоколам
+SIP и H.323.
 
 > [!WARNING]
 > **🚧 Проект в активной разработке (pre-alpha).** Приложение пока
@@ -19,6 +21,20 @@
 >
 > 🤖 **ИИ-агенту/новому разработчику:** начинать с
 > [docs/AI_CONTEXT.md](docs/AI_CONTEXT.md) — контекст, грабли, журнал изменений.
+
+> [!NOTE]
+> **Продукт называется MCU.** Режимы: **сервер** (комната, микшеры,
+> `/admin`) и **терминал** (набор и приём вызовов). Новое имя несёт
+> витрину: бинарник и релизные артефакты (`MCU-h323-debug.exe`), заголовок
+> окна («MCU 0.2.34-h323»), desktop/flatpak-пакеты, имя лога (`mcu.log`).
+> Внутренний python-пакет движка **остался `mcuclient`** намеренно: имя
+> живёт в путях импорта, пространстве имён логгера, переменных окружения
+> (`MCU_DEBUG`, `MCU_WEB_TOKEN`), раскладке PyInstaller-сборки и каталогах
+> пользовательских данных (`MCU-Client`, `mcu-client`, `~/.mcu-client`);
+> его переименование — риск для существующих конфигов, записей,
+> TLS-сертификатов и внешних скриптов при невидимой пользователю пользе.
+> Flatpak-идентификатор `ru.mcu.McuClient` сохранён по той же причине:
+> смена id ломает путь обновления уже установленных копий.
 
 ## Возможности
 
@@ -282,11 +298,11 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 ## Логи и диагностика
 
-Приложение пишет лог в файл **`mcu-client.log`**:
+Приложение пишет лог в файл **`mcu.log`**:
 
 * onefile-сборка (`.exe` / AppImage) — рядом с исполняемым файлом;
 * запуск из исходников — в текущей рабочей папке;
-* если рядом нет прав на запись — `~/.mcu-client/mcu-client.log`.
+* если рядом нет прав на запись — `~/.mcu-client/mcu.log`.
 
 Лог содержит строку запуска (платформа, версия Python, путь к логу), все
 ошибки и необработанные исключения с трассировкой, а также трассировку
@@ -294,7 +310,7 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 Это особенно важно на **Windows** в сборке `--windowed`: консоли нет, и если
 приложение закрывается сразу после запуска, причина останется в
-`mcu-client.log` рядом с `.exe`. Дополнительно при **критической ошибке на
+`mcu.log` рядом с `.exe`. Дополнительно при **критической ошибке на
 старте** (импорт, конфиг, движок) показывается нативное окно **MessageBox**
 с текстом и путём к лог-файлу — приложение не «исчезает молча»
 (`mcuclient.log.report_fatal`).
@@ -366,26 +382,26 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 **Установка (portable):**
 
-1. Скачайте из раздела *Releases* файлы `MCU-Client.exe` и `ffmpeg.exe`.
-2. Положите их в одну папку, например `C:\Program Files\MCU-Client\`.
-3. Запустите `MCU-Client.exe` (FFmpeg подхватывается рядом с .exe).
+1. Скачайте из раздела *Releases* файлы `MCU-h323-debug.exe` и `ffmpeg.exe`.
+2. Положите их в одну папку, например `C:\Program Files\MCU\`.
+3. Запустите `MCU-h323-debug.exe` (FFmpeg подхватывается рядом с .exe).
 
 Опционально — ярлык в меню «Пуск» (PowerShell):
 
-    $dir = "C:\Program Files\MCU-Client"
-    $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk")
-    $s.TargetPath = "$dir\MCU-Client.exe"
+    $dir = "C:\Program Files\MCU"
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU.lnk")
+    $s.TargetPath = "$dir\MCU-h323-debug.exe"
     $s.WorkingDirectory = $dir
     $s.Save()
 
 **Удаление (PowerShell):**
 
-    Remove-Item -Recurse -Force "C:\Program Files\MCU-Client"
-    Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk"
+    Remove-Item -Recurse -Force "C:\Program Files\MCU"
+    Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU.lnk"
     Remove-Item -Recurse -Force "$env:APPDATA\MCU-Client"   # config.json и записи (если создавались)
 
 Если приложение запускалось «портативно» из другой папки — просто удалите
-эту папку вместе с `MCU-Client.exe` и `ffmpeg.exe`.
+эту папку вместе с `MCU-h323-debug.exe` и `ffmpeg.exe`.
 
 ### Linux — AppImage (рекомендуется, универсально)
 
@@ -395,19 +411,19 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 **Установка:**
 
     # Скачать из Releases
-    wget https://github.com/DrFaustos/MCU/releases/latest/download/MCU-Client-x86_64.AppImage
-    chmod +x MCU-Client-x86_64.AppImage
+    wget https://github.com/DrFaustos/MCU/releases/latest/download/MCU-x86_64.AppImage
+    chmod +x MCU-x86_64.AppImage
 
     # Установить в ~/.local (ярлык + иконка)
-    ./packaging/install.sh MCU-Client-x86_64.AppImage
+    ./packaging/install.sh MCU-x86_64.AppImage
 
-После этого приложение доступно в меню как **MCU Client** и командой
-`MCU-Client.AppImage`.
+После этого приложение доступно в меню как **MCU** и командой
+`MCU.AppImage`.
 
 **Запуск без установки (портативно):**
 
-    chmod +x MCU-Client-x86_64.AppImage
-    ./MCU-Client-x86_64.AppImage --listen 0.0.0.0:5060
+    chmod +x MCU-x86_64.AppImage
+    ./MCU-x86_64.AppImage --listen 0.0.0.0:5060
 
 **Удаление:**
 
@@ -415,29 +431,29 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 Скрипт удаляет ровно то, что установил:
 
-    ~/.local/bin/MCU-Client.AppImage
-    ~/.local/share/applications/mcu-client.desktop
-    ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
+    ~/.local/bin/MCU.AppImage
+    ~/.local/share/applications/mcu.desktop
+    ~/.local/share/icons/hicolor/scalable/apps/mcu.svg
 
 Ручное удаление (если скрипта под рукой нет):
 
-    rm -f ~/.local/bin/MCU-Client.AppImage
-    rm -f ~/.local/share/applications/mcu-client.desktop
-    rm -f ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
+    rm -f ~/.local/bin/MCU.AppImage
+    rm -f ~/.local/share/applications/mcu.desktop
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/mcu.svg
 
 Если `fuse` недоступен (например, в контейнере), запускайте с
-`APPIMAGE_EXTRACT_AND_RUN=1 ./MCU-Client-x86_64.AppImage`.
+`APPIMAGE_EXTRACT_AND_RUN=1 ./MCU-x86_64.AppImage`.
 
 ### Linux — Flatpak
 
 **Сборка пакета** (нужны `flatpak`, `flatpak-builder`):
 
     flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
-    ./packaging/build_flatpak.sh          # -> dist/MCU-Client.flatpak
+    ./packaging/build_flatpak.sh          # -> dist/MCU.flatpak
 
 **Установка:**
 
-    flatpak install --user dist/MCU-Client.flatpak
+    flatpak install --user dist/MCU.flatpak
     flatpak run ru.mcu.McuClient
 
 **Удаление:**
@@ -472,7 +488,7 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 CI (`.github/workflows/release.yml`) при пуше тега `v*` собирает **только
 debug-бинарники** (консольные, `MCU_DEBUG=1`, расширенный лог):
-`MCU-Client-debug.exe` (Windows) и `MCU-Client-debug` (Linux) — и
+`MCU-h323-debug.exe` (Windows) и `MCU-h323-debug` (Linux) — и
 прикрепляет их к GitHub Release. Это сделано для этапа активной отладки:
 в консольной сборке видны логи сразу в окне. Флаг `PYTHONUTF8=1` в workflow
 устраняет ошибку `UnicodeEncodeError` на Windows-раннере (cp1252).

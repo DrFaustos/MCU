@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Тестовый SIP-клиент для дымовой проверки MCU Client.
+"""Тестовый SIP-клиент для дымовой проверки MCU.
 
 Звонит на sip:<room>@<host>:<port> и печатает состояние вызова.
-Использует тот же pjsua2, что и MCU Client.
+Использует тот же pjsua2, что и MCU.
 
     python scripts/test_sip_client.py 127.0.0.1 5060 mcu
 """

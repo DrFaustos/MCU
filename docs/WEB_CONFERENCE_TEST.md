@@ -49,7 +49,7 @@
 | `GET /api/conference` | список веб-участников (`kind=web`) и их `state`: `joined` — вошёл, живой медиа-сессии нет; `connected` — есть (aiortc-сессия или транспорт sidecar); `dropped` — сессия была и закрыта (обрыв/выдворение) |
 | `GET /api/webrtc/sessions` | активные сессии, их `role` и `participant` (`null` — анонимный offer) |
 | `GET /api/status` | поля `webrtc_available`, `webrtc_sessions`, `conference_participants` |
-| лог сервера (`mcu-client.log`) | строки `mcuclient.webrtc`, `mcuclient.sfu` |
+| лог сервера (`mcu.log`) | строки `mcuclient.webrtc`, `mcuclient.sfu` |
 
 Типичные причины «нет видео/звука»:
 
