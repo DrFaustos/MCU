@@ -57,7 +57,7 @@ jobs:
           echo "variant=$SUFFIX" >> "$GITHUB_OUTPUT"
           echo "OK: тег/запуск = $SUFFIX, исходники = $SRC, версия = $VER"
 
-      - name: Prune old releases of this line (keep 3 latest)
+      - name: Prune old releases of this line (keep 2 + this one = 3)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -67,9 +67,9 @@ jobs:
           curl -s -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             | jq -r --arg var "$VAR" 'if type == "array" then .[] | select((.tag_name | endswith("-" + $var)) or ($var == "sip" and (.tag_name | test("^v[0-9.]+$")))) | "\(.created_at) \(.id) \(.tag_name)" else empty end' \
-            | sort -r | tail -n +4 | while read -r _ ID TAG; do
+            | sort -r | tail -n +3 | while read -r _ ID TAG; do
               echo "prune: release $ID ($TAG)"
-              gh release delete "$ID" --yes --cleanup-tag=false || true; done
+              gh release delete "$TAG" --yes --cleanup-tag=false || true; done
 
 
   build-windows:
