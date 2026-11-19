@@ -14,7 +14,11 @@ mediasoup-комнате и наоборот. mediasoup принимает не-
 
 Почему PlainTransport, а не WebRtcTransport: у SIP-терминала нет DTLS/SRTP
 (в закрытом контуре шифрование выключено), а PlainTransport работает с
-«сырым» RTP. Кодек — **G.711** (PCMU), обязательный для любых терминалов.
+«сырым» RTP. Кодек по умолчанию — **Opus 48 кГц стерео** (широкополосный,
+совпадает с mediaCodecs роутера сайдкара); G.711 PCMU остаётся запасным
+вариантом: он обязателен терминалам, но сужает весь звонок до 8 кГц —
+именно то узкое горло, ради которого здесь Opus. Выбор кодируется
+параметром ``use_opus`` (:class:`MediasoupRtpBridge`).
 
 Модуль не требует ни pjsua2, ни Node: control-клиент и RTP-эндпоинт
 внедряются, поэтому тестируется фейками. Нативные точки подключения
@@ -28,7 +32,7 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
 from .log import get_logger
-from .rtp_audio import PT_PCMU, RtpUdpEndpoint
+from .rtp_audio import PT_OPUS, PT_PCMU, OpusCodec, RtpUdpEndpoint
 
 log = get_logger("ms-rtp")
 
@@ -37,8 +41,26 @@ class RtpBridgeError(RuntimeError):
     """Ошибка RTP-моста (нет PlainTransport, сайдкар недоступен)."""
 
 
-#: RTP-параметры для ``produce_plain`` в mediasoup. Совпадают с тем, что
-#: публикует наш RtpUdpEndpoint (G.711 PCMU, 8 кГц, моно).
+#: RTP-параметры для ``produce_plain`` в mediasoup — ПОЛНАЯ таблица кодеков,
+#: которые мост умеет говорить: G.711 PCMU (8 кГц моно, PT 0) и Opus
+#: (48 кГц стерео, динамический PT 111). В конкретный produce кладётся
+#: ТОЛЬКО тот кодек, который эндпоинт реально отправляет (см.
+#: :func:`plain_rtp_parameters`). Проверено по исходникам установленного
+#: сайдкара (mediasoup 3.19.3):
+#:
+#: * ``Transport.produce`` вызывает ``ortc.getProducerRtpParametersMapping``
+#:   (Transport.js:278), а тот гоняет ЧЕРЕЗ routerRtpCapabilities КАЖДЫЙ
+#:   codec списка и бросает UnsupportedError на первом несовпадении
+#:   (ortc.js:244) — значит PCMU и opus в одном produce с opus--only
+#:   роутером сайдкара (mediaCodecs в room.js) обрушивают весь produce,
+#:   и opus в том числе;
+#: * ``matchCodecs`` строг по каналам (ortc.js:555: ``aCodec.channels !==
+#:   bCodec.channels``) — роутер объявил opus channels:2, поэтому мост
+#:   производит opus строго стерео: моно этот роутер отверг бы.
+#:
+#: PT сверен с сайдкаром: plain produce уважает наш явный payloadType,
+#: а preferredPayloadType — поле capability (mediaCodecs роутера), не
+#: RtpCodecParameters: в produce его быть не должно.
 PLAIN_RTP_PARAMETERS: Dict[str, Any] = {
     "codecs": [
         {
@@ -47,11 +69,37 @@ PLAIN_RTP_PARAMETERS: Dict[str, Any] = {
             "clockRate": 8000,
             "channels": 1,
             "parameters": {},
-        }
+        },
+        {
+            "mimeType": "audio/opus",
+            "payloadType": PT_OPUS,
+            "clockRate": 48000,
+            "channels": 2,
+            "parameters": {},
+        },
     ],
     "encodings": [{"ssrc": 0x4D435501}],
     "rtcp": {},
 }
+
+
+def plain_rtp_parameters(use_opus: bool = False) -> Dict[str, Any]:
+    """RTP-параметры produce для выбранного кодека (копия, править можно).
+
+    Из таблицы :data:`PLAIN_RTP_PARAMETERS` оставляет только тот кодек,
+    который мост отправляет: worker сверяет КАЖДЫЙ codec produce c
+    mediaCodecs роутера и отвергает весь produce при первом несовпадении
+    (для сайдкара это означает: с PCMU в списке opus-produce не поднимется
+    вообще). Часовой клок, каналы и PT берутся из таблицы — тот же
+    источник, откуда :class:`RtpUdpEndpoint` берёт формат кадра.
+    """
+    codecs = PLAIN_RTP_PARAMETERS["codecs"]
+    chosen = codecs[1] if use_opus else codecs[0]
+    return {
+        "codecs": [dict(chosen)],
+        "encodings": [dict(e) for e in PLAIN_RTP_PARAMETERS["encodings"]],
+        "rtcp": dict(PLAIN_RTP_PARAMETERS["rtcp"]),
+    }
 
 
 def _is_unspecified(host: str) -> bool:
@@ -78,17 +126,33 @@ class MediasoupRtpBridge:
         (или фейк для тестов).
     :param room_id: id mediasoup-комнаты.
     :param on_sip_pcm: колбэк ``(pcm_s16le)`` — звук из mediasoup в SIP.
+        Формат не меняется от кодека: PCM s16le 8 кГц моно (см. заголовок
+        :mod:`mcuclient.rtp_audio`).
     :param endpoint: внедряемый ``RtpUdpEndpoint`` (для тестов); иначе
-        создаётся свой.
+        создаётся свой. ВНИМАНИЕ: внедряемый эндпоинт мост не переконфигурирует
+        — режим кодека для own-эндпоинта выбирает ``use_opus`` ниже, а чужой
+        эндпоинт несёт свой формат сам (иначе мост молча переиначивал бы
+        чужую конструкцию).
+    :param use_opus: None (по умолчанию) — авто: Opus, если libopus
+        доступна (широкополосный тракт; G.711 — узкое 8-килогерцевое горло);
+        True — Opus обязан быть (при недоступной библиотеке мост честно
+        откатится на PCMU с log.warning); False — всегда G.711 PCMU.
+    :param opus_payload_type: динамический PT Opus (по умолчанию 111).
     """
 
     def __init__(self, client: Any, room_id: str,
                  on_sip_pcm: Optional[Callable[[bytes], None]] = None,
-                 endpoint: Optional[RtpUdpEndpoint] = None) -> None:
+                 endpoint: Optional[RtpUdpEndpoint] = None, *,
+                 use_opus: Optional[bool] = None,
+                 opus_payload_type: int = PT_OPUS) -> None:
         self._client = client
         self._room_id = room_id
         self._on_sip_pcm = on_sip_pcm
         self._endpoint = endpoint
+        self._use_opus_request = use_opus
+        self._opus_payload_type = int(opus_payload_type)
+        #: Итог разрешения use_opus после start(): мост реально на Opus?
+        self._opus_mode = False
         self._transport_id: Optional[str] = None
         self._producer_id: Optional[str] = None
         self._started = False
@@ -114,17 +178,30 @@ class MediasoupRtpBridge:
     def local_port(self) -> Optional[int]:
         return self._endpoint.local_port if self._endpoint else None
 
+    @property
+    def codec(self) -> str:
+        """Кодек, который мост реально использует ('opus' / 'pcmu').
+
+        До :meth:`start` честный ответ — авто-оценка по доступности
+        libopus: панель не должна показывать «pcmu» там, где мост
+        поднимется на opus.
+        """
+        if not self._started and self._use_opus_request is None:
+            return "opus" if OpusCodec.available else "pcmu"
+        return "opus" if self._opus_mode else "pcmu"
+
     def stats(self) -> Dict[str, Any]:
         rx = self._endpoint.rx_packets if self._endpoint else 0
         tx = self._endpoint.tx_packets if self._endpoint else 0
         errs = self._endpoint.send_errors if self._endpoint else 0
         last = self._endpoint.last_send_error if self._endpoint else ""
         # sendErrors/lastSendError — чтобы «мост поднят, а звука нет»
-        # различалось в GET /api/status без чтения исходников.
+        # различалось в GET /api/status без чтения исходников. codec —
+        # чтобы широкополосный Opus и откат на 8-кГц PCMU различались там же.
         return {"started": self._started, "transport": self._transport_id,
                 "producer": self._producer_id, "localPort": self.local_port,
                 "rxPackets": rx, "txPackets": tx, "sendErrors": errs,
-                "lastSendError": last}
+                "lastSendError": last, "codec": self.codec}
 
     def _rtp_host(self, reported: str) -> Optional[str]:
         """Адрес, на который этому сайдкару реально слать RTP. ``None`` — отказа.
@@ -163,6 +240,31 @@ class MediasoupRtpBridge:
         return self._start_error
 
     # -- жизненный цикл ----------------------------------------------------
+    def _resolve_codec_mode(self) -> None:
+        """Превратить запрошенный use_opus в фактический режим моста.
+
+        Отказ от Opus обязан быть НАЗВАН в журнале: без строки здесь
+        широкополосный звонок схлопывался в узкополосный PCMU по вине
+        отсутствующей библиотеки, и оператор не мог отличить это от
+        «так и задумано».
+        """
+        available = OpusCodec.available
+        req = self._use_opus_request
+        if req is None:
+            self._opus_mode = bool(available)
+            if not available:
+                log.warning("RTP-мост: Opus авто-выбран, но недоступен (%s) "
+                            "— мост работает на G.711/PCMU, звук узкополосный",
+                            OpusCodec.unavailable_reason
+                            or "библиотека не загружена")
+        elif req and not available:
+            self._opus_mode = False
+            log.warning("RTP-мост: Opus запрошен, но недоступен (%s) — "
+                        "откат на G.711/PCMU", OpusCodec.unavailable_reason
+                        or "библиотека не загружена")
+        else:
+            self._opus_mode = bool(req)
+
     def start(self) -> bool:
         """Создать PlainTransport, завести RTP-эндпоинт и produce.
 
@@ -172,6 +274,7 @@ class MediasoupRtpBridge:
         if self._started:
             return True
         self._start_error = ""
+        self._resolve_codec_mode()
         try:
             tr = self._client.create_plain_transport(self._room_id, rtcp_mux=True)
         except Exception as exc:  # noqa: BLE001
@@ -194,8 +297,23 @@ class MediasoupRtpBridge:
                                  "announced_ip")
             return False
         if self._endpoint is None:
-            self._endpoint = RtpUdpEndpoint(local_port=0, payload_type=PT_PCMU,
-                                            on_pcm=self._on_sip_pcm)
+            try:
+                if self._opus_mode:
+                    self._endpoint = RtpUdpEndpoint(
+                        local_port=0, on_pcm=self._on_sip_pcm, use_opus=True,
+                        opus_payload_type=self._opus_payload_type)
+                else:
+                    self._endpoint = RtpUdpEndpoint(
+                        local_port=0, payload_type=PT_PCMU,
+                        on_pcm=self._on_sip_pcm)
+            except RuntimeError as exc:
+                # Библиотека доступна (иначе _resolve_codec_mode откатил бы
+                # режим), но энкодер не создан — честный отказ с именем
+                # причины, а не молчаливая подмена кодека на второй круг.
+                self._start_error = "RTP-эндпоинт не создан: %s" % exc
+                log.error("RTP-мост: RTP-эндпоинт не создан: %s", exc)
+                self._close_remote_transport()
+                return False
         if not self._endpoint.set_remote(ms_ip, ms_port):
             # Адрес не разрешился: получателя нет. Поднимать мост с
             # started: true — значит оставить оператора с тишиной в обоих
@@ -210,7 +328,8 @@ class MediasoupRtpBridge:
         self._endpoint.start()
         try:
             prod = self._client.produce_plain(
-                self._room_id, self._transport_id, "audio", dict(PLAIN_RTP_PARAMETERS),
+                self._room_id, self._transport_id, "audio",
+                plain_rtp_parameters(self._opus_mode),
                 app_data={"participant": "sip"})
             self._producer_id = str(prod.get("producerId"))
         except Exception as exc:  # noqa: BLE001
@@ -220,8 +339,8 @@ class MediasoupRtpBridge:
             return False
         self._started = True
         self._start_error = ""
-        log.info("RTP-мост поднят: transport=%s producer=%s -> mediasoup %s:%s",
-                 self._transport_id, self._producer_id, ms_ip, ms_port)
+        log.info("RTP-мост поднят: кодек=%s transport=%s producer=%s -> mediasoup %s:%s",
+                 self.codec, self._transport_id, self._producer_id, ms_ip, ms_port)
         return True
 
     def _close_remote_transport(self) -> None:
@@ -274,4 +393,5 @@ class MediasoupRtpBridge:
         return self._endpoint.send_pcm(pcm)
 
 
-__all__ = ["MediasoupRtpBridge", "RtpBridgeError", "PLAIN_RTP_PARAMETERS"]
+__all__ = ["MediasoupRtpBridge", "RtpBridgeError", "PLAIN_RTP_PARAMETERS",
+           "plain_rtp_parameters"]

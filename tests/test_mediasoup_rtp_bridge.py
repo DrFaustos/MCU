@@ -19,13 +19,18 @@ from _silent_handlers import (  # noqa: E402
     silent_handlers,
 )
 
+import pytest  # noqa: E402  (мини-раннер даёт стаб marks/skipif, pytest 9 — всё живьём)
+
 import mcuclient.mediasoup_rtp_bridge as bridge_module  # noqa: E402
 from mcuclient.mediasoup_rtp_bridge import (  # noqa: E402
     MediasoupRtpBridge,
     PLAIN_RTP_PARAMETERS,
+    plain_rtp_parameters,
 )
 from mcuclient.rtp_audio import (  # noqa: E402
+    PT_OPUS,
     PT_PCMU,
+    OpusCodec,
     RtpUdpEndpoint,
     parse_rtp,
 )
@@ -61,10 +66,19 @@ class _FakeClient:
         return {"ok": True, "transportId": "pt-1", "ip": self.ip, "port": self.port}
 
     def produce_plain(self, room_id, transport_id, kind, rtp, app_data=None):
-        self.calls.append(("produce_plain", kind, app_data))
+        # rtp пишется сюда: декларация кодека в produce — часть контракта
+        # (opus-режим обязан производить ровно один кодек audio/opus).
+        self.calls.append(("produce_plain", kind, rtp, app_data))
         if self.fail_produce:
             raise RuntimeError("produce failed")
         return {"ok": True, "producerId": "prod-sip"}
+
+    def produced_rtp(self):
+        """rtpParameters последнего produce_plain."""
+        for call in reversed(self.calls):
+            if isinstance(call, tuple) and call[0] == "produce_plain":
+                return call[2]
+        return None
 
     def close_transport(self, room_id, transport_id):
         # Реальный клиент умеет закрывать ОДИН транспорт (POST
@@ -98,10 +112,13 @@ def test_start_creates_plain_transport_and_producer():
 
 
 def test_push_sip_pcm_sends_rtp_to_transport():
+    # Побайтовый контракт G.711: use_opus=False принудительно — тест обязан
+    # проверять именно PCMU-тракт, а не то, что выберет авто-режим.
     c = _FakeClient()
-    br = MediasoupRtpBridge(c, "room-1")
+    br = MediasoupRtpBridge(c, "room-1", use_opus=False)
     try:
         assert br.start() is True
+        assert br.codec == "pcmu"
         assert br.push_sip_pcm(_pcm(3000)) is True
         pkt = c.recv_one()
         assert pkt is not None
@@ -113,10 +130,38 @@ def test_push_sip_pcm_sends_rtp_to_transport():
 
 
 def test_plain_rtp_parameters_shape():
-    codec = PLAIN_RTP_PARAMETERS["codecs"][0]
-    assert codec["mimeType"] == "audio/PCMU"
-    assert codec["payloadType"] == PT_PCMU
-    assert codec["clockRate"] == 8000
+    # Полная таблица: codecs[0] — G.711 PCMU, codecs[1] — Opus 48k стерео.
+    pcmu = PLAIN_RTP_PARAMETERS["codecs"][0]
+    assert pcmu["mimeType"] == "audio/PCMU"
+    assert pcmu["payloadType"] == PT_PCMU
+    assert pcmu["clockRate"] == 8000
+    assert pcmu["channels"] == 1
+    opus = PLAIN_RTP_PARAMETERS["codecs"][1]
+    assert opus["mimeType"] == "audio/opus"
+    assert opus["payloadType"] == PT_OPUS
+    assert opus["clockRate"] == 48000
+    # channels: 2 — не каприз: mediasoup matchCodecs сверяет каналы строго
+    # (node/lib/ortc.js), роутер сайдкара объявил opus 2ch — моно-производ
+    # был бы отвергнут целиком.
+    assert opus["channels"] == 2
+    # preferredPayloadType — поле capability роутера, в produce его быть не
+    # должно (worker отвергает неизвестные поля RtpCodecParameters).
+    assert "preferredPayloadType" not in opus
+
+
+def test_plain_rtp_parameters_narrows_to_one_codec():
+    # produce обязан нести РОВНО один кодек: сайдкар-роутер declares opus,
+    # лишний PCMU в списке обрушил бы opus-produce целиком (ortc.js:244).
+    for use_opus, mime, pt in ((False, "audio/PCMU", PT_PCMU),
+                               (True, "audio/opus", PT_OPUS)):
+        params = plain_rtp_parameters(use_opus)
+        assert [c["mimeType"] for c in params["codecs"]] == [mime], use_opus
+        assert params["codecs"][0]["payloadType"] == pt
+        assert params["encodings"] == PLAIN_RTP_PARAMETERS["encodings"]
+        # копия, а не алиас таблицы: вызывающий код не правит общий кэш.
+        params["codecs"][0]["payloadType"] = 99
+        assert PLAIN_RTP_PARAMETERS["codecs"][0]["payloadType"] == PT_PCMU
+        assert PLAIN_RTP_PARAMETERS["codecs"][1]["payloadType"] == PT_OPUS
 
 
 def test_start_fails_without_transport():
@@ -335,7 +380,9 @@ def test_wildcard_from_sidecar_becomes_control_host():
     c.ip = "0.0.0.0"
     c.base_url = "http://192.168.0.42:4443"
     ep = _RecordingEndpoint()
-    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    # use_opus=False: тест про адрес; предупреждение про недоступный Opus
+    # (хост без libopus) не должно ломать ровно-одно-предупреждение ниже.
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep, use_opus=False)
     try:
         assert br.start() is True
         assert ep.remote == ("192.168.0.42", c.port), ep.remote
@@ -565,4 +612,123 @@ def test_repeated_stop_does_not_close_the_same_transport_twice():
         br.stop()
         assert c.closed == ["pt-1"], c.closed
     finally:
+        c.close()
+
+
+# --- Opus в мосте -----------------------------------------------------------
+#
+# Режим без библиотеки проверяется фейковой недоступностью (monkeypatch),
+# живой тракт — только когда libopus действительно есть: честный roundtrip
+# с подставной библиотекой бессмысленен (он проверяет сам себя), а врать
+# о «широкополосии» на хосте без Opus — тем более.
+
+_OPUS_READY = pytest.mark.skipif(
+    not OpusCodec.available,
+    reason="libopus недоступна (%s): живой Opus-тракт не проверить"
+    % OpusCodec.unavailable_reason)
+
+
+def test_opus_requested_but_unavailable_falls_back_naming_reason(monkeypatch):
+    # Откат обязан быть названным: иначе широкополосный звонок схлопнется
+    # в 8-кГц PCMU незаметно для оператора.
+    monkeypatch.setattr(OpusCodec, "available", False)
+    monkeypatch.setattr(OpusCodec, "unavailable_reason", "юнит-тест: либы нет")
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=_RecordingEndpoint(),
+                            use_opus=True)
+    try:
+        assert br.start() is True, "откат — не отказ моста"
+        assert br.codec == "pcmu"
+        assert br.stats()["codec"] == "pcmu"
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"]
+        assert any("Opus" in m and "юнит-тест: либы нет" in m for m in warns), warns
+        codecs = c.produced_rtp()["codecs"]
+        assert [x["mimeType"] for x in codecs] == ["audio/PCMU"], \
+            "на PCMU-откате produce не имеет права декларировать opus"
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+def test_auto_mode_without_libopus_is_pcmu_and_warns_once(monkeypatch):
+    # Авто (web_server никого не просит): без библиотеки — PCMU, но вслух.
+    monkeypatch.setattr(OpusCodec, "available", False)
+    monkeypatch.setattr(OpusCodec, "unavailable_reason", "юнит-тест: либы нет")
+    handler, logger, old = _watch("mcuclient.ms-rtp")
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.codec == "pcmu", "авто без библиотеки не врет про opus"
+        assert br.start() is True
+        warns = [m for lvl, m in handler.records if lvl == "WARNING"
+                 and "Opus" in m]
+        assert len(warns) == 1, warns
+    finally:
+        br.stop()
+        c.close()
+        _unwatch(handler, logger, old)
+
+
+@_OPUS_READY
+def test_auto_mode_prefers_opus_when_available():
+    c = _FakeClient()
+    br = MediasoupRtpBridge(c, "room-1", endpoint=_RecordingEndpoint())
+    try:
+        assert br.start() is True
+        assert br.codec == "opus", "доступный Opus — и есть новый тракт"
+        codecs = c.produced_rtp()["codecs"]
+        assert [x["mimeType"] for x in codecs] == ["audio/opus"]
+    finally:
+        br.stop()
+        c.close()
+
+
+@_OPUS_READY
+def test_opus_mode_produces_and_receives_opus_over_udp():
+    # Полный тракт моста живьём: push (PCM 16k) -> Opus PT 111 -> сокет
+    # «сайдкара»; обратно — Opus-пакет -> on_sip_pcm уже 8-кГц моно.
+    import math
+    import time
+
+    c = _FakeClient()
+    got: list = []
+    br = MediasoupRtpBridge(c, "room-1", on_sip_pcm=got.append,
+                            use_opus=True)
+    codec = OpusCodec()
+    try:
+        assert br.start() is True
+        assert br.stats()["codec"] == "opus"
+        assert br.push_sip_pcm(_pcm(3000)) is True  # 160 отсчётов 16 кГц
+        pkt = c.recv_one()
+        assert pkt.payload_type == PT_OPUS
+        # 160 отсчётов 16 кГц = 10 мс = 480 кадров 48-кГц часов.
+        first_ts = pkt.timestamp
+        assert br.push_sip_pcm(_pcm(3000)) is True
+        pkt2 = c.recv_one()
+        assert pkt2.timestamp - first_ts == 480, \
+            "шаг метки времени считается в 48-кГц часах Opus"
+        pcm_back = codec.decode(pkt.payload)
+        assert pcm_back is not None and len(pcm_back) == 480 * 2 * 2
+
+        # Обратный канал: Opus из mediasoup -> колбэк 8-кГц моно (320 байт
+        # на 20-мс кадр), G.711-кодек эндпоинту не нужен.
+        import time
+
+        in16k = struct.pack(
+            "<320h", *[int(9000 * math.sin(2 * math.pi * 440 * i / 16000))
+                       for i in range(320)])
+        sender = RtpUdpEndpoint(local_port=0, use_opus=True)
+        sender.set_remote("127.0.0.1", br.local_port)
+        sender.send_pcm(in16k)
+        deadline = time.time() + 3
+        while not got and time.time() < deadline:
+            time.sleep(0.05)
+        sender.stop()
+        assert got, "Opus из mediasoup не дошёл до on_sip_pcm"
+        assert len(got[0]) == 320, "колбэк обязан остаться 8-кГц моно"
+    finally:
+        codec.close()
+        br.stop()
         c.close()

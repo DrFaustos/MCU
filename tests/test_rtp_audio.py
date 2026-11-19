@@ -416,9 +416,11 @@ def test_rtp_audio_docstrings_are_not_spliced():
 def test_rtp_audio_has_no_silent_except_handlers():
     # Тот же класс, что и вся правка: молчаливый except в RTP
     # неотличим от «всё работает» — а звук в звонке проверяют
-    # ушами, когда журнал уже не читают.
+    # ушами, когда журнал уже не читают. Сканируется ВЕСЬ модуль:
+    # с приходом OpusCodec риск сместился в ctypes-обвязку, где
+    # «не загрузилось» легче всего проглотить.
     assert scan_is_not_a_placeholder(), "общий сканер молчит сам"
-    silent = silent_handlers(inspect.getsource(RtpUdpEndpoint))
+    silent = silent_handlers(inspect.getsource(rtp_audio_module))
     assert not silent, (
         "mcuclient/rtp_audio.py: except без сообщения об отказе — "
         "назовите причину (log.warning/debug), строки: " + str(silent))

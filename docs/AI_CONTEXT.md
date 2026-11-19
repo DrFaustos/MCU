@@ -689,8 +689,8 @@ AST'ом и считает молчаливым любой `ExceptHandler` бе�
   `server ⊂ client` и молчала на «маршрут без вызова» — поймано своим же кейсом.
 
 Регрессии: `tests/test_mediasoup_retry.py` (6 кейсов), `tests/test_sidecar_api_paths.py`
-(4 кейса), `tests/test_mediasoup_rtp_bridge.py` (20 кейсов, +3 на закрытие
-транспорта), `tests/test_mediasoup_endpoints.py` (6 кейсов, +1 на текст 503).
+(4 кейса), `tests/test_mediasoup_rtp_bridge.py` (25 кейсов, +3 на закрытие
+транспорта, +5 на Opus-режим моста), `tests/test_mediasoup_endpoints.py` (6 кейсов, +1 на текст 503).
 
 ### 3.7. Временная диагностика
 Подробное логирование событий — временное (по просьбе владельца), накладные

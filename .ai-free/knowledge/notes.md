@@ -964,7 +964,7 @@ shellcheck в нём не вызывается (на машине прогона
     тривиально проходит один кейс.
   - **Страж.** tests/test_mediasoup_rtp_wiring.py (6 кейсов, было 4) +
     test_start_error_names_every_refusal_reason в
-    tests/test_mediasoup_rtp_bridge.py (20 кейсов; 17 на тот день): 4 пути
+    tests/test_mediasoup_rtp_bridge.py (25 кейсов; 17 на тот день): 4 пути
     отказа названы, успех снимает причину. RED на 4725cae: ровно эти 2 кейса.
     (+3 кейса 2026-10-10 — закрытие транспорта на сайдкаре, см. запись ниже.)
   - **Проверено** (на изолированном worktree от HEAD только со своими
