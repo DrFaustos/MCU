@@ -247,7 +247,9 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
     # меняла dtype на одном имени, и mypy в среде с numpy (py.typed) краснел
     # на этих двух строках. Значения не меняются — проверено побайтовым
     # слепком аудио-пути (resample-кейсы 8к/48к, моно/стерео, границами).
-    data: Any = pcm_i16
+    # Аннотация `Any` стоит на первом `data` (pure-Python ветка); повторять
+    # её здесь нельзя — mypy зацикливает это как redefinition.
+    data = pcm_i16
     if channels > 1 and len(pcm_i16) % channels == 0:
         data = pcm_i16.reshape(-1, channels).mean(axis=1)
     if rate != target_rate and len(data) > 1:

@@ -399,7 +399,10 @@ def test_concrete_ip_from_sidecar_untouched():
     handler, logger, old = _watch("mcuclient.ms-rtp")
     c = _FakeClient()
     ep = _RecordingEndpoint()
-    br = MediasoupRtpBridge(c, "room-1", endpoint=ep)
+    # use_opus=False: тест про адрес; на хосте без libopus авто-режим честно
+    # предупреждает про откат на G.711 — это не ложная тревога про адрес, но
+    # «не было вообще предупреждений» на таком хосте не выполняется (CI).
+    br = MediasoupRtpBridge(c, "room-1", endpoint=ep, use_opus=False)
     try:
         assert br.start() is True
         assert ep.remote == ("127.0.0.1", c.port), ep.remote

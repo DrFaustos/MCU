@@ -515,7 +515,9 @@ class RtpUdpEndpoint:
                 raise ValueError("Opus не может занимать статический PT %d — "
                                  "0 и 8 закреплены за G.711 (RFC 3551)" % pt)
             self.payload_type = pt
-            self._rx_types = (PT_PCMU, PT_PCMA, pt)
+            # Аннотация обязательна: без неё mypy выводит кортеж из 3
+            # элементов из первой ветки и краснеет на 2-элементный во второй.
+            self._rx_types: Tuple[int, ...] = (PT_PCMU, PT_PCMA, pt)
         else:
             self.payload_type = int(payload_type)
             self._rx_types = (PT_PCMU, PT_PCMA)
@@ -658,7 +660,12 @@ class RtpUdpEndpoint:
                 # кодек задан. Декодируется в 48 кГц стерео и понижается до
                 # 8 кГц моно — колбэк on_pcm обязан отдавать тот же формат,
                 # что и G.711-ветка (web_server декларирует миксу 8000/1).
-                pcm48 = self._opus.decode(pkt.payload)
+                opus = self._opus
+                if opus is None:  # pragma: no cover — логически недостижимо
+                    # Динамический PT нет в _rx_types без кодека; страж,
+                    # чтобы типизатор (и читатель) видели то же, что логика.
+                    continue
+                pcm48 = opus.decode(pkt.payload)
                 if pcm48 is None:
                     # Причина названа кодеком (один раз на причину, не на
                     # пакет); здесь пакет просто не уходит в аудио.
@@ -690,8 +697,11 @@ class RtpUdpEndpoint:
             payload = pcm16_to_ulaw(pcm) if self.payload_type == PT_PCMU else _pcm16_to_alaw(pcm)
             ts_step = len(payload)  # G.711: 8 кГц, байт == отсчёт
         else:
-            payload = self._opus.encode(pcm16_16k_mono_to_48k_stereo(pcm))
-            if payload is None:
+            # encode возвращает Optional[bytes]; в payload кладём только
+            # успех (отказ — отдельная дорожка: last_send_error + False),
+            # поэтому тип payload остаётся bytes в обеих ветках.
+            encoded = self._opus.encode(pcm16_16k_mono_to_48k_stereo(pcm))
+            if encoded is None:
                 # Отказ назван кодеком один раз на причину; здесь он
                 # дополнительно доезжает до last_send_error — панель
                 # обязана отличать «Opus сломался» от «сеть легла».
@@ -703,6 +713,7 @@ class RtpUdpEndpoint:
                     log.warning("RTP: звук не уходит на %s:%s (%s)",
                                 host, port, reason)
                 return False
+            payload = encoded
             # Часы RTP для Opus — 48 кГц: 3 отсчёта на каждый 16-килогерцевый.
             ts_step = (len(pcm) // 2) * 3
         self._seq = (self._seq + 1) & 0xFFFF
