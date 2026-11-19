@@ -394,7 +394,7 @@ def test_their_stdout_template_carries_the_boundary_case():
     parsed = stand.parse_their_stdout(stand.THEIR_STDOUT_TEMPLATE)
     sounds = parsed["receive"]["receive_sound"]
     assert any("G.722.1" in item for item in sounds), sounds
-    assert any(family := item.startswith("G.722 ") for item in sounds), sounds
+    assert any(item.startswith("G.722 ") for item in sounds), sounds
     siren = [i for i in sounds if "G.722.1" in i][0].split()[0]
     assert not stand.family_matches(siren, ["G.722"])
 
@@ -659,6 +659,21 @@ def test_unmeasurable_checks_are_listed_separately_from_red_ones():
     src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
         encoding="utf-8")
     assert "не измерялось: " in src
+
+
+def test_stand_and_its_tests_have_no_cjk():
+    """Русские комментарии в стенде набраны по-русски: иероглиф = промах раскладки.
+
+    Doc-замок test_knowledge_and_docs_have_no_cjk сюда не смотрит — это код, а не
+    документация. Дефект тот же и возникает тем же путём: смешанное
+    русско-английское предложение, потерянная раскладка в середине. Диапазон
+    экранирован, чтобы сам тест не считался нарушением.
+    """
+    for rel in ("scripts/testbed/h323_openmcu_interop.py",
+                "tests/test_h323_openmcu_interop.py"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        bad = sorted({c for c in text if "\u4e00" <= c <= "\u9fff"})
+        assert not bad, f"{rel}: CJK-иероглифы {bad} — это раскладка, а не текст"
 
 
 # --- tshark как арбитр --------------------------------------------------------
