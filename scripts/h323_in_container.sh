@@ -31,6 +31,8 @@
 #   MCU_H323_IMAGE   имя образа (по умолчанию mcu-dev-h323:latest)
 #   MCU_H323_ENGINE  podman|docker (по умолчанию что первый найдётся)
 #   MCU_H323_RUN_ARGS доп. аргументы run, по словам (--cap-add NET_ADMIN ...)
+#   MCU_H323_NET     именованная podman-сеть (--network=...): для интеропа с
+#                    внешним эталонным MCU по DNS-имени (см. docker/openmcu-ru/)
 #   MCU_H323_BUILD_ARGS доп. аргументы build, по словам; сборка надстроек,
 #                    напр. v129 (H.264, см. docker/mcu-dev-h323.Dockerfile):
 #                      MCU_H323_IMAGE=mcu-dev-h323:v129 \
@@ -104,9 +106,22 @@ if [ -n "${MCU_H323_RUN_ARGS:-}" ]; then
     RUN_ARGS=(${MCU_H323_RUN_ARGS})
 fi
 
+# MCU_H323_NET — именованная podman-сеть с DNS (напр. mcu-lab): контейнер
+# стартует в ней, и адрес внешнего эталонного MCU задаётся именем без IP
+# (--remote-h323 openmcu-ru:1720; эталонный сервис — тот же член сети, см.
+# docker/openmcu-ru/README.md). Замечание: rootless pasta не терпит ВТОРОЙ
+# pasta-интерфейс (живой замер: «"pasta" is not supported: invalid network
+# mode» на network connect), поэтому сеть подаётся ПЕРВИЧНОЙ через --network;
+# проброс портов от первичной сети работает так же.
+NETWORK_ARGS=()
+if [ -n "${MCU_H323_NET:-}" ]; then
+    NETWORK_ARGS=(--network="${MCU_H323_NET}")
+fi
+
 run() { # run <bash-строка> — выполнить в контейнере с репо в /work
     "${ENGINE}" run --rm -i \
         -v "${MOUNT}" -w /work \
+        "${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"}" \
         "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}" \
         "${ENV_ARGS[@]}" \
         "${IMAGE}" bash -c "$1"
@@ -128,6 +143,7 @@ run_isolated_h323d() {
     "${ENGINE}" run --rm -i \
         -v "${MOUNT}" -w /work \
         "${H323D_VOL_ARG[@]}" \
+        "${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"}" \
         "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}" \
         "${ENV_ARGS[@]}" \
         "${IMAGE}" bash -c "$1"
@@ -224,6 +240,7 @@ case "${1:-}" in
         "${ENGINE}" run --rm -i \
             -v "${MOUNT}" -w /work \
             "${H323D_VOL_ARG[@]}" \
+            "${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"}" \
             "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}" \
             "${ENV_ARGS[@]}" \
             "${IMAGE}" "$@"

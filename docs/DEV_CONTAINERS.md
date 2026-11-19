@@ -173,3 +173,71 @@ MCU_H323_BUILD_ARGS="--build-arg PTLIB_VERSION=2.10.9.8 \
 Знания о версиях стека (теги форков с подчёркиваниями `v2_10_9_6`/`v1_28_0`,
 тихий fallback на master, `ENV PREFIX`, ломающий сборку H323Plus) —
 в `docs/H323_STATUS.md` и `docs/AI_CONTEXT.md`.
+
+---
+
+## 8. Эталонный OpenMCU-ru (интероп-фундамент ADR-0002)
+
+Для проверки «картинка уходит в OpenMCU и возвращается» поднят живой
+OpenMCU-ru **не на нашем стеке**: в дереве v3.48.0 свои копии PTLib/H323Plus,
+поэтому согласование кодеков идёт независимо от `/usr/local` образа
+`mcu-dev-h323` — интероп не может «самоподтвердиться». Образ:
+`docker/openmcu-ru.Dockerfile` (источник willamowius/openmcu, тег **v3.48.0**,
+пин `2b93508`; почему именно тег, а не master — в шапке Dockerfile: на master
+отбор исходящего видео по подстроке имени, наш `H.261-CIF{sw}` туда не
+проходит). Все одиннадцать граблей сборки (GCC11/make-4.3/FFmpeg 4.4, включая
+смертельный `PString::Mid` UB без `-fwrapv`) разобраны в комментариях там же.
+
+```bash
+# сборка (контекст не нужен; долго — бандлины, ~15 мин)
+podman build -f docker/openmcu-ru.Dockerfile \
+    -t localhost/openmcu-ru:v3.48.0 "$(mktemp -d)"
+
+# один раз: общая сеть стенда (DNS-имена вместо IP)
+podman network create mcu-lab
+
+# долгоживущий сервис (НЕ --rm): NET_RAW под tshark на плече стенда,
+# 1720/tcp+udp — H.323, 1420 — веб-админка с хоста; mcu-lab ПЕРВИЧНОЙ сетью
+# (вторым интерфейсом pasta под rootless не втыкается — «invalid network
+# mode», живой замер), наш стенд ходит к нему: MCU_H323_NET=mcu-lab +
+# --remote-h323 openmcu-ru:1720
+podman run -d --name openmcu-ru --network mcu-lab --cap-add NET_RAW \
+    -p 1720:1720/tcp -p 1720:1720/udp -p 1420:1420 \
+    -v "$PWD/docker/openmcu-ru/openmcu.ini:/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini:z" \
+    localhost/openmcu-ru:v3.48.0
+```
+
+Эталонный `docker/openmcu-ru/openmcu.ini` — самосгенерированный на теге дамп
+(первый запуск без монтированного файла, остановка SIGTERM — ini пишется при
+штатном завершении) плюс дописанная секция `[Parameters]\nTrace level = 2`:
+без неё `trace.txt` остаётся на уровне по умолчанию и «Codecs (in preference
+order)»/`OpenLogicalChannel` в нём не появятся (флаг `-v` уровень не задаёт —
+только ini; проверено живым прогоном). Правки значений в ini — только
+заменой существующей строки: в PTLib 2.0.x дубль ключа в секции склеивается
+со старым значением переводом строки, а не перезаписывает.
+
+Снятие среза за прогон (после вызова со стенда):
+
+```bash
+mkdir -p tmp/openmcu
+podman cp openmcu-ru:/opt/openmcu-ru/share/openmcu-ru/log/trace.txt \
+    tmp/openmcu/trace_<профиль>.txt
+podman logs --since <старт-прогона> openmcu-ru > tmp/openmcu/stdout_<профиль>.txt
+```
+
+`stdout` у OpenMCU-ru — не только лог: там их собственная таблица возможностей
+(`[RECEIVE_SOUND]= ...`, `[RECEIVE_VIDEO]= ...`) — самый дешёвый срез «что они
+объявили» и индикатор «плагин лёг / не лёг» (в образе лежат 8 из 11: H.261-vic,
+G.722/G.726/G.729/iLBC/Speex/SILK/OPUS; H.263-1998/H.264/VP8/G.7231 не
+собираются из-за старого FFmpeg API и осознанно пропущены — замеры на H.261).
+Трейс — файл, не stdout: `/opt/openmcu-ru/share/openmcu-ru/log/trace.txt`
+(путь зашит в бинарь как `SERVER_LOGS`; конфиг — `SYS_CONFIG_DIR`, тот же
+`share/openmcu-ru/config`; у 4.x-веток раскладка другая — не переносить).
+
+Комната: вызов на `имя_комнаты@адрес` (по E.164/alias), без имени — комната по
+умолчанию (`[Parameters]/Default room`, на дефолтах `room101`). Статус-страницы
+(проверены curl на собранном образе): `/Status` — конференции/участники
+(meta-refresh 30 c), `/Select`, `/Invite`, `/Parameters`,
+`/ReceiveSoundCodecs`/`/TransmitVideoCodecs` (корень `/` — оглавление).
+Веб-админка правит тот же ini и требует перезапуска контейнера — таблицы
+конференций строятся на старте.
