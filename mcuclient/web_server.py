@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +38,6 @@ from urllib.parse import parse_qs, quote, urlparse
 from .log import get_logger
 from .video_stream import FrameHub
 from .webrtc_ingest import (
-    WEBRTC_AVAILABLE,
     WebRTCError,
     WebRTCManager,
     make_frame_hub_sink,
@@ -2236,7 +2234,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._handle_api_get(path)
             return
-        if path == "/admin":
+        if path in ("/admin", "/admin/"):
+            # Косой черта на конце — норма для curl и ручного ввода:
+            # /admin/ обязан открыть то же, а не выдать 404 статики.
+            # Серверный HTML несёт данные — гейтится как API, а не как
+            # статика индекса (индекс — пустой каркас, страница — сводка).
             # Серверный HTML несёт данные — гейтится как API, а не как
             # статика индекса (индекс — пустой каркас, страница — сводка).
             if not self._authorized():
@@ -2795,7 +2797,10 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
 
 
 # TLS-хелперы — в отдельном модуле (единый источник, тестируется без сокетов).
-from .tls_utils import ensure_self_signed as _ensure_self_signed, make_ssl_context as _make_ssl_ctx
+from .tls_utils import (  # noqa: E402  # хвост осознанный: единый источник TLS-кода, а не забытый импорт
+    ensure_self_signed as _ensure_self_signed,
+    make_ssl_context as _make_ssl_ctx,
+)
 
 
 def ensure_self_signed_cert(certfile=None, keyfile=None, host="localhost"):

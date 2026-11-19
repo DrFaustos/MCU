@@ -280,6 +280,16 @@ def test_admin_page_gated_by_token():
         srv.stop()
 
 
+def test_admin_page_trailing_slash_is_the_same_page():
+    """/admin/ — норма для curl и ручного ввода, 404 статики тут неуместен."""
+    srv = _server(_FakeEndpoint(), room=_terminals_room())
+    try:
+        code, html = _get(_url(srv, "/admin/"))
+        assert code == 200 and "MCU-L" in html
+    finally:
+        srv.stop()
+
+
 # --- GET /api/admin/terminals: JSON для машин ---------------------------
 
 def test_terminals_json_schema_is_stable():
