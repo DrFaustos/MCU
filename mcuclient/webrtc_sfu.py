@@ -196,29 +196,48 @@ def _resample_mono(pcm: bytes, rate: int, channels: int, target_rate: int) -> by
         import array
         arr = array.array("h")
         arr.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+        # Среднее каналов остаётся дробным, квантуем ОДИН раз на выходе.
+        # Векторная ветка делает `mean(axis=1)` -> float64 и интерполирует по
+        # ДРОБНОМУ среднему; если квантовать его здесь, две реализации
+        # расходятся уже на интерполяции, а не только на округлении
+        # (замерено 2026-10-10: стерео 48->16 кГц — 28 выборок из 53).
+        # `data` — то, что усредняется/интерполируется: array("h") для моно или
+        # list[float] после сведения каналов. Отдельное имя, а не `arr`:
+        # мypy (обе среды) краснеет на присваивании list[float] в array[int],
+        # тот же dtype-конфликт на одном имени, что убран в векторной ветке.
+        data: Any = arr
+        mono_float = False
         if channels > 1 and len(arr) % channels == 0:
-            mono = array.array("h", [0] * (len(arr) // channels))
+            mono = [0.0] * (len(arr) // channels)
             for i in range(len(mono)):
                 acc = 0
                 for c in range(channels):
                     acc += arr[i * channels + c]
-                mono[i] = acc // channels
-            arr = mono
-        if rate != target_rate and len(arr) > 1:
-            n = int(round(len(arr) * float(target_rate) / float(rate)))
+                mono[i] = acc / float(channels)
+            data = mono
+            mono_float = True
+        if rate != target_rate and len(data) > 1:
+            n = int(round(len(data) * float(target_rate) / float(rate)))
             if n <= 0:
                 return b""
             out = array.array("h", [0] * n)
-            step = (len(arr) - 1) / float(n - 1) if n > 1 else 0.0
+            step = (len(data) - 1) / float(n - 1) if n > 1 else 0.0
             for i in range(n):
                 pos = i * step
                 i0 = int(pos)
-                i1 = min(i0 + 1, len(arr) - 1)
+                i1 = min(i0 + 1, len(data) - 1)
                 frac = pos - i0
-                val = arr[i0] * (1.0 - frac) + arr[i1] * frac
+                val = data[i0] * (1.0 - frac) + data[i1] * frac
                 out[i] = max(-32768, min(32767, int(val)))
             return out.tobytes()
-        return arr.tobytes() if channels == 1 else arr.tobytes()
+        if mono_float:
+            # Дробное среднее без ресемпла: int() усекает к нулю — то же, что
+            # `.astype(int16)` в векторной ветке (floor дал бы -1 LSB).
+            out = array.array("h", [0] * len(data))
+            for i, v in enumerate(data):
+                out[i] = max(-32768, min(32767, int(v)))
+            return out.tobytes()
+        return arr.tobytes()
     try:
         pcm_i16 = _np.frombuffer(pcm, dtype=_np.int16)
     except Exception:  # noqa: BLE001

@@ -55,6 +55,23 @@ def _clamp_int16(v: int) -> int:
     return v
 
 
+def _div_trunc(a: int, b: int) -> int:
+    """Деление нацело с усечением к нулю — как делает numpy-ветка.
+
+    Обычное `//` округляет ВНИЗ (floor). Для отрицательной неделимой
+    суммы это -1 выборка относительно векторной реализации: сумма -3005
+    на двух каналах давала -1502 в numpy-ветке (`mean(axis=1)` плюс
+    `astype(int16)`, т.е. усечение к нулю) и -1503 в цикле на `array("h")`.
+    Замерено 2026-10-10: расходились ВСЕ отрицательные нечётные суммы,
+    т.е. каждая отрицательная полуволна сигнала, со смещением в одну
+    сторону. Контрактом выбрано усечение: оно симметрично нулю (floor
+    добавлял искажению постоянное смещение) и именно его слышит прод,
+    где numpy объявлен в requirements.txt.
+    """
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b >= 0) else -q
+
+
 class MixStrategy(str, Enum):
     """Strategy to combine several PCM streams into one."""
 
@@ -256,7 +273,7 @@ class AudioMixer:
         d = max(1, divisor)
         out = array.array("h", [0] * length)
         for i in range(length):
-            out[i] = _clamp_int16(acc[i] // d)
+            out[i] = _clamp_int16(_div_trunc(acc[i], d))
         return out.tobytes()
 
     def _sum_and_clip(self, buffers: Dict[Hashable, bytes],
