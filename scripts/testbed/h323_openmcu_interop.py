@@ -1455,10 +1455,13 @@ def main() -> int:
         media_events = wait_for_media_settled(all_media, args.video_wait,
                                               quiet_s=min(3.0, args.video_wait))
         for ev in media_events:
+            # Размер и fps есть только у видео: печатать «x» для аудио — значит
+            # дать читателю строку, похожую на испорченный разбор.
+            size = (f" {ev.get('width')}x{ev.get('height')}"
+                    f" fps={ev.get('fps')}" if ev.get("width") else "")
             print(f"[i] call.media: kind={ev.get('kind')} "
-                  f"direction={ev.get('direction')} codec={ev.get('codec')} "
-                  f"{ev.get('width') or ''}x{ev.get('height') or ''} "
-                  f"fps={ev.get('fps') or '—'}", flush=True)
+                  f"direction={ev.get('direction')} codec={ev.get('codec')}"
+                  f"{size}", flush=True)
         got = [e for e in media_events if str(e.get("kind", "")) == "video"]
         ours_video = [str(e.get("codec", "")) for e in got if e.get("codec")]
         audio_events = [e for e in media_events

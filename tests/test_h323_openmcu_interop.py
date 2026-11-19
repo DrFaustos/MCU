@@ -825,9 +825,9 @@ def test_media_events_are_read_until_the_stream_settles():
     `h323_L.log` стоят `VIDEO: decoder` и `PCM: decoder`. Аудитору это выглядело как
     «в compat аудио симметричное, в трёх других — нет», хотя исход был один.
     """
-    ticks = iter(range(0, 1000))
-
     class Clock:
+        """Фиктивные часы: тест не должен спать по-настоящему."""
+
         def __init__(self) -> None:
             self.t = 0.0
 
@@ -854,7 +854,6 @@ def test_media_events_are_read_until_the_stream_settles():
     assert len(got) == 4, got          # поздние decoder-события не потеряны
     directions = {e["direction"] for e in got}
     assert directions == {"encoder", "decoder"}
-    next(ticks)                        # andirament: ticks не используется
 
 
 def test_media_settle_wait_returns_empty_honestly_on_deadline():
