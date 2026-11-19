@@ -1,0 +1,28 @@
+v=0
+o=CiscoSystemsSIP-GW-UserAgent 23618 7724 IN IP4 192.0.2.31
+s=synthetic, modeled on vendor captures
+c=IN IP4 192.0.2.31
+t=0 0
+m=audio 16466 RTP/AVP 0 8 9 18
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:9 G722/8000
+a=rtpmap:18 G729/8000
+a=fmtp:18 annexb=no
+a=sendrecv
+m=video 16468 RTP/AVP 103
+b=AS:2048
+a=rtpmap:103 H264/90000
+a=fmtp:103 profile-level-id=64001f;packetization-mode=1;max-mbps=108000;max-fs=3600
+a=content:main
+a=sendrecv
+m=video 16470 RTP/AVP 107
+b=AS:1024
+a=rtpmap:107 H264/90000
+a=fmtp:107 profile-level-id=42801f;packetization-mode=1
+a=content:slides
+a=floorctrl:c-s
+a=confid:1
+a=userid:1
+a=floorid:1 m-stream:107
+a=sendrecv

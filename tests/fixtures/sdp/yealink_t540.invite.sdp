@@ -1,0 +1,18 @@
+v=0
+o=yealink 2432923964 2432923965 IN IP4 192.0.2.41
+s=synthetic, modeled on vendor captures
+c=IN IP4 192.0.2.41
+t=0 0
+m=audio 42000 RTP/AVP 107 0 9 101
+a=rtpmap:107 opus/48000/2
+a=fmtp:107 minptime=20;useinbandfec=1;maxplaybackrate=48000;stereo=0;sprop-stereo=0
+a=rtpmap:0 PCMU/8000
+a=rtpmap:9 G722/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=sendrecv
+m=video 42010 RTP/AVP 108
+b=AS:1024
+a=rtpmap:108 H264/90000
+a=fmtp:108 profile-level-id=42e01f;packetization-mode=1
+a=sendrecv

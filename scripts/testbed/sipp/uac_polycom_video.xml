@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Polycom-подобный видеотерминал набирает НОМЕР ЗАЛА 6001 через АТС.
+
+     Что эмулируем и зачем. В парке терминалов Polycom RealPresence — и на них
+     случалась регрессия порядка PT: в m=video первым стоит 104 (H.264 High,
+     profile-level-id=640C1F), затем 103/102. Сортировка PT по номеру (закрытый
+     баг parse_sdp_codecs) тащила в согласование 102, которого у стека нет, —
+     видео не было вовсе. SDP здесь — та же форма, что в фикстуре
+     tests/fixtures/sdp/polycom_rprc.invite.sdp: стенд теперь гоняет её и
+     протокольно, и на парсере.
+
+     Порт m=video задан ЛИТЕРАЛОМ (25108): у sipp один RTP-сокет на вызов и
+     один шаблон [media_port]. Видео здесь — чистая сигнализация (RTP не
+     шлём), литеральный порт честен в SDP и не конфликтует с RTP-окном АТС.
+
+     Ответы 180/183 ловим каскадом optional-шагов — та же причина, что в
+     uac_mcu_via_asterisk.xml: АТС генерит свой 180 и пересылает 183/180 от
+     МСУ, порядок заранее неизвестен. -->
+<scenario name="uac-polycom-video">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:6001@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Polycom Test" <sip:polycom@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:6001@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      User-Agent: PolycomRealPresence/6.0.2.0
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=- 536871233 536871233 IN IP[local_ip_type] [local_ip]
+      s=synthetic-polycom-sipp
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 0 8 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+      a=sendrecv
+      m=video 25108 RTP/AVP 104 103 102
+      b=AS:1152
+      a=rtpmap:104 H264/90000
+      a=fmtp:104 profile-level-id=640C1F;max-rate=1152;packetization-mode=1
+      a=rtpmap:103 H264/90000
+      a=fmtp:103 profile-level-id=42E01F;max-rate=1152;packetization-mode=1
+      a=rtpmap:102 H264/90000
+      a=fmtp:102 profile-level-id=42801F;max-rate=1152;packetization-mode=1
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true" rta="true"/>
+
+  <send>
+    <![CDATA[
+      ACK sip:6001@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Polycom Test" <sip:polycom@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:6001@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Держим диалог: верификатору нужно увидеть CONFIRMED/участника зала. -->
+  <pause milliseconds="3000"/>
+
+  <send retrans="500">
+    <![CDATA[
+      BYE sip:6001@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Polycom Test" <sip:polycom@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:6001@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000"/>
+</scenario>

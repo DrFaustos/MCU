@@ -29,6 +29,17 @@ if [ "${1:-}" = "--stop" ]; then
   exit 0
 fi
 
+# Единая предпроверка (preflight --quick: asterisk/sipp/sudo -n, ничего не
+# запускает). Ниже оставлен и собственный цикл проверки бинарей: поведение
+# обёртки не должен менять новый файл, а rc=2 при отсутствии стеда — тот же.
+# Новое честно-следствие: без sudo -n выход теперь rc=2 («НЕ выполнялся»),
+# раньше обёртка 15 секунд ждала транспорт и возвращала 1 — стенд физически
+# не стартует без sudo (см. lib/stand.sh про отделение 2 от 1).
+if ! bash "$ROOT/scripts/testbed/preflight.sh" --quick; then
+  echo "[!] предпроверка не пройдена (см. [missing] выше)" >&2
+  exit 2
+fi
+
 for bin in asterisk sipp; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "[!] не найден '$bin'. См. README (установка Asterisk/SIPp)." >&2

@@ -1,0 +1,27 @@
+{
+  "room": {
+    "name": "MCU Testbed",
+    "auto_create": true
+  },
+  "sip": {
+    "listen": "0.0.0.0",
+    "port": 5060,
+    "transport": "udp",
+    "auto_answer": true,
+    "registration": {
+      "enabled": true,
+      "registrar": "sip:asterisk:15080",
+      "domain": "",
+      "username": "6001",
+      "password": "test6001",
+      "expires_sec": 120,
+      "proxies": [],
+      "retry_interval_sec": 5
+    }
+  },
+  "media": {
+    "audio": {
+      "bitrate_kbps": 48
+    }
+  }
+}

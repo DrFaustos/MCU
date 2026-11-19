@@ -1,0 +1,166 @@
+# Стенд «Asterisk + MCU + sipp» целиком в контейнерах — без хостовых
+# установок asterisk/sipp/pjsua2.
+#
+# Цель- верхнего уровня:
+#   podman compose up --abort-on-container-exit sipp-polycom
+# = реалистичный Polycom-звонок (вендорский порядок PT, H.264 High первым)
+# через Asterisk в номер зала 6001, где сидит MCU.
+#
+# Сервисы:
+#   asterisk    — минимальный образ из docker/testbed/asterisk.Dockerfile,
+#                 конфиги берутся из scripts/testbed/asterisk (источник
+#                 правды — репозиторий, а не образ);
+#   mcu         — образ mcu-dev (docker/mcu-dev.Dockerfile; собирается
+#                 ПОВЕРХ mcu-dev-base, см. README каталога — base не
+#                 пересобираем лишний раз); исходники монтируются томом;
+#   sipp-*      — профили прогонов: image docker.io/sipp/sipp, том со
+#                 сценариями scripts/testbed/sipp, entrypoint переопределён.
+#
+# Совместимость: файл писался под `podman compose` (podman-compose) и
+# docker-compose v2. Флаги вроде --abort-on-container-exit принимает
+# `podman compose up`; docker-compose их не знает — см. README.
+
+name: mcu-testbed
+
+networks:
+  testbed:
+    ipam:
+      config:
+        # Подсеть обязана совпадать с ARG TESTBED_NET в asterisk.Dockerfile:
+        # identify-правила стенда расширены на неё, а не на 127.0.0.1/32.
+        - subnet: 10.101.0.0/24
+
+services:
+  asterisk:
+    build:
+      context: ../..
+      dockerfile: docker/testbed/asterisk.Dockerfile
+    image: localhost/mcu-testbed-asterisk:latest
+    networks: [testbed]
+    healthcheck:
+      # Тот же критерий готовности, что у bash-стенда: дождались транспорт
+      # 15080 в pjsip, а не «asterisk -rx вообще отвечает».
+      test: ["CMD-SHELL", "asterisk -rx 'pjsip show transports' 2>/dev/null | grep -q 15080"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+    restart: "no"
+
+  mcu:
+    # Требуется localhost/mcu-dev:latest (или podman build -t mcu-dev
+    # -f docker/mcu-dev.Dockerfile .; base mcu-dev-base — отдельным шагом,
+    # он меняется редко). Секцию build оставляю закомментированной
+    # намеренно: пересобирать mcu-dev при каждом compose — значит дёргать
+    # pip-слой, а код всё равно приходит томом.
+    # build:
+    #   context: ../..
+    #   dockerfile: docker/mcu-dev.Dockerfile
+    image: localhost/mcu-dev:latest
+    volumes:
+      - ../..:/src:ro,z
+    working_dir: /src
+    command:
+      - python3
+      - run.py
+      - --headless
+      - --config
+      - /src/docker/testbed/mcu.config.json
+      - --null-audio
+      - --display-name
+      - MCU Testbed
+    networks: [testbed]
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    restart: "no"
+
+  # Реалистичный Polycom: INVITE на 6001 (номер зала) с вендорским порядком
+  # PT; MCU должен согласовать G.711 (G.722 у зала может не быть) и H.264,
+  # а вызов дожить до BYE.
+  sipp-polycom:
+    image: docker.io/sipp/sipp
+    entrypoint: ["sipp"]
+    command:
+      - -sf
+      - /scenarios/uac_polycom_video.xml
+      - asterisk:15080
+      - -p
+      - "15090"
+      - -m
+      - "1"
+      - -r
+      - "1"
+      - -l
+      - "1"
+      - -timeout
+      - 60s
+      - -nostdin
+    volumes:
+      - ../../scripts/testbed/sipp:/scenarios:ro,z
+    networks: [testbed]
+    depends_on:
+      asterisk:
+        condition: service_healthy
+      mcu:
+        condition: service_started
+    restart: "no"
+
+  # Sony с приоритетом G.722/G.722.1/G.719 на echo-номер 600: работает БЕЗ
+  # mcu (проверяет, что согласование честно откатывается на G.711):
+  #   podman compose up --abort-on-container-exit sipp-sony
+  sipp-sony:
+    image: docker.io/sipp/sipp
+    entrypoint: ["sipp"]
+    command:
+      - -sf
+      - /scenarios/uac_sony_audio.xml
+      - asterisk:15080
+      - -p
+      - "15091"
+      - -m
+      - "1"
+      - -r
+      - "1"
+      - -l
+      - "1"
+      - -timeout
+      - 60s
+      - -nostdin
+    volumes:
+      - ../../scripts/testbed/sipp:/scenarios:ro,z
+    networks: [testbed]
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    restart: "no"
+
+  # Session timers (Require: timer, Session-Expires: 180) + opportunistic
+  # PRACK + REFRESH методом UPDATE. Прогон ~95 с (Min-SE=90 по RFC 4028).
+  sipp-100rel:
+    image: docker.io/sipp/sipp
+    entrypoint: ["sipp"]
+    command:
+      - -sf
+      - /scenarios/uac_100rel_timers.xml
+      - asterisk:15080
+      - -p
+      - "15092"
+      - -m
+      - "1"
+      - -r
+      - "1"
+      - -l
+      - "1"
+      - -timeout
+      - 180s
+      - -nostdin
+    volumes:
+      - ../../scripts/testbed/sipp:/scenarios:ro,z
+    networks: [testbed]
+    depends_on:
+      asterisk:
+        condition: service_healthy
+      mcu:
+        condition: service_started
+    restart: "no"

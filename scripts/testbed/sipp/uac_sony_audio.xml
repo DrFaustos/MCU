@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Sony-подобный терминал с приоритетом G.722 (и «экзотикой» следом).
+
+     Что эмулируем и зачем. Docstring mcuclient/codec_negotiation.py прямо
+     называет Sony причиной молчаливых несогласований: терминал ставит первым
+     G.722, а следом G.722.1 (16k/32k) и G.719/48000 — кодеки, которых у
+     нашего стека нет. На стенде вызов идёт на echo-номер 600, чей эндпоинт
+     АТС разрешает только ulaw/alaw: ожидание честное — 200 OK должен прийти
+     с PCMU/PCMA, то есть согласование откатывается на G.711, а не падает.
+     Тот же почерк SDP, что в фикстуре
+     tests/fixtures/sdp/sony_lc1100.invite.sdp.
+
+     Вызов на 600, а не на 6001: сценарий проверяет переговоры без участия
+     МСУ — его можно гонять против одной только АТС (и в compose-стеке без
+      mcu-сервиса). -->
+<scenario name="uac-sony-audio">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Sony LC" <sip:sony@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:600@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      User-Agent: Sony-LC1100
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=LC1100 3460332001 3460332002 IN IP[local_ip_type] [local_ip]
+      s=synthetic-sony-sipp
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 9 0 8 96 97 98 101
+      a=rtpmap:9 G722/8000
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:96 G7221/16000
+      a=fmtp:96 bitrate=24000
+      a=rtpmap:97 G7221/32000
+      a=fmtp:97 bitrate=48000
+      a=rtpmap:98 G719/48000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="200" rtd="true" rta="true"/>
+
+  <send>
+    <![CDATA[
+      ACK sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Sony LC" <sip:sony@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <pause milliseconds="2000"/>
+
+  <send retrans="500">
+    <![CDATA[
+      BYE sip:600@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: "Sony LC" <sip:sony@[local_ip]:[local_port]>;tag=[pid]SIPpTag[call_number]
+      To: <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true"/>
+
+  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000"/>
+</scenario>
