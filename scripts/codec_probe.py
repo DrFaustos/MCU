@@ -34,7 +34,9 @@ JSON в stdout: {build, audio: {present, profiles}, video: {...}}.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,24 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import CODEC_PROFILES  # noqa: E402
 from mcuclient.pjsip_adapter import PJSIP_AVAILABLE, pj  # noqa: E402
+
+
+@contextlib.contextmanager
+def _silence_c_stdout():
+    """PJSIP пишет логи в fd 1 НА УРОВНЕ C — и до libInit(), когда
+    logConfig ещё не прочитан (сообщения os_core_unix/sip_endpoint при
+    libCreate). Python-перехват redirect_stdoutsuch записи не видит,
+    нужен dup2 на /dev/null. Единственный поток вывода зонда — JSON."""
+    saved = os.dup(1)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        yield
+    finally:
+        sys.stdout.flush()  # буфер Python мог копить вывод при fd 1 → /dev/null
+        os.dup2(saved, 1)
+        os.close(devnull)
+        os.close(saved)
 
 
 def _audio_rank(wanted: list[str], codec_id: str) -> int | None:
@@ -101,34 +121,35 @@ def _profile_fit(profiles: dict[str, dict[str, list[str]]],
 
 def probe() -> dict[str, Any]:
     """Собрать JSON-отчёт. Вызывать только при PJSIP_AVAILABLE."""
-    ep = pj.Endpoint()
-    ep.libCreate()
-    try:
-        ep_cfg = pj.EpConfig()
-        # Лог pjsip в зонде не нужен: единственный поток вывода — JSON.
-        ep_cfg.logConfig.level = 0
-        ep.libInit(ep_cfg)
-        ep.libStart()
-        audio = [str(c.codecId) for c in ep.codecEnum2()]
-        video: list[str] = []
-        if hasattr(ep, "videoCodecEnum2"):
-            video = [str(c.codecId) for c in ep.videoCodecEnum2()]
-        return {
-            "build": {
-                "version": _build_version(),
-                "pjsua2": True,
-            },
-            "audio": {
-                "present": audio,
-                "profiles": _profile_fit(CODEC_PROFILES, audio, "audio"),
-            },
-            "video": {
-                "present": video,
-                "profiles": _profile_fit(CODEC_PROFILES, video, "video"),
-            },
-        }
-    finally:
-        ep.libDestroy()
+    with _silence_c_stdout():
+        ep = pj.Endpoint()
+        ep.libCreate()
+        try:
+            ep_cfg = pj.EpConfig()
+            # Лог pjsip в зонде не нужен: единственный поток вывода — JSON.
+            ep_cfg.logConfig.level = 0
+            ep.libInit(ep_cfg)
+            ep.libStart()
+            audio = [str(c.codecId) for c in ep.codecEnum2()]
+            video: list[str] = []
+            if hasattr(ep, "videoCodecEnum2"):
+                video = [str(c.codecId) for c in ep.videoCodecEnum2()]
+        finally:
+            ep.libDestroy()
+    return {
+        "build": {
+            "version": _build_version(),
+            "pjsua2": True,
+        },
+        "audio": {
+            "present": audio,
+            "profiles": _profile_fit(CODEC_PROFILES, audio, "audio"),
+        },
+        "video": {
+            "present": video,
+            "profiles": _profile_fit(CODEC_PROFILES, video, "video"),
+        },
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
