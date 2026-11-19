@@ -13,14 +13,20 @@
    ``call.media kind=video`` по обоим направлениям, их сторона — со страницы
    статуса (сырой дамп + дифференциальный разбор, см. ниже).
 
-Разбор их страницы статуса НАМЕРЕННО дифференциальный. Формат HTML у OpenMCU-ru
-стенду не известен заранее и подсмотреть его негде (контейнер ещё не собран, а
-выдумывать «колонка 5 = кодек» — значит получить зелёный прогон против собственной
-фантазии). Поэтому меряется то, что не зависит от вёрстки: какие опознавательные
-токены (имена кодеков, номера портов) были на странице ДО вызова и что добавилось
-ПОСЛЕ. Появился H.261/H.263 в их статусе после нашего вызова — это и есть
-«они приняли наш видеоканал». Плюс полный сырой дамп страницы в ``--dump-dir``:
-его читает человек (или следующая версия стенда, уже знающая формат).
+Их страницу статуса стенд теперь читает, но формат её стенд себе не выдумывает:
+форма строки терминала (``MCU-L [h323:@10.89.0.8] … Video In: H.261-CIF@352x288``)
+взята из живого дампа `tmp/live*/compat/status_after_*.html`, а до первого живого
+прогона разбор был НАМЕРЕННО дифференциальный — выдумать «колонка 5 = кодек»
+значило бы получить зелёный прогон против собственной фантазии. Дифф токенов
+остался, но понижен до подпорки, и вот почему: их комната stateful (терминал
+досидит в ней после вызова и объявляет H.261 сама), поэтому «нового видеоимени»
+следующий прогон может не увидеть никогда, даже при живом канале, и проверка по
+одному диффу краснела на полностью рабочем интеропе. Порядок доказательств:
+«Video In» в строке нашего терминала → видео-имя в диффе → видео-имя плюс новые
+RTP-порты этого вызова; не сработало ничего — красное со ссылкой на сырой дамп.
+Отдельно: «до» отвечало, а «после» — нет, это не «они не приняли», а их сервис лёг
+(в живом логе это `realloc(): invalid next size`); такой прогон помечается
+НЕИЗМЕРЁННЫМ с причиной. Сырой дамп страницы пишется в ``--dump-dir`` всегда.
 
 Режим ``--self-check`` нужен, пока контейнера нет: он прогоняет весь пайплайн на
 ДВУХ НАШИХ хостах и на подставной странице статуса. Это проверяет сборку и саму
@@ -55,6 +61,7 @@ codecs: `stand.log`, `their_stdout_<профиль>.txt` и `their_trace_<про
 from __future__ import annotations
 
 import argparse
+import html
 import http.server
 import os
 import re
@@ -62,6 +69,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import time
 import urllib.error
 import urllib.request
@@ -197,6 +205,147 @@ def build_composition_note(frames: int, diff_tokens: List[str]) -> str:
             "сборки, а не отказ микшера показывать картинку")
 
 
+THEIR_TERMINAL_ROW = re.compile(
+    r"(?P<name>[A-Za-z0-9_.\-()+ ]{1,40}?)\s*\[h323:@(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\]")
+THEIR_MEDIA_FIELD = re.compile(
+    r"(?P<kind>Audio|Video)\s*(?P<dir>In|Out)\s*:\s*(?P<codec>[A-Za-z0-9._@x+\-]+)")
+
+
+def parse_their_terminals(body: str) -> List[Dict[str, Any]]:
+    """Строки их `/Status` про каждый терминал комнаты — то, что видит оператор.
+
+    Форму стенд НЕ выдумал: в живом дампе строка выглядит так
+
+      MCU-L [h323:@10.89.0.8]  00:05  Audio In: G.722-64k@16000Hz
+      Audio Out: Speex_16K@16000Hz  Video In: H.261-CIF@352x288
+      Video Out: H.261-CIF@352x288 …
+
+    То есть «Video In» у них — это ИХ приём НАШЕГО видео, самое прямое
+    доказательство из всех, что даёт их админка: дифф токенов слабее, потому что
+    страница stateful (терминал висит в комнате и после нашего вызова, и «нового
+    токена» следующий прогон может не увидеть вовсе).
+    """
+    text = html.unescape(re.sub(r"<[^>]+>", " ", body))
+    text = re.sub(r"&nbsp;|\s+", " ", text)
+    rows: List[Dict[str, Any]] = []
+    marks = list(THEIR_TERMINAL_ROW.finditer(text))
+    for index, mark in enumerate(marks):
+        # Терминал «владеет» текстом до следующей такой же строки: поля Media у
+        # них идут после имени, а не в одной ячейке.
+        tail = text[mark.end():marks[index + 1].start() if index + 1 < len(marks)
+                    else len(text)]
+        media = {f"{m.group('kind').lower()}_{m.group('dir').lower()}":
+                 m.group("codec") for m in THEIR_MEDIA_FIELD.finditer(tail[:600])}
+        # Имя в их разметке приклеено к хвосту шапки таблицы («…s FPS MCU-L»);
+        # режем по последнему слову шапки, иначе имя терминала читается как мусор.
+        name = re.split(r"(?:Name|Duration|Packets|Bytes|Kbit/s|FPS|Codec|"
+                        r"[0-9]+Hz)\s+", mark.group("name"))[-1].strip()
+        key = (name, mark.group("ip"))
+        for row in rows:
+            if (row["name"], row["ip"]) == key:      # одна страница — две ссылки
+                row["media"].update(media)
+                continue
+        else:
+            rows.append({"name": name, "ip": mark.group("ip"), "media": media})
+    return rows
+
+
+def merge_terminal_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Слить записи одного терминала с разных страниц их админки.
+
+    Оглавление `/` показывает терминал без медиа, `/Status` — с медиа. Без слияния
+    в отчёте две строки на один вызов: одна пустая, другая настоящая, и читатель
+    не понимает, какая из них про наш вызов.
+    """
+    merged: Dict[Any, Dict[str, Any]] = {}
+    for row in rows:
+        key = (row["name"], row["ip"])
+        if key not in merged:
+            merged[key] = {"name": row["name"], "ip": row["ip"], "media": {}}
+        merged[key]["media"].update(row["media"])
+    return list(merged.values())
+
+
+def status_terminal_rows(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Строки терминалов из всего, что ответил снимок их админки.
+
+    Тело страницы живёт в `snap['bodies']` (ключ — URL, значение — байты), а не в
+    элементах `snap['ok']`: там только код ответа и токены. Перепутать их — значит
+    поймать KeyError уже после того, как все проверки зелёные, и угробить прогон на
+    ровном месте (это и был live2).
+    """
+    rows: List[Dict[str, Any]] = []
+    for body in snap.get("bodies", {}).values():
+        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+        rows.extend(parse_their_terminals(text))
+    return merge_terminal_rows(rows)
+
+
+def terminal_rows_delta(before_rows: List[Dict[str, Any]],
+                        after_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Строки терминалов, которых НЕ было до вызова.
+
+    Имя терминала и IP нам надёжно не задать (хост объявляет своё endpoint-имя, а
+    IP контейнера меняется), поэтому «наш терминал» = новый в их списке. Их страница
+    stateful: старый терминал досидит в комнате после вызова, и сравнивать надо
+    именно множество, а не «есть ли вообще».
+    """
+    seen_ips = {r["ip"] for r in before_rows}
+    return [r for r in after_rows if r["ip"] not in seen_ips]
+
+
+def reception_verdict(want_video: bool, new_rows: List[Dict[str, Any]],
+                      new_tokens: List[str], after_tokens: List[str],
+                      new_ports: List[str]) -> Tuple[Any, str]:
+    """Приняли ли они НАШЕ видео — по strongest evidence, что даёт их админка.
+
+    Порядок по силе: (1) в новой строке терминала есть `Video In` — это их собственный
+    счётчик приёма; (2) в диффе появилась видео-фамилия; (3) токен уже стоял на
+    странице до вызова (они держат терминал в комнате) — тогда доказательством этого
+    вызова считаются новые RTP-порты плюс видео-токен после. Ни один пункт не
+    сработал — красное, и с объяснением, а не «дифф пустой».
+    """
+    if not want_video:
+        return None, ("профиль без видео: их статус не проверяется — показать им "
+                      "было нечего")
+    for row in new_rows:
+        video_in = row["media"].get("video_in", "")
+        if video_in and family_matches(video_in, ["H.261", "H.263", "H.264", "VP8"]):
+            return True, (f"их /Status показывает терминал {row['name']!r} с "
+                          f"Video In: {video_in} — это их собственный счётчик "
+                          f"приёма нашего видео (media: {row['media']})")
+    video_new = [t for t in new_tokens
+                 if family_matches(t, ["H.261", "H.263", "H.264", "VP8"])]
+    if video_new:
+        return True, f"в диффе их статуса появились видеоимена {video_new}"
+    video_after = [t for t in after_tokens
+                   if family_matches(t, ["H.261", "H.263", "H.264", "VP8"])]
+    if video_after and new_ports:
+        return True, (f"видеоимя {video_after} стояло на странице и до вызова "
+                      "(они держат терминал в комнате — страница stateful), "
+                      f"поэтому доказательством этого вызова считаем новые "
+                      f"RTP-порты {new_ports[:4]}")
+    return False, ("ни новой строки терминала с Video In, ни нового видеоимени, "
+                   "ни новых портов — см. сырой дамп status_after_*.html")
+
+
+def our_terminal_terminals(rows: List[Dict[str, Any]], display: str,
+                           our_ip: str = "") -> Optional[Dict[str, Any]]:
+    """Наш терминал в их списке — по имени, а IP только подсказкой.
+
+    Имя мы задаём сами (`display`), IP у контейнера меняется от запуска к запуску,
+    поэтому IP — запасной признак, а не основной.
+    """
+    for row in rows:
+        if display and display.split()[0].upper() in row["name"].upper():
+            return row
+    if our_ip:
+        for row in rows:
+            if row["ip"] == our_ip:
+                return row
+    return None
+
+
 def status_measurable(snap: Dict[str, Any]) -> Tuple[bool, str]:
     """Можно ли вообще измерять их статус: живая страница или мёртвая морда.
 
@@ -214,18 +363,64 @@ def status_measurable(snap: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
-def video_diff_verdict(want_video: bool, new_tokens: List[str]
-                       ) -> Tuple[bool, List[str]]:
-    """Значит ли дифф их статуса что-то про НАС: (проверять, видеотокены).
+# Правило «в диффе их статуса появилось видеоимя» отсюда удалено: их комната
+# объявляет H.261 в статусе и ДО нашего вызова, поэтому новизна не наступает
+# никогда — даже при живом канале проверка краснела (live2). Решает
+# `reception_verdict`: строка нашего терминала с их «Video In», дифф — подпорка.
 
-    В профиле `--no-video` нам нечем было показать картинку, и «у них в статусе
-    появился H.261» там — не про нас: в комнате может быть кто-то ещё, или страница
-    изменилась по своей причине. Зелёная галочка в этом профиле читалась бы как
-    «OpenMCU принял наше видео», которого не было (самопроверка матрицы поймала это
-    как раз: профиль no-video проходил с ней).
+
+def wait_for_media_settled(events_fn, deadline_s: float, quiet_s: float = 2.0,
+                           sleep=time.sleep, clock=time.monotonic
+                           ) -> List[Dict[str, Any]]:
+    """Ждём, пока поток `call.media` УСТОКАНИТСЯ, а не пока придёт первая строка.
+
+    Прежний код ждал появления и тут же печатал то, что успел собрать. Хост выдаёт
+    события по мере открытия каналов, и decoder-событие приходит позже encoder-ного:
+    в живом compat стенд напечатал только `direction=encoder`, хотя в его же
+    `h323_L.log` были `VIDEO: decoder` и `PCM: decoder`. Из-за этого аудитору
+    казалось, что в одном профиле аудио согласовалось симметрично, а в трёх — нет,
+    хотя исход был один. Ждём тишины в потоке (`quiet_s` без новых событий), а не
+    первого события; дедлайн и «пусто» по-прежнему возвращаются честно.
     """
-    video = [t for t in new_tokens if t.upper().startswith("H.2")]
-    return want_video, video
+    last_count = -1
+    last_change = clock()
+    started = clock()
+    events: List[Dict[str, Any]] = []
+    while True:
+        events = events_fn() or []
+        if len(events) != last_count:
+            last_count = len(events)
+            last_change = clock()
+        now = clock()
+        if events and now - last_change >= quiet_s:
+            return events
+        if now - started >= deadline_s:
+            return events
+        sleep(0.25)
+
+
+def audio_asymmetry_note(audio_events: List[Dict[str, Any]]) -> str:
+    """Мы шлём одно, они другое — это надо назвать, а не прятать за «аудио G.722».
+
+    Живой compat: encoder=G.722-64k, decoder=SpeexIETFWide-20.6k, а в их трейзе
+    тот же канал подписан `Speex_16K{sw}`. По разбору вилки (codecs) их tableEntry
+    резолвится по НАШЕЙ таблице (H323Connection::CreateLogicalChannel ->
+    localCapabilities.FindCapability), то есть дескрипторы расходятся только в
+    подписи их лога. Но «аудио G.722» без этой строки читается как симметричный
+    результат, и это ложь формата, а не ложь значений.
+    """
+    by_dir: Dict[str, str] = {}
+    for ev in audio_events:
+        direction = str(ev.get("direction", ""))
+        codec = str(ev.get("codec", ""))
+        if direction and codec:
+            by_dir.setdefault(direction, codec)
+    if len(set(by_dir.values())) < 2:
+        return ""
+    return ("аудио асимметричное: мы → " + by_dir.get("encoder", "—")
+            + ", они → " + by_dir.get("decoder", "—")
+            + "; имена сторон не совпадают: их tableEntry разрешается по нашей "
+            "таблице, а их лог подписывает номер именем из СВОЕЙ")
 
 
 def name_shape_note(ours: List[str], theirs: List[str]) -> str:
@@ -392,15 +587,30 @@ MATRIX = (
     ("compat", "--codecs-profile compat", True,
      {"audio": ("G.722",), "video": ("H.261",)}),
     ("royalty-free", "--codecs-profile royalty-free", True,
-     {"audio": ("G.711",), "video": ("H.261",)}),
+     {"audio": ("G.722",), "video": ("H.261",)}),
     ("royalty-free-allow-h264",
      "--codecs-profile royalty-free --allow-codecs H.264", True,
-     {"audio": ("G.711",), "video": ("H.261",), "must_not_video": ("H.264",)}),
+     {"audio": ("G.722",), "video": ("H.261",), "must_not_video": ("H.264",)}),
     ("no-video", "--no-video", False, {}),
 )
 
 #: Ожидания по именам профилей (детям матрицы приходит только --label).
 PROFILE_EXPECTATIONS = {name: expects for name, _a, _v, expects in MATRIX}
+
+#: Поправка codecs до прогона: в royalty-free аудио ожидается **G.722**, а не
+#: G.711 — G.722 имеет статус «истёк», то есть свободен, и royalty-free его не
+#: снимает; снимаются только Siren (G.722.1) и платные/SDK. Снятие в royalty-free
+#: = ровно G.722.1-24k и G.722.1-32k, приоритет начинается с G.722-64k{sw}.
+#:
+#: И из того же модельного прогона: на ЭТОМ собеседнике профили неразличимы по
+#: согласованному кодеку (всё, чем они отличаются, требует второй стороны: Siren и
+#: H.264 есть у нас, но их нет в их сборке; G.729 есть у них, но нет у нас). Один и
+#: тот же G.722 + H.261 в compat и royalty-free — не «флаг не подействовал», а
+#: свойство пары; различие видно в наших ready и в строке приоритета.
+MATRIX_INDIFFERENCE_NOTE = (
+    "на этом собеседнике профили неразличимы по согласованному кодеку: совпадение "
+    "compat и royalty-free — свойство пары, а не сломанный флаг; различие смотреть "
+    "в наших ready и в строке приоритета")
 
 #: Ожидания записаны ДО прогона (данные env, docs/CODECS.md §8.1/§12), а не
 #: подгоняются по результату: в собранном образе OpenMCU 8 семейств из 11 — есть
@@ -439,6 +649,20 @@ def family_matches(actual: str, families: List[str]) -> bool:
             continue
         return True
     return False
+
+
+def expectations_for(label: str) -> Dict[str, Any]:
+    """Ожидания профиля по его имени; suffixed-имена (`compat-live`) — тот же профиль.
+
+    Без этого живой прогон с `--label compat-live` молча остался бы без ожиданий,
+    и «ничего не проверялось» выглядело бы как «всё совпало».
+    """
+    if label in PROFILE_EXPECTATIONS:
+        return PROFILE_EXPECTATIONS[label]
+    for name in PROFILE_EXPECTATIONS:
+        if label.startswith(name):
+            return PROFILE_EXPECTATIONS[name]
+    return {}
 
 
 def expectations_line(label: str, expects: Dict[str, Any]) -> str:
@@ -561,9 +785,15 @@ def run_matrix(args: argparse.Namespace) -> int:
                                   text=True, encoding="utf-8", errors="replace",
                                   env=env)
             sink.write(proc.stdout or "")
-        tail = [ln for ln in (proc.stdout or "").splitlines()
-                if ln.startswith(("[+]", "[X]", "[i] их ", "[i] RTP", "[i] профиль"))]
-        for ln in tail:
+        # В сводку профиля попадает весь проверяющий вывод, а не только «их»
+        # строки: адресация, арбитраж и «не измерялось» — ровно то, что решает
+        # трактовку, и терять это в хвосте нельзя. Ограничение — последние 60
+        # строк, чтобы профиль не печатал сам себя.
+        keep = [ln for ln in (proc.stdout or "").splitlines()
+                if ln.startswith(("[+]", "[X]", "[!]", "[i]"))]
+        if len(keep) > 60:
+            print(f"   … {len(keep) - 60} строк скрыто, полностью в логе", flush=True)
+        for ln in keep[-60:]:
             print("   " + ln, flush=True)
         results.append((label, proc.returncode, log))
     print("\n=== матрица: итог ===", flush=True)
@@ -572,6 +802,9 @@ def run_matrix(args: argparse.Namespace) -> int:
         failed += 1 if rc else 0
         print(f"[{'OK' if rc == 0 else 'ПРОВАЛ'}] {label}: rc={rc}, лог {log}",
               flush=True)
+    # Печатается самой матрицей, а не комментарием в коде: иначе «одинаковый
+    # кодек в четырёх профилях» читают как «флаги не работают».
+    print("[i] " + MATRIX_INDIFFERENCE_NOTE, flush=True)
     return 1 if failed else 0
 
 
@@ -606,24 +839,97 @@ THEIR_TRANSMIT_CAVEAT = (
     "их SIP-набор и отладочный вывод (v3.48.0), не ограничение нашего H.323-интеропа")
 
 
-def parse_their_stdout(text: str) -> Dict[str, Any]:
-    """Списки приём/передача из их stdout — с разделением, у кого какой вес.
+THEIR_PLUGIN_LINE = re.compile(r"Ready to load plugin\s+(\S+)")
+THEIR_TABLE_LINE = re.compile(r"^\s+(\S+)\s+<(\d+)>\s*$")
+THEIR_CREATED_LINE = re.compile(r"^(\S+\{sw\})\s*$")
 
-    Приём (`[RECEIVE_*]`) — это то, чем они ОБЪЯВЛЯЮТ свой TCS, то есть реальная
-    их таблица. Передача (`[TRANSMIT_*]`) на этом теге — только напечатанный
-    SIP-набор (см. THEIR_TRANSMIT_CAVEAT). Смешивать их в одну проверку нельзя:
-    зелёная «передача есть» означала бы, что мы чего-то дождались.
+#: Иерархия доказательств по их stdout — от сильной к слабой (данные codecs,
+#: §8.1; проверено на env-дампе стартового stdout финального образа). Причина, по
+#: которой списки `[RECEIVE_*]` стоят внизу: их автогенерация конфига дописывает
+#: ключ и для имён, которые не удалось создать (openmcu-ru/h323.cxx:228-253), а
+#: AddCapabilities потом молча пропускает несуществующее. В дампе это видно
+#: буквально: в `[RECEIVE_VIDEO]` 27 имён (VP8, H.264, H.263), а из видео в образе
+#: лежит ОДИН `h261-vic_video_pwplugin.so`.
+THEIR_EVIDENCE_HIERARCHY = (
+    "иерархия доказательств: (1) уложенные .so, (2) «Ready to load plugin», "
+    "(3) список СОЗДАННЫХ возможностей перед VideoMixConfigurator, (4) их Table:, "
+    "(5) [RECEIVE_*]/[TRANSMIT_*] — это их КОНФИГ («что хотели бы»), не их TCS")
+
+
+def parse_their_stdout(text: str) -> Dict[str, Any]:
+    """Их stdout по слоям: что загружено, что СОЗДАНО, что написано в конфиге.
+
+    Строки разбираются ровно в тех формах, которые видно в env-дампе: `PLUGIN<TAB>
+    Ready to load plugin <путь>`, голые имена `H.261-CIF{sw}` до строки
+    `VideoMixConfigurator:`, `[RECEIVE_SOUND]= a, b, c,` (значения — через запятую
+    одной строкой) и `Table:` с entries вида `NAME <номер>`. Ничего выдуманного:
+    непонятная форма остаётся непонятной, а не трактуется.
     """
+    plugins: List[str] = []
+    created: List[str] = []
+    table: List[Tuple[str, int]] = []
+    nested_entries = 0
+    starts = 0
     kinds: Dict[str, List[str]] = {}
-    for match in THEIR_IO_LINE.finditer(text):
-        direction, medium, rest = match.group(1).upper(), match.group(2).upper(), \
-            match.group(3).strip()
-        kinds.setdefault(f"{direction.lower()}_{medium.lower()}", []).append(rest)
+    section = ""
+    for line in text.splitlines():
+        m = THEIR_PLUGIN_LINE.search(line)
+        if m:
+            plugins.append(Path(m.group(1)).name)
+            continue
+        if "VideoMixConfigurator" in line:
+            # Их сервис печатает весь этот блок на каждый старт; дампы env — не
+            # один старт, а несколько, поэтому «стартов в дампе» считается здесь,
+            # а счётчики ниже берутся по уникальным именам.
+            starts += 1
+            section = ""
+            continue
+        stripped = line.strip()
+        if stripped.endswith(":") and not THEIR_TABLE_LINE.match(line):
+            # `Table:`, `Set:`, `0:` — заголовки вложенных секций их дампа.
+            section = stripped[:-1]
+            continue
+        m = THEIR_TABLE_LINE.match(line)
+        if m:
+            if section == "Table":
+                table.append((m.group(1), int(m.group(2))))
+            else:
+                nested_entries += 1      # Set/…: это варианты, а не объявленный набор
+            continue
+        m = THEIR_CREATED_LINE.match(line)
+        if m:
+            created.append(m.group(1))
+            continue
+        m = THEIR_IO_LINE.match(line)
+        if m:
+            direction, medium, rest = (m.group(1).upper(), m.group(2).upper(),
+                                       m.group(3))
+            # Значение у них идёт после `=` той же строкой, через запятую.
+            names = [n.strip() for n in rest.lstrip("= ").split(",") if n.strip()]
+            kinds.setdefault(f"{direction.lower()}_{medium.lower()}", []).extend(
+                names)
     caps = [m.group(1).strip() for m in THEIR_CAP_LINE.finditer(text)]
-    receive = {k: v for k, v in kinds.items() if k.startswith("receive_")}
-    transmit = {k: v for k, v in kinds.items() if k.startswith("transmit_")}
+    # Уникальность, а не «сколько раз напечатано»: в дампе может быть два старта
+    # сервиса, и удвоенный список прочитался бы как удвоенный набор.
+    plugins = sorted(set(plugins))
+    created = sorted(set(created))
+    seen_names: Dict[str, int] = {}
+    for name, number in table:
+        seen_names.setdefault(name, number)
+    table = sorted(seen_names.items(), key=lambda kv: kv[1])
+    receive = {k: sorted(set(v)) for k, v in kinds.items()
+               if k.startswith("receive_")}
+    transmit = {k: sorted(set(v)) for k, v in kinds.items()
+                if k.startswith("transmit_")}
+    truncated_table = bool(text.rstrip().endswith("Table:"))
+    video_created = [c for c in created if c.upper().startswith(
+        ("H.261", "H.263", "H.264", "VP8"))]
     return {"kinds": kinds, "receive": receive, "transmit": transmit,
             "caveat": THEIR_TRANSMIT_CAVEAT if transmit else "",
+            "plugins": plugins, "created": created, "table": table,
+            "starts": starts, "nested_entries": nested_entries,
+            "video_created": video_created,
+            "truncated_table": truncated_table,
             "capabilities": caps,
             "video_tokens": sorted({t.upper() for t in CODEC_TOKENS.findall(text)})}
 
@@ -727,36 +1033,81 @@ def parse_their_ini(text: str) -> Dict[str, Any]:
     return out
 
 
-def tshark_h245(pcap: Path) -> str:
-    """Арбитр по пакетам: TCS и OLC искаем в H.245, не в H.225.
+def count_h245_pdus(lines: List[str]) -> Dict[str, Any]:
+    """Счётчики по колонке Info — по формам, которые tshark печатает на самом деле.
+
+    Проверено на живом дампе нашего же вызова (tshark 4.2.2): Info выглядит как
+    `CS: empty terminalCapabilitySetAck`, `CS: empty openLogicalChannel (g722-64k)`,
+    `CS: setup`, `CS: connect`. Отсюда три правила, и каждое ловило ложнокрасный
+    прогон:
+      • искать надо строчные `terminalcapabilityset`/`openlogicalchannel`, а не
+        «TransferCapabilitySet»/«OpenLogicalChannel» с большой буквы — вторые не
+        встречаются и давали «TCS не найден» на рабочем вызове;
+      • ACK — это НЕ запрос: `terminalCapabilitySetAck` содержит
+        `terminalcapabilityset`, поэтому считается отдельно, иначе TCS удваивается;
+      • tshark 4.2.x падает на собственном H.245-дисклейторе (`assertion
+        "recursion_depth <= 100"`), помечая кадры malformed. Счётчики поэтому —
+        нижняя граница, а «запроса нет» при наличии его ACK — дефект разбора, а не
+        отсутствие согласования: подтверждать нечего, если нечего было подтверждать.
+    """
+    low = [ln.lower() for ln in lines]
+    tcs_ack = sum(1 for ln in low if "terminalcapabilitysetack" in ln)
+    tcs = sum(1 for ln in low if "terminalcapabilityset" in ln) - tcs_ack
+    olc_ack = sum(1 for ln in low if "openlogicalchannelack" in ln)
+    olc = sum(1 for ln in low if "openlogicalchannel" in ln) - olc_ack
+    return {"lines": len(lines), "tcs": max(tcs, 0), "tcs_ack": tcs_ack,
+            "olc": max(olc, 0), "olc_ack": olc_ack,
+            "video_olc": sum(1 for ln in low
+                             if "openlogicalchannel" in ln and any(
+                                 v in ln for v in ("h261", "h263", "h264", "vp8"))),
+            "dissector_bug": sum(1 for ln in low if "dissector bug" in ln),
+            "setup": sum(1 for ln in low if "cs: setup" in ln),
+            "connect": sum(1 for ln in low if "cs: connect" in ln)}
+
+
+def tshark_h245(pcap: Path) -> Dict[str, Any]:
+    """Арбитр по пакетам: TCS и OLC ищем в H.245, а не в H.225.
 
     FastStart у OpenMCU по умолчанию выключен (данные codecs), поэтому искать
-    TransferCapabilitySet в H.225-сообщении — гарантированно не найти и сделать
-    вывод «TCS не было». Идём через `_ws.col.Info`: имена полей h245 у разных
-    версий tshark разъезжаются, а колонка «Information» — то, что реально видно
-    человеку в Wireshark.
+    TransferCapabilitySet внутри H.225-Setup — гарантированно не найти и сделать
+    вывод «TCS не было». Идём через `_ws.col.Info`: имена полей h245 между
+    версиями tshark разъезжаются, а колонка «Information» — то, что видит человек
+    в Wireshark.
     """
+    unavailable = {"available": False, "negotiated": False, "channels": False,
+                   "sample": []}
     exe = shutil.which("tshark")
     if not exe:
-        return "tshark не установлен — арбитраж по пакетам не выполнен"
+        return {**unavailable,
+                "text": "tshark не установлен — арбитраж по пакетам не выполнен"}
     if not pcap.exists() or pcap.stat().st_size == 0:
-        return f"pcap пуст ({pcap.name}) — арбитраж не выполнен"
+        return {**unavailable,
+                "text": f"pcap пуст ({pcap.name}) — арбитраж не выполнен"}
     cmd = [exe, "-r", str(pcap), "-Y", "h245 || h225", "-T", "fields",
            "-e", "frame.number", "-e", "_ws.col.Info"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"tshark не запустился: {exc}"
+        return {**unavailable, "text": f"tshark не запустился: {exc}"}
     lines = (proc.stdout or "").splitlines()
-    tcs = [ln for ln in lines if "ransferCapabilitySet" in ln]
-    olc = [ln for ln in lines if "OpenLogicalChannel" in ln]
-    h225_tcs = [ln for ln in tcs if "H.225" in ln or "Setup" in ln]
-    summary = (f"строк H.245/H.225: {len(lines)}; TCS: {len(tcs)} "
-               f"(из них в H.225: {len(h225_tcs)}); OLC: {len(olc)}")
-    if not tcs:
-        summary += " — TCS не найден: проверь фильтр и то, что вызов был в pcap"
-    return summary + "\n   " + "\n   ".join((tcs + olc)[:12])
+    c = count_h245_pdus(lines)
+    text = (f"строк H.245/H.225: {c['lines']}; setup {c['setup']}, "
+            f"connect {c['connect']}; TCS {c['tcs']} (+ACK {c['tcs_ack']}); "
+            f"OLC {c['olc']} (+ACK {c['olc_ack']}), из них с видеоименем "
+            f"{c['video_olc']}; кадров с багом диссектора: {c['dissector_bug']}")
+    negotiated = c["tcs"] > 0 or c["tcs_ack"] > 0
+    channels = c["olc"] > 0 or c["olc_ack"] > 0
+    if c["dissector_bug"]:
+        text += (" — tshark падает на H.245 (recursion_depth), счётчики это "
+                 "нижняя граница; ACK засчитываем как доказательство запроса")
+    if not negotiated:
+        text += " — TCS не найден: проверь, что вызов попал в pcap"
+    return {"text": text, "available": True, "negotiated": negotiated,
+            "channels": channels, "counts": c,
+            "sample": [ln for ln in lines if any(
+                key in ln.lower() for key in
+                ("terminalcapability", "openlogicalchannel", "cs: setup"))][:12]}
 
 
 # --- подставная «админка» для --self-check ------------------------------------
@@ -769,16 +1120,23 @@ class _FakeAdmin(http.server.BaseHTTPRequestHandler):
     """
 
     marker = Path("/tmp/mcu_openmcu_fakeadmin_call")
+    # Форма строки живая, из tmp/live/compat/status_after_*.html: имя терминала с
+    # `[h323:@IP]` и поля Audio/Video In-Out. Иначе парсер строк терминала не
+    # исполнялся бы ни на одном офлайн-прогоне и ловил KeyError в живом.
     body = ("<html><body><h1>MCU Status</h1><table>"
-            "<tr><td>Terminal</td><td>Audio</td><td>Video</td><td>RTP</td></tr>"
-            "<tr><td>guest</td><td>—</td><td>—</td><td>—</td></tr>"
-            "</table></body></html>")
+            "<tr><td>room101</td><td>Name&nbsp; Duration&nbsp; RTP Channel: "
+            "Codec&nbsp; Packets&nbsp; Bytes&nbsp; FPS&nbsp; "
+            "guest [h323:@203.0.113.9] 00:01 Audio In: G.711-ALAW-64k@8000Hz"
+            "</td></tr></table></body></html>")
 
     def do_GET(self) -> None:  # noqa: N802 — API http.server
         if self.marker.exists():
             self.body = self.body.replace(
-                "<td>guest</td><td>—</td><td>—</td><td>—</td>",
-                "<td>ours</td><td>G.722</td><td>H.261-CIF</td><td>15048</td>")
+                "Audio In: G.711-ALAW-64k@8000Hz",
+                "Audio In: G.711-ALAW-64k@8000Hz MCU-L [h323:@127.0.0.53] 00:05 "
+                "Audio In: G.722-64k@16000Hz Audio Out: G.722-64k@16000Hz "
+                "Video In: H.261-CIF@352x288 Video Out: H.261-CIF@352x288 "
+                "248 252 15048")
         raw = self.body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -795,20 +1153,32 @@ class _FakeAdmin(http.server.BaseHTTPRequestHandler):
 # порядок предпочтений, OLC, обе формы ini) исполнялись на каждом офлайн-прогоне,
 # а не ждали первого контейнера. Файлы пишутся до вызова, а «реакция на вызов»
 # дописывается после установления — ровно как с настоящей админкой.
+# Формы строк взяты из env-дампа стартового stdout финального образа
+# (tmp/openmcu/stdout_service_start.txt) и сокращены: это НЕ образец формата
+# целиком, а те его формы, которые наш разбор умеет читать. Задача шаблона — чтобы
+# парсеры (плагины, созданные возможности, конфиг, Table:) исполнялись на каждом
+# офлайн-прогоне, а не ждали первого контейнера.
 THEIR_STDOUT_TEMPLATE = (
-    "OpenMCU-ru 3.48.0 starting\n"
-    "capabilities: 14 entries\n"
-    "[RECEIVE_SOUND] G.711-alaw 64000\n"
-    "[RECEIVE_SOUND] G.722 64000\n"
-    # Siren14 рядом с G.722 — специально: на этом шаблоне офлайн исполняется
-    # граница семейства («G.722.1-24k» — НЕ G.722), а не впервые у живого микшера.
-    "[RECEIVE_SOUND] G.722.1-24k{sw} 24000\n"
-    "[RECEIVE_VIDEO] H.261-CIF 352x288\n"
-    "[TRANSMIT_SOUND] G.711-alaw 64000\n")
+    "PLUGIN\tReady to load plugin "
+    "/opt/openmcu-ru/lib/ptlib/codecs/audio/g722_audio_pwplugin.so\n"
+    "PLUGIN\tReady to load plugin "
+    "/opt/openmcu-ru/lib/ptlib/codecs/video/h261-vic_video_pwplugin.so\n"
+    "G.722-64k{sw}\n"
+    "OPUS_48K{sw}\n"
+    "H.261-CIF{sw}\n"
+    "H.261-QCIF{sw}\n"
+    "VideoMixConfigurator: layouts.conf processed: 66 layout(s) loaded.\n"
+    "[RECEIVE_SOUND]= G.722-64k{sw}, G.711-ALaw-64k{sw}, OPUS_48K{sw}, \n"
+    "[TRANSMIT_SOUND]= G.722-64k{sw}, G.711-ALaw-64k, \n"
+    # Их конфиг обещает то, чего в образе нет; без этой строки шаблон не учил бы
+    # разбору различать «хотели» и «создали».
+    "[RECEIVE_VIDEO]= H.264-CIF1{sw}, H.261-CIF{sw}, VP8-CIF{sw}, \n"
+    "     Table:\n"
+    "       G.722-64k{sw} <1>\n"
+    "       G.711-ALaw-64k <2>\n"
+    "       H.261-CIF{sw} <3>\n")
 
-THEIR_STDOUT_AFTER_CALL = (
-    "Terminal ours registered in room room101\n"
-    "[RECEIVE_VIDEO] H.261-CIF 352x288\n")
+THEIR_STDOUT_AFTER_CALL = "Room room101: terminal registered\n"
 
 THEIR_TRACE_TEMPLATE = (
     "2026/10/22 11:00:00.001  OpenMCU-ru trace, level 2\n"
@@ -1077,30 +1447,39 @@ def main() -> int:
               f"(запишите её в --dial для повторных прогонов)", flush=True)
 
         # --- 2. кодеки с обеих сторон ------------------------------------------
-        def media() -> List[Dict[str, Any]]:
-            return [e for e in col.all_of("call.media")
-                    if str(e.get("kind", "")) == "video"]
+        def all_media() -> List[Dict[str, Any]]:
+            return [e for e in col.all_of("call.media") if e.get("codec")]
 
-        deadline = time.monotonic() + args.video_wait
-        got: List[Dict[str, Any]] = []
-        while time.monotonic() < deadline:
-            got = media()
-            if got:
-                break
-            time.sleep(0.5)
-        for ev in got:
-            print(f"[i] call.media: direction={ev.get('direction')} "
-                  f"codec={ev.get('codec')} {ev.get('width')}x{ev.get('height')} "
-                  f"fps={ev.get('fps')}", flush=True)
+        # Не «до первого события», а «пока поток не замолчит»: иначе decoder-половина
+        # регулярно теряется (живой compat), и отчёт врал про форму согласования.
+        media_events = wait_for_media_settled(all_media, args.video_wait,
+                                              quiet_s=min(3.0, args.video_wait))
+        for ev in media_events:
+            print(f"[i] call.media: kind={ev.get('kind')} "
+                  f"direction={ev.get('direction')} codec={ev.get('codec')} "
+                  f"{ev.get('width') or ''}x{ev.get('height') or ''} "
+                  f"fps={ev.get('fps') or '—'}", flush=True)
+        got = [e for e in media_events if str(e.get("kind", "")) == "video"]
         ours_video = [str(e.get("codec", "")) for e in got if e.get("codec")]
-        ours_audio = [str(e.get("codec", "")) for e in col.all_of("call.media")
-                      if str(e.get("kind", "")) == "audio" and e.get("codec")]
+        audio_events = [e for e in media_events
+                        if str(e.get("kind", "")) == "audio"]
+        ours_audio = [str(e.get("codec", "")) for e in audio_events]
+        asym = audio_asymmetry_note(audio_events)
+        if asym:
+            print("[i] " + asym, flush=True)
+        if len(ours_audio) < 2:
+            # Одна сторона аудио — это не «симметрично», это «мы не дождались».
+            print("[i] аудио-событий найдено "
+                  f"{len(ours_audio)}: второго направления в потоке нет — это НЕ "
+                  "«аудио симметричное», стенд не дождался событий (увельчь "
+                  "--video-wait)", flush=True)
+            skipped.append("аудио по направлениям: меньше двух событий")
         want_video = args.expect_video == "yes"
 
         # Ожидания этого профиля (записаны до прогона, печатались до набора). В
         # самопроверке НЕ применяются: там собеседник — наш же хост, и сверять его
         # с ожиданиями от OpenMCU значило бы красное без подозреваемого.
-        expects = {} if args.self_check else PROFILE_EXPECTATIONS.get(label, {})
+        expects = {} if args.self_check else expectations_for(label)
         if expects.get("audio"):
             ck.check(any(family_matches(c, list(expects["audio"]))
                          for c in ours_audio),
@@ -1144,20 +1523,47 @@ def main() -> int:
         (dump / f"their_trace_{label}.txt").write_text(trace_text,
                                                        encoding="utf-8")
         if stdout_text:
-            parsed = parse_their_stdout(stdout_text)
+            # Слои читаются из РАЗНЫХ мест: плагины, созданные возможности и Table:
+            # печатаются при старте сервиса, то есть в срезе «дописано за прогон»
+            # их может не быть вовсе. Значит сильное звено берём из всего файла, а
+            # срез отвечает только на вопрос «что у них произошло в этом окне».
+            full_text = stdout_text
+            if their_log_path is not None:
+                try:
+                    full_text = their_log_path.read_text(encoding="utf-8",
+                                                         errors="replace")
+                except OSError:
+                    full_text = stdout_text
+            parsed = parse_their_stdout(full_text)
             recv = {k: len(v) for k, v in sorted(parsed["receive"].items())}
             sent = {k: len(v) for k, v in sorted(parsed["transmit"].items())}
-            print(f"[i] их stdout за прогон: приём {recv or '—'}, передача "
-                  f"{sent or '—'}, токены {parsed['video_tokens'][:8] or '—'}",
-                  flush=True)
+            print("[i] их stdout, КОНФИГ (что они хотели бы): приём "
+                  f"{recv or '—'}, передача {sent or '—'}, токены "
+                  f"{parsed['video_tokens'][:8] or '—'}", flush=True)
+            print("[i] " + THEIR_EVIDENCE_HIERARCHY, flush=True)
             if sent:
-                print("[i] (списки ПЕРЕДАЧИ — " + parsed["caveat"] + ")", flush=True)
-            ck.check(bool(parsed["receive"]),
-                     "их stdout объявляет приём [RECEIVE_*] — это их TCS",
-                     f"строк {len(stdout_text.splitlines())}; если пусто — "
-                     f"скорее всего указан не тот файл (--their-log)")
+                print("[i] (списки ПЕРЕДАЧИ — " + parsed["caveat"] + ")",
+                      flush=True)
+            print("[i] их stdout, ПОДЛИННИК: плагинов "
+                  f"{len(parsed['plugins'])}, созданных возможностей "
+                  f"{len(parsed['created'])} (видео: {parsed['video_created'] or '—'}), "
+                  f"приоритет аудиомикшера (их Table.): {len(parsed['table'])} "
+                  f"(стартов сервиса в дампе: {parsed['starts']})", flush=True)
+            if parsed["truncated_table"]:
+                print("[i] их stdout оборван на «Table:» — объявленный набор не "
+                      "виден целиком, попроси хвост (podman logs --since)",
+                      flush=True)
+            ck.check(bool(parsed["plugins"]) and bool(parsed["created"]),
+                     "у них есть загруженные плагины и СОЗДАННЫЕ возможности "
+                     "(сильное звено иерархии)",
+                     f"плагинов {len(parsed['plugins'])}, создано "
+                     f"{len(parsed['created'])}; если 0 — либо не тот файл "
+                     f"(--their-log), либо их сервис не стартовал в этом дампе")
+            print(f"[i] их stdout за прогон дописано строк: "
+                  f"{len(stdout_text.splitlines())}", flush=True)
         elif their_log_path is not None:
-            ck.check(False, "их stdout объявляет приём [RECEIVE_*]",
+            ck.check(False, "их stdout (плагины/созданные/Table) доступен для "
+                            "разбора",
                      f"{their_log_path} не вырос за прогон")
         if trace_text:
             traced = parse_their_trace(trace_text)
@@ -1202,35 +1608,96 @@ def main() -> int:
             diff = describe_diff(before, after)
             print(f"[i] их статус ПОСЛЕ вызова: {diff}", flush=True)
             new_tokens = sorted(after["tokens"] - before["tokens"])
+            before_rows = status_terminal_rows(before)
+            after_rows = status_terminal_rows(after)
+            new_rows = terminal_rows_delta(before_rows, after_rows)
+            for row in new_rows[:3]:
+                print(f"[i] их /Status, новый терминал {row['name']!r} "
+                      f"[h323:@{row['ip']}]: {row['media']}", flush=True)
+            if not new_rows and after_rows:
+                print("[i] их /Status: новых терминалов не появилось "
+                      f"(всего строк после вызова: {len(after_rows)})", flush=True)
             measurable, why = status_measurable(before)
             if not measurable:
                 print("[i] " + why + " — дифф их статуса НЕ измерялся (и не "
                       "красный: мерить было нечем)", flush=True)
                 skipped.append("дифф их статуса: " + why)
-            measurable, _why = status_measurable(before)
-            check_diff, video_tokens = video_diff_verdict(want_video and measurable,
-                                                          new_tokens)
-            if check_diff:
-                ck.check(bool(video_tokens),
-                         "на их стороне после вызова появился видеокодек "
-                         "(дифф статуса)",
-                         f"{diff}; сырой дамп — status_after_*.html в {dump}")
-                if not video_tokens and after["bytes"] != before["bytes"]:
-                    print("[i] страница изменилась, но опознавательных имён видео "
-                          "не найдено: разбор надо уточнить по дампу — это НЕ "
-                          "утверждение «они не приняли видео»", flush=True)
-            else:
-                note = name_shape_note(ours_video, video_tokens)
+            their_http_died = False
+            if measurable and not status_measurable(after)[0]:
+                # «До» отвечало, «после» — нет: это не «они не приняли видео», это
+                # их сервис лёг посреди прогона (в живом логе это `realloc():
+                # invalid next size`). Красить вызов по их трупу — ложная краснота.
+                their_http_died = True
+                why_after = status_measurable(after)[1]
+                measurable = False
+                print("[!] их страница ответила ДО, но не ответила ПОСЛЕ вызова ("
+                      + why_after + ") — подозрение, что их сервис умер во время "
+                      "прогона (их лог: `realloc(): invalid next size`); сравнение "
+                      "до/после не выполнено", flush=True)
+                skipped.append("дифф их статуса: их HTTP молчал после вызова")
+            # Дифф токенов сам по себе — слабое доказательство: их страница stateful
+            # (терминал досидит в комнате после вызова), и в матрице второй профиль
+            # видел H.261-CIF уже «до» себя. Поэтому проверка читает строку нашего
+            # терминала (их собственный «Video In»), а дифф — только подпорка.
+            new_ports = sorted(after["ports"] - before["ports"])
+            ok_reception, why = reception_verdict(
+                want_video and measurable, new_rows, new_tokens,
+                sorted(after["tokens"]), new_ports)
+            if ok_reception is None:
+                print("[i] " + why, flush=True)
+                note = name_shape_note(ours_video, new_tokens)
                 if note:
                     print("[i] " + note, flush=True)
-            if video_tokens and not check_diff:
-                print(f"[i] профиль без видео, а в их статусе появилось "
-                      f"{video_tokens}: это не про нас (кто-то ещё в комнате либо "
-                      "страница изменилась по своей причине) — проверкой не считаем",
-                      flush=True)
             else:
-                print("[i] профиль без видео: дифф статуса не проверяется — "
-                      "показать нам было нечего", flush=True)
+                ck.check(bool(ok_reception),
+                         "их /Status показывает видео в строке нашего терминала",
+                         why + f"; что поток реально шёл — доказывают "
+                         f"from_openmcu_*.png и call.media; сырой дамп — "
+                         f"status_after_*.html в {dump}")
+            note = name_shape_note(ours_video, new_tokens)
+            if note:
+                print("[i] " + note, flush=True)
+
+        # Счётчики на нашем плече вынесены в функцию: профиль без видео
+        # выходит из main() раньше, а арбитр по пакетам нужен и ему.
+        def packet_phase() -> None:
+            if args.pcap <= 0:
+                print("[i] --pcap 0: счётчики RTP не снимались (можно --pcap 5)",
+                      flush=True)
+                return
+            line, pcap = capture.stop(min_seconds=args.pcap)
+            print(f"[i] плечо пакетов: {line}", flush=True)
+            if pcap is None:
+                # Снимать нечем — берём то, что доступно без CAP_NET_RAW, и прямо
+                # говорим, что это грубая замена.
+                print("[i] запасной замер: " + loopback_delta(args.pcap),
+                      flush=True)
+                return
+            arb = tshark_h245(pcap)
+            print("[i] арбитраж tshark: " + arb["text"], flush=True)
+            for sample in arb.get("sample", [])[:6]:
+                print("      " + sample, flush=True)
+            if not arb["available"]:
+                return
+            counts = arb.get("counts", {})
+            if want_video:
+                ck.check(arb["negotiated"],
+                         "согласование возможностей видно в пакетах "
+                         "(TCS или его ACK)", arb["text"])
+                ck.check(arb["channels"],
+                         "открытие каналов видно в пакетах (OLC или его ACK)",
+                         "OLC — это уже среда, а не только договорённость")
+            else:
+                # В no-video арбитр нужен больше всего: он единственный показывает,
+                # что видеоканал НЕ открывался. Раньше профиль выходил из main() до
+                # этой фазы, и лог молчал — молчание читалось как «всё в порядке».
+                ck.check(counts.get("video_olc", 0) == 0,
+                         "в профиле без видео видеоканал в пакетах не открыт",
+                         arb["text"] + (" — ниже нуля не бывает: при баге "
+                                        "диссектора имя кодека в кадре могло не "
+                                        "разобраться, это нижняя граница"
+                                        if counts.get("dissector_bug") else ""))
+
 
         # --- 4. обратная картинка: кадры от них в наш второй сокет -------------
         if not want_video:
@@ -1239,7 +1706,13 @@ def main() -> int:
                      "без видео: сокет кадров не создан (честный признак)",
                      f"{sock_video}")
             print("[i] обратный канал в этом профиле не проверяется", flush=True)
+            packet_phase()      # арбитр в no-video обязателен: он мерит отсутствие
             return finish(ck, dump, args, skipped)
+        if args.no_incoming:
+            # Явная строка вместо тишины: «проверки не было» обязано быть видно.
+            print("[i] --no-incoming: приём кадров не измерялся по указанию "
+                  "оператора", flush=True)
+            skipped.append("приём кадров: выключен --no-incoming")
         if args.self_check:
             # Паттерн на «их» стороне включаем ДО захвата: у нашего хоста кадр
             # появляется только когда encoder-канал реально что-то кодирует.
@@ -1261,6 +1734,13 @@ def main() -> int:
             # нет ни одного плагина, которым он мог бы ответить, это другой разговор,
             # и он обязан быть в той же строке, что и проверка.
             comp = build_composition_note(full, new_tokens)
+            if full == 0 and their_http_died:
+                # Тот же класс: пустой приём при умершем их HTTP объясняется их
+                # состоянием, а не отказом микшера показывать картинку.
+                comp = ((comp + "; " if comp else "")
+                        + "их админка перестала отвечать в середине прогона — "
+                        "сначала проверь, жив ли их контейнер (их лог: realloc()), "
+                        "и только потом говори «микшер не показал картинку»")
             ck.check(full > 0,
                      "их видео дошло до нас (сокет кадров)",
                      f"полных={full} неполных={grab.incomplete} "
@@ -1290,30 +1770,18 @@ def main() -> int:
         else:
             print("[i] --no-incoming: обратный канал не проверялся", flush=True)
 
-        # --- 5. счётчики на нашем плече ---------------------------------------
-        if args.pcap > 0:
-            line, pcap = capture.stop(min_seconds=args.pcap)
-            print(f"[i] плечо пакетов: {line}", flush=True)
-            if pcap is not None:
-                verdict = tshark_h245(pcap)
-                print("[i] арбитраж tshark: " + verdict.replace("\n", "\n   "),
-                      flush=True)
-                if not verdict.startswith(("tshark не", "pcap пуст")):
-                    ck.check("TCS не найден" not in verdict,
-                             "TCS виден в H.245 (FastStart у них выключен)",
-                             verdict.splitlines()[0])
-            # Файл пишется сразу в каталог дампа — копировать его «в дамп» было бы
-            # копированием само на себя.
-            if pcap is None:
-                # Снимать нечем — берём то, что доступно без CAP_NET_RAW, и прямо
-                # говорим, что это грубая замена.
-                print("[i] запасной замер: " + loopback_delta(args.pcap), flush=True)
-        else:
-            print("[i] --pcap 0: счётчики RTP не снимались (можно --pcap 5)",
-                  flush=True)
+        packet_phase()
 
         client.send_command("video.pattern", token=token, on="0")
         client.hangup(token)
+        return finish(ck, dump, args, skipped)
+    except Exception as exc:            # noqa: BLE001 — прогон обязан умереть красным
+        # Исключение в разборе — НЕ «0 ошибок». Без этой строки стенд печатал
+        # зелёный итог с traceback в stderr, и матрица получала «в логе нет ни
+        # одной строки про кадры» там, где обязан быть вердикт (live2, KeyError).
+        traceback.print_exc()
+        ck.check(False, "прогон дошёл до конца без исключения",
+                 f"{type(exc).__name__}: {exc}")
         return finish(ck, dump, args, skipped)
     finally:
         for grab in grabs.values():

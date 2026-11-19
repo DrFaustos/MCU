@@ -270,17 +270,19 @@ def test_selfcheck_is_declared_as_pipeline_only():
     assert "ей не доказан" in doc
 
 
-def test_openmcu_html_format_is_declared_unknown():
+def test_openmcu_html_format_declares_where_it_came_from():
     """Стенд не должен незаметно обрасти хардкодом под конкретную вёрстку.
 
-    Формат страницы OpenMCU-ru стенду неизвестен и берётся прогоном + дампом. Если
-    кто-то добавит парсер «колонка 5 = кодек», он обязан сначала убрать это
-    утверждение из докстринга — и тогда тест спросит, откуда формат взят.
+    Формат их страницы теперь читается, и тем важнее, чтобы докстринг говорил, ОТКУДА
+    он взят: из живого дампа, а не из головы. Тест требует и упоминание дампа, и
+    объяснения, почему дифф остался, но не решает — иначе следующий человек вернёт
+    «решающий дифф» и снова покрасит рабочий интероп.
     """
     doc = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
         encoding="utf-8")
-    assert "не известен заранее" in doc
-    assert "дифференциальный" in doc.lower()
+    assert "не выдумывает" in doc, "докстринг обязан назвать источник формы"
+    assert "status_after_*.html" in doc, "источник формы — живой дамп, а не догадка"
+    assert "stateful" in doc and "подпорк" in doc, "почему дифф не решает"
 
 
 def test_stand_has_no_hanging_hyphen_in_source():
@@ -294,18 +296,6 @@ def test_stand_has_no_hanging_hyphen_in_source():
     bad = [ln for ln in src.splitlines()
            if re.search(r"[А-Яа-яЁёA-Za-z]-\s*$", ln)]
     assert not bad, f"висячий перенос в строках: {[b[-40:] for b in bad]}"
-
-
-def test_status_diff_is_a_claim_only_when_we_sent_video():
-    """Дифф их статуса — доказательство только если видео шли МЫ.
-
-    В профиле `--no-video` галочка «у них появился H.261» означала бы «OpenMCU
-    принял наше видео», которого не было. Самопроверка матрицы ловила именно это:
-    профиль no-video проходил зелёным с такой галочкой.
-    """
-    assert stand.video_diff_verdict(True, ["G.722", "H.261-CIF"]) == (True, ["H.261-CIF"])
-    assert stand.video_diff_verdict(True, ["G.722"]) == (True, [])
-    assert stand.video_diff_verdict(False, ["H.261-CIF"])[0] is False
 
 
 def test_name_shape_note_warns_without_diagnosing():
@@ -395,10 +385,67 @@ def test_matrix_carries_expectations_written_before_the_run():
     """
     exp = stand.PROFILE_EXPECTATIONS
     assert exp["compat"]["audio"] == ("G.722",)
-    assert exp["royalty-free"]["audio"] == ("G.711",)
+    assert exp["royalty-free"]["audio"] == ("G.722",)
     assert exp["compat"]["video"] == ("H.261",)
     assert exp["royalty-free-allow-h264"]["must_not_video"] == ("H.264",)
     assert exp["no-video"] == {}
+
+
+def test_matrix_says_out_loud_that_profiles_are_indistinguishable_here():
+    """Совпавший кодек в compat и royalty-free — свойство пары, а не сломанный флаг.
+
+    Всё, чем профили различаются, требует второй стороны: Siren и H.264 есть у нас,
+    но их нет в их сборке; G.729 есть у них, но нет у нас. Если это не напечатано
+    самой матрицей, первый же одинаковый результат объявят регрессией флага.
+    """
+    note = stand.MATRIX_INDIFFERENCE_NOTE
+    assert "свойство пары" in note and "приоритет" in note
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    assert "MATRIX_INDIFFERENCE_NOTE" in src.split("=== матрица: итог ===")[1], \
+        "note печатается в итоге матрицы, а не только объявлена"
+
+
+def test_g722_expectation_is_not_a_royalty_free_mistake():
+    """G.722 свободен (статус «истёк»), поэтому он ожидается и в royalty-free.
+
+    Ожидать там G.711 значило бы красить прогон по собственной ошибке в таблице:
+    royalty-free снимает Siren (G.722.1) и платные/SDK, а не G.722.
+    """
+    assert stand.PROFILE_EXPECTATIONS["compat"]["audio"] == ("G.722",)
+    assert stand.PROFILE_EXPECTATIONS["royalty-free"]["audio"] == ("G.722",)
+
+
+def test_suffixed_label_still_gets_its_profile_expectations():
+    """`--label compat-live` — это compat, и ожидания обязаны примениться.
+
+    Иначе живой прогон проходит «без единой проверки» и выглядит зелёным:
+    не-проверка и проверка — разные результаты, и путать их нельзя.
+    """
+    assert stand.expectations_for("compat-live")["audio"] == ("G.722",)
+    assert stand.expectations_for("no-video-tmp") == {}
+    assert stand.expectations_for("вовсе-не-профиль") == {}
+
+
+def test_arbiter_counts_do_not_confuse_ack_with_request():
+    """ACK не удваивает запрос, а «нет TCS при наличии ACK» — баг tshark, не вызов.
+
+    Живой дамп нашего же вызова показал строчные имена (`terminalCapabilitySetAck`)
+    и assertion в их H.245-дисклейторе; прежний поиск по «TransferCapabilitySet» с
+    большой буквы не находил ничего и красил рабочий вызов.
+    """
+    lines = ["4\tCS: setup ", "8\tCS: connect [Dissector bug, protocol H.245]",
+             "13\tCS: empty terminalCapabilitySetAck masterSlaveDetermination",
+             "14\tCS: empty terminalCapabilitySetAck",
+             "17\tCS: empty openLogicalChannel (g722-64k) [Dissector bug]",
+             "19\tCS: empty openLogicalChannelAck openLogicalChannelAck"]
+    c = stand.count_h245_pdus(lines)
+    assert c["tcs"] == 0 and c["tcs_ack"] == 2, c      # ACK ≠ запрос, без удвоения
+    assert c["olc"] == 1 and c["olc_ack"] == 1, c
+    assert c["dissector_bug"] == 2 and c["setup"] == 1 and c["connect"] == 1
+
+
+# --- ожиданий ---------------------------------------------------------------
 
 
 def test_expectations_line_is_printable_before_the_result():
@@ -438,17 +485,18 @@ def test_family_boundary_excludes_a_different_codec_with_same_start():
 
 
 def test_their_stdout_template_carries_the_boundary_case():
-    """Граница семейства исполняется и на шаблоне их stdout, офлайн.
+    """Граница семейства исполняется на шаблоне их stdout + добавленный кейс.
 
-    Шаблон — не образец их формата, а тренажёр разбора: если в нём нет пары
-    G.722 / G.722.1, проверка границы впервые исполнится уже у живого микшера.
+    Шаблон повторяет формы живого дампа, а Siren14 к нему дописывается здесь же:
+    иначе проверка границы впервые исполнится уже у живого микшера.
     """
-    parsed = stand.parse_their_stdout(stand.THEIR_STDOUT_TEMPLATE)
+    text = (stand.THEIR_STDOUT_TEMPLATE
+            + "[RECEIVE_SOUND]= G.722.1-24k{sw}, G.722-64k{sw}, \n")
+    parsed = stand.parse_their_stdout(text)
     sounds = parsed["receive"]["receive_sound"]
-    assert any("G.722.1" in item for item in sounds), sounds
-    assert any(item.startswith("G.722 ") for item in sounds), sounds
-    siren = [i for i in sounds if "G.722.1" in i][0].split()[0]
-    assert not stand.family_matches(siren, ["G.722"])
+    assert "G.722.1-24k{sw}" in sounds, sounds
+    assert stand.family_matches("G.722-64k{sw}", ["G.722"])
+    assert not stand.family_matches("G.722.1-24k{sw}", ["G.722"])
 
 
 def test_matrix_uses_real_host_flags():
@@ -510,11 +558,18 @@ def test_matrix_command_can_run_whole_matrix_offline():
 
 _THEIR_STDOUT = """
 OpenMCU-ru starting
-[RECEIVE_SOUND] G.711-alaw 64000
-[RECEIVE_SOUND] G.722 64000
-[TRANSMIT_SOUND] G.711-alaw 64000
-[RECEIVE_VIDEO] H.261-CIF 352x288
+PLUGIN\tReady to load plugin /opt/openmcu-ru/lib/ptlib/codecs/audio/g722_audio_pwplugin.so
+PLUGIN\tReady to load plugin /opt/openmcu-ru/lib/ptlib/codecs/video/h261-vic_video_pwplugin.so
+G.722-64k{sw}
+H.261-CIF{sw}
+VideoMixConfigurator: layouts.conf processed: 66 layout(s) loaded.
+[RECEIVE_SOUND]= G.722-64k{sw}, G.711-ALaw-64k{sw},
+[TRANSMIT_SOUND]= G.722-64k{sw}, G.711-ALaw-64k,
+[RECEIVE_VIDEO]= H.264-CIF1{sw}, H.261-CIF{sw},
 capabilities: 12 entries
+     Table:
+       G.722-64k{sw} <1>
+       H.261-CIF{sw} <2>
 """
 
 _THEIR_TRACE = """2026/10/22 11:00:01.001  Codecs (in preference order)
@@ -539,12 +594,47 @@ TRANSMIT_H264 = 0
 
 def test_their_stdout_parser_groups_receive_and_transmit_by_medium():
     parsed = stand.parse_their_stdout(_THEIR_STDOUT)
-    assert sorted(parsed["receive"]["receive_sound"]) == ["G.711-alaw 64000",
-                                                          "G.722 64000"]
-    assert parsed["receive"]["receive_video"] == ["H.261-CIF 352x288"]
-    assert parsed["kinds"]["transmit_sound"] == ["G.711-alaw 64000"]
+    assert parsed["receive"]["receive_sound"] == ["G.711-ALaw-64k{sw}",
+                                                  "G.722-64k{sw}"]
+    assert parsed["receive"]["receive_video"] == ["H.261-CIF{sw}", "H.264-CIF1{sw}"]
+    assert parsed["transmit"]["transmit_sound"] == ["G.711-ALaw-64k",
+                                                    "G.722-64k{sw}"]
     assert "H.261-CIF" in parsed["video_tokens"]
     assert parsed["capabilities"] == ["12 entries"]
+
+
+def test_their_stdout_separates_loaded_from_wanted():
+    """Созданное и загруженное — сильное звено; [RECEIVE_*] — только конфиг.
+
+    Их автогенерация дописывает в конфиг и те имена, плагина под которые нет: в
+    живом дампе 27 видеоимён в [RECEIVE_VIDEO] при одном видео-плагине. Если
+    перепутать слои, «H.264 у них есть» станет ложью в отчёте.
+    """
+    parsed = stand.parse_their_stdout(_THEIR_STDOUT)
+    assert parsed["plugins"] == ["g722_audio_pwplugin.so",
+                                 "h261-vic_video_pwplugin.so"], parsed["plugins"]
+    assert parsed["created"] == ["G.722-64k{sw}", "H.261-CIF{sw}"]
+    assert parsed["video_created"] == ["H.261-CIF{sw}"]
+    assert "H.264-CIF1{sw}" in parsed["receive"]["receive_video"]
+    assert "H.264-CIF1{sw}" not in parsed["created"]
+    # Их `Table:` — приоритет аудиомикшера (8 строк = 8 микшируемых входов), а не
+    # объявленное множество; парсир сохраняет порядок, подпись даёт отчёт.
+    assert parsed["table"] == [("G.722-64k{sw}", 1), ("H.261-CIF{sw}", 2)]
+
+
+def test_their_stdout_two_starts_do_not_double_their_set(tmp_path):
+    """Дампы env — это несколько стартов сервиса; набор от этого не удваивается."""
+    parsed = stand.parse_their_stdout(_THEIR_STDOUT + _THEIR_STDOUT)
+    assert parsed["starts"] == 2
+    assert parsed["created"] == ["G.722-64k{sw}", "H.261-CIF{sw}"]
+    assert parsed["table"] == [("G.722-64k{sw}", 1), ("H.261-CIF{sw}", 2)]
+
+
+def test_their_stdout_truncated_table_is_announced():
+    """Оборванный на «Table:» дамп — это «не видим», а не «у них пусто»."""
+    parsed = stand.parse_their_stdout("[RECEIVE_SOUND]= G.722-64k{sw},\n     Table:\n")
+    assert parsed["truncated_table"] is True
+    assert parsed["table"] == []
 
 
 def test_transmit_lists_carry_their_label_and_are_not_our_evidence():
@@ -728,26 +818,272 @@ def test_stand_and_its_tests_have_no_cjk():
         assert not bad, f"{rel}: CJK-иероглифы {bad} — это раскладка, а не текст"
 
 
+def test_media_events_are_read_until_the_stream_settles():
+    """Хост отдаёт decoder-событие позже encoder-ного: ждать надо тишины, а не начала.
+
+    Живой live3/compat напечатал только `direction=encoder`, хотя в его же
+    `h323_L.log` стоят `VIDEO: decoder` и `PCM: decoder`. Аудитору это выглядело как
+    «в compat аудио симметричное, в трёх других — нет», хотя исход был один.
+    """
+    ticks = iter(range(0, 1000))
+
+    class Clock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def now(self) -> float:
+            return self.t
+
+        def sleep(self, dt: float) -> None:
+            self.t += dt
+
+    clock = Clock()
+    stream = [[], [], [], [{"kind": "video", "direction": "encoder",
+                            "codec": "H.261-CIF"}],
+              [{"kind": "video", "direction": "encoder", "codec": "H.261-CIF"},
+               {"kind": "video", "direction": "decoder", "codec": "H.261-CIF"},
+               {"kind": "audio", "direction": "decoder", "codec": "Speex"},
+               {"kind": "audio", "direction": "encoder", "codec": "G.722-64k"}]]
+
+    def events_fn() -> list:
+        return stream.pop(0) if stream else stream_holder[0]
+
+    stream_holder = [stream[-1]]
+    got = stand.wait_for_media_settled(events_fn, deadline_s=30.0, quiet_s=2.0,
+                                       sleep=clock.sleep, clock=clock.now)
+    assert len(got) == 4, got          # поздние decoder-события не потеряны
+    directions = {e["direction"] for e in got}
+    assert directions == {"encoder", "decoder"}
+    next(ticks)                        # andirament: ticks не используется
+
+
+def test_media_settle_wait_returns_empty_honestly_on_deadline():
+    """Ноль событий за дедлайн — это «не дождались», а не «согласовалось пусто»."""
+    clock_t = {"t": 0.0}
+
+    def now() -> float:
+        return clock_t["t"]
+
+    def sleep(dt: float) -> None:
+        clock_t["t"] += dt
+
+    got = stand.wait_for_media_settled(lambda: [], deadline_s=1.0, quiet_s=2.0,
+                                       sleep=sleep, clock=now)
+    assert got == []
+    assert clock_t["t"] >= 1.0         # дедлайн действительно отработал
+
+
+def test_audio_asymmetry_is_named_not_hidden():
+    """Разные кодек-имена по направлениям обязаны быть названы в отчёте.
+
+    Живой compat: encoder G.722-64k, decoder SpeexIETFWide-20.6k. Без этой строки
+    «аудио G.722» читается как симметричный результат, а это ложь формата.
+    """
+    events = [{"direction": "encoder", "codec": "G.722-64k"},
+              {"direction": "decoder", "codec": "SpeexIETFWide-20.6k"}]
+    note = stand.audio_asymmetry_note(events)
+    assert "асимметричное" in note and "G.722-64k" in note
+    assert "SpeexIETFWide-20.6k" in note and "по нашей таблице" in note
+    same = [{"direction": "encoder", "codec": "G.722-64k"},
+            {"direction": "decoder", "codec": "G.722-64k"}]
+    assert stand.audio_asymmetry_note(same) == ""
+    assert stand.audio_asymmetry_note([]) == ""
+
+
+def test_terminal_rows_come_from_snapshot_bodies_not_ok_items():
+    """Тело страницы живёт в `bodies` (bytes), в `ok` — только код и токены.
+
+    live2 умер на KeyError 'body' ровно здесь, причём ВСЕ проверки до этого были
+    зелёные: парсер читал не тот ключ снимка.
+    """
+    snap = {"ok": [{"url": "u", "code": 200, "bytes": 10, "tokens": ["H.261-CIF"]}],
+            "fail": [], "tokens": {"H.261-CIF"}, "ports": set(), "bytes": 10,
+            "bodies": {"u": _THEIR_STATUS_AFTER.encode("utf-8")}}
+    rows = stand.status_terminal_rows(snap)
+    assert len(rows) == 1 and rows[0]["media"]["video_in"], rows
+
+
+def test_crash_inside_analysis_cannot_print_zero_errors():
+    """Исключение в разборе обязано стать красной учтённой строкой, а не тишиной.
+
+    Без guard-а стенд печатал «[OK] ошибок проверки: 0», traceback уходил в stderr,
+    а в stand.log не было ни одной строки про кадры — ровно тот класс «зелёно по
+    умолчанию», который мы выправливаем с двух сторон.
+    """
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    guard = src.split("    finally:")[0]
+    assert "except Exception as exc" in guard
+    assert "прогон дошёл до конца без исключения" in guard
+    assert "traceback.print_exc()" in guard
+
+
+def test_no_incoming_says_it_out_loud_instead_of_silence():
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    assert "--no-incoming: приём кадров не измерялся" in src
+
+
+# --- их /Status глазами оператора ---------------------------------------------
+
+# Выдернуто из живого дампа tmp/live/compat/status_after_*.html: строка нашего
+# терминала с Audio/Video In/Out — то, что оператор видит в их админке.
+_THEIR_STATUS_AFTER = """<html><body><table>
+<tr><td>Room Name</td><td>Room Members</td></tr>
+<tr><td>room101</td><td>Name&nbsp; Duration&nbsp; RTP Channel: Codec&nbsp;
+Packets&nbsp; Bytes&nbsp; Kbit/s&nbsp; FPS&nbsp;
+MCU-L [h323:@10.89.0.8] 00:05 Audio In: G.722-64k@16000Hz
+Audio Out: Speex_16K@16000Hz Video In: H.261-CIF@352x288
+Video Out: H.261-CIF@352x288 248 252 65 80</td></tr>
+</table></body></html>"""
+
+_THEIR_STATUS_BEFORE = """<html><body><table><tr><td>room101</td><td>
+MCU-L [h323:@10.89.0.7] 00:01 Audio In: G.722-64k@16000Hz
+</td></tr></table></body></html>"""
+
+
+def test_their_http_dying_mid_run_is_not_a_red_call():
+    """«До» отвечало, «после» — тишина: их сервис лёг, вызов не при чём.
+
+    diagnostic-прогон поймал это живьём: их контейнер упал с `realloc(): invalid
+    next size` сразу после «Adding member MCU-L», after-снимок собрал 0 страниц, и
+    проверка приёма покраснела по их трупам.
+    """
+    dead = {"ok": [], "fail": ["http://x/Status: timed out"], "tokens": set(),
+            "ports": set(), "bytes": 0, "bodies": {}}
+    ok, why = stand.status_measurable(dead)
+    assert ok is False and "ни одна их страница" in why
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    assert "их страница ответила ДО, но не ответила ПОСЛЕ" in src
+    assert "realloc(): invalid next size" in src
+
+
+def test_their_status_row_is_their_own_reception_counter():
+    rows = stand.parse_their_terminals(_THEIR_STATUS_AFTER)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["name"] == "MCU-L", row          # имя без хвоста шапки таблицы
+    assert row["media"]["video_in"] == "H.261-CIF@352x288", row
+    assert row["media"]["audio_in"] == "G.722-64k@16000Hz"
+
+
+def test_their_row_name_loses_the_previous_cells_of_their_table():
+    """Имя не должно тащить хвост соседних ячеек («8000Hz MCU-L»).
+
+    Самопроверка поймала это на собственной подставной странице: имя читается как
+    мусор, и в отчёте владелец видит «8000Hz MCU-L» вместо «MCU-L».
+    """
+    page = ("<table><tr><td>room101</td><td>Bytes Kbit/s FPS "
+            "G.711-ALAW-64k@8000Hz MCU-L [h323:@10.89.0.8] 00:05 "
+            "Video In: H.261-CIF@352x288</td></tr></table>")
+    rows = stand.parse_their_terminals(page)
+    assert rows[0]["name"] == "MCU-L", rows[0]
+    assert rows[0]["media"]["video_in"] == "H.261-CIF@352x288"
+
+
+def test_reception_verdict_prefers_their_video_in_over_token_diff():
+    """«Video In» в их строке сильнее диффа токенов: страница stateful.
+
+    В живом прогоне H.261-CIF стоял на странице ДО второго профиля матрицы, и
+    проверка по диффу краснела на рабочем вызове — ровно «ложнозелёное наоборот».
+    """
+    rows = stand.parse_their_terminals(_THEIR_STATUS_AFTER)
+    ok, why = stand.reception_verdict(True, rows, ["G.722-64K"], ["H.261-CIF"],
+                                      ["39680"])
+    assert ok is True
+    assert "Video In" in why and "счётчик приёма" in why, why
+
+
+def test_reception_verdict_accepts_ports_when_token_is_stale():
+    """Ни новой строки, ни нового токена, но есть видео-токен + новые порты.
+
+    Их комната держит терминал после вызова; новые RTP-порты — единственный
+    признак, относящийся именно к этому вызову, и он принимается с объяснением.
+    """
+    ok, why = stand.reception_verdict(True, [], [], ["H.261-CIF"], ["39680"])
+    assert ok is True and "stateful" in why, why
+
+
+def test_reception_verdict_is_red_only_without_any_sign():
+    ok, why = stand.reception_verdict(True, [], ["G.722-64K"], ["G.722-64K"], [])
+    assert ok is False
+    assert "status_after_*.html" in why          # куда смотреть, а не «дифф пуст»
+
+
+def test_reception_verdict_does_not_check_video_when_we_send_none():
+    ok, why = stand.reception_verdict(False, [], [], ["H.261-CIF"], [])
+    assert ok is None and "без видео" in why
+
+
+def test_terminal_rows_delta_uses_ip_because_ours_is_new_by_address():
+    before = stand.parse_their_terminals(_THEIR_STATUS_BEFORE)
+    after = stand.parse_their_terminals(_THEIR_STATUS_AFTER)
+    new = stand.terminal_rows_delta(before, after)
+    assert [r["ip"] for r in new] == ["10.89.0.8"], new
+
+
+def test_terminal_rows_from_two_pages_merge_into_one():
+    """Оглавление даёт терминал без медиа, /Status — с медиа: строка должна быть одна."""
+    pages = stand.parse_their_terminals(_THEIR_STATUS_AFTER) + [
+        {"name": "MCU-L", "ip": "10.89.0.8", "media": {}}]
+    merged = stand.merge_terminal_rows(pages)
+    assert len(merged) == 1 and merged[0]["media"]["video_in"], merged
+
+
 # --- tshark как арбитр --------------------------------------------------------
+
+
+def test_arbiter_sees_whether_a_video_channel_was_opened():
+    """В профиле без видео арбитр мерит ОТСУТСТВИЕ видеоканала — нужен счётчик.
+
+    Без `video_olc` проверка «видеоканал не открыт» была бы невозможна, и no-video
+    выходил бы из main() до арбитра: молчание в логе вместо вердикта.
+    """
+    lines = ["17\tCS: empty openLogicalChannel (g722-64k) ",
+             "18\tCS: empty openLogicalChannel (h261-cif) ",
+             "19\tCS: empty openLogicalChannelAck "]
+    c = stand.count_h245_pdus(lines)
+    assert c["video_olc"] == 1, c
+    assert c["olc"] == 2 and c["olc_ack"] == 1, c
+
+
+def test_no_video_profile_runs_the_packet_arbiter_before_returning():
+    """Раньше no-video выходил из main() до фазы пакетов и лог молчал.
+
+    Молчание читалось как «всё в порядке»: именно этот класс мы выправляем весь
+    день, и здесь он стоил того, что ни в одном live3-логе no-video нет ни
+    `плечо пакетов`, ни `арбитраж tshark`.
+    """
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    branch = src.split("без видео: сокет кадров не создан")[1].split("def main")[0]
+    assert "packet_phase()" in branch.split("return finish")[0], \
+        "арбитр обязан отработать до early return"
+    assert "в профиле без видео видеоканал в пакетах не открыт" in src
+
 
 def test_tshark_is_honest_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(stand.shutil, "which", lambda _n: None)
-    verdict = stand.tshark_h245(tmp_path / "nothing.pcap")
-    assert verdict.startswith("tshark не")
+    arb = stand.tshark_h245(tmp_path / "nothing.pcap")
+    assert arb["available"] is False and arb["text"].startswith("tshark не")
+    assert arb["negotiated"] is False          # «не чем мерить» ≠ «согласовалось»
 
 
 def test_tshark_is_honest_on_empty_pcap(monkeypatch, tmp_path):
     monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
     empty = tmp_path / "e.pcap"
     empty.write_bytes(b"")
-    assert stand.tshark_h245(empty).startswith("pcap пуст")
+    arb = stand.tshark_h245(empty)
+    assert arb["text"].startswith("pcap пуст") and arb["available"] is False
 
 
 def test_tshark_searches_h245_and_reports_tcs_and_olc(monkeypatch, tmp_path):
     """TCS ищем в H.245: FastStart у OpenMCU выключен, в H.225 его просто нет.
 
-    Отфильтровать по `h245` и зачитать колонку Information — единственный способ
-    не зависеть от имён полей диссектора, которые между версиями tshark меняются.
+    Фильтр по `h245` и зачитывание колонки Information — единственный способ не
+    зависеть от имён полей диссектора, которые между версиями меняются. Строки
+    взяты из живого дампа нашего же вызова, а не из документации tshark.
     """
     monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
     pcap = tmp_path / "call.pcap"
@@ -758,16 +1094,15 @@ def test_tshark_searches_h245_and_reports_tcs_and_olc(monkeypatch, tmp_path):
         seen["cmd"] = cmd
         return subprocess.CompletedProcess(
             cmd, 0,
-            stdout="12\tH.225 Setup\n17\tH.245 TransferCapabilitySet\n"
-                   "21\tH.245 OpenLogicalChannel\n", stderr="")
+            stdout="4\tCS: setup \n12\tCS: empty terminalCapabilitySet \n"
+                   "17\tCS: empty openLogicalChannel (h261-cif) \n", stderr="")
 
     monkeypatch.setattr(stand.subprocess, "run", fake_run)
-    verdict = stand.tshark_h245(pcap)
-    assert "h245" in " ".join(seen["cmd"])
-    assert "_ws.col.Info" in seen["cmd"]
-    assert "TCS: 1" in verdict, verdict
-    assert "OLC: 1" in verdict, verdict
-    assert "TCS не найден" not in verdict
+    arb = stand.tshark_h245(pcap)
+    assert "h245" in " ".join(seen["cmd"]) and "_ws.col.Info" in seen["cmd"]
+    assert arb["negotiated"] is True and arb["channels"] is True, arb["text"]
+    assert "TCS 1" in arb["text"] and "OLC 1" in arb["text"], arb["text"]
+    assert "TCS не найден" not in arb["text"]
 
 
 def test_tshark_says_so_when_tcs_absent(monkeypatch, tmp_path):
@@ -777,6 +1112,31 @@ def test_tshark_says_so_when_tcs_absent(monkeypatch, tmp_path):
     monkeypatch.setattr(
         stand.subprocess, "run",
         lambda cmd, *a, **kw: subprocess.CompletedProcess(
-            cmd, 0, stdout="3\tH.245 TerminalCapabilitySet\n", stderr=""))
-    # «TerminalCapabilitySet» — другая подстрока; TCS ищем как TransferCapabilitySet.
-    assert "TCS не найден" in stand.tshark_h245(pcap)
+            cmd, 0, stdout="3\tCS: empty masterSlaveDetermination \n",
+            stderr=""))
+    arb = stand.tshark_h245(pcap)
+    assert arb["negotiated"] is False
+    assert "TCS не найден" in arb["text"]
+
+
+def test_tshark_counts_ack_as_proof_of_request_under_dissector_bug(monkeypatch,
+                                                                   tmp_path):
+    """TCS-ACK без самого TCS = согласование было, а запрос не разобрал tshark.
+
+    Его H.245-дисклейтор на наших CapabilityTable падает с assertion
+    `recursion_depth <= 100` и помечает кадры malformed. Красить такой прогон
+    «согласования не было» — значит обвинять вызов в том, чего не увидел диссектор.
+    """
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
+    pcap = tmp_path / "d.pcap"
+    pcap.write_bytes(b"pcap")
+    monkeypatch.setattr(
+        stand.subprocess, "run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, 0,
+            stdout="13\tCS: empty terminalCapabilitySetAck [Dissector bug, "
+                   "protocol H.245: assertion \"recursion_depth <= 100\"]\n",
+            stderr=""))
+    arb = stand.tshark_h245(pcap)
+    assert arb["negotiated"] is True
+    assert "нижняя граница" in arb["text"]
