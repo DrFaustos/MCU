@@ -1428,8 +1428,8 @@ class WebSession:
 
 def _version() -> str:
     try:
-        from . import __version__
-        return str(__version__)
+        from . import version_string
+        return version_string()
     except Exception:  # noqa: BLE001
         return ""
 

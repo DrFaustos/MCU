@@ -10,9 +10,53 @@ on:
         description: 'Собирать Linux-бинарник (PJSIP из исходников) — долго'
         type: boolean
         default: true
+      variant:
+        description: 'Вариант протокола для имени артефактов (ручной запуск)'
+        type: choice
+        default: 'h323'
+        options: ['h323', 'sip', 'none']
 
 jobs:
+  # Вариант протокола — факт ИСХОДНИКОВ (mcuclient.PROTOCOL_VARIANT), а не
+  # имя тега: суффикс тега обязан ему равняться. Без этой сверки тег
+  # v0.2.34-sip, поставленный на h323-коммит, собрал бы «sip»-бинарь с
+  # h323-кодом внутри, и имя артефакта только соврало бы красивее.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      variant: ${{ steps.v.outputs.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tag suffix must equal PROTOCOL_VARIANT
+        id: v
+        env:
+          DISPATCH_VARIANT: ${{ inputs.variant || 'none' }}
+        run: |
+          SRC=$(python -c "import sys; sys.path.insert(0,'.'); import mcuclient; print(mcuclient.PROTOCOL_VARIANT)")
+          VER=$(python -c "import sys; sys.path.insert(0,'.'); import mcuclient; print(mcuclient.__version__)")
+          if [ "${GITHUB_REF_NAME#refs/tags/v}" != "$GITHUB_REF_NAME" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" = "$VER" ] || [ "${TAG#*-}" = "$TAG" ]; then
+              echo "::error::тег '$GITHUB_REF_NAME' без суффикса варианта: ждём v$VER-h323 / v$VER-sip"
+              exit 1
+            fi
+            SUFFIX="${TAG#*-}"
+          else
+            SUFFIX="$DISPATCH_VARIANT"
+            [ "$SUFFIX" = "none" ] && SUFFIX="$SRC"
+          fi
+          if [ "$SUFFIX" != "$SRC" ]; then
+            echo "::error::тег зовёт вариант '$SUFFIX', а исходники этой ветки — '$SRC'. Тег поставлен не на ту ветку."
+            exit 1
+          fi
+          echo "variant=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "OK: тег/запуск = $SUFFIX, исходники = $SRC, версия = $VER"
+
   build-windows:
+    needs: preflight
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,14 +85,21 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python build.py --debug-only
 
+      # Имя бинаря несёт вариант: в загрузках/архивах экзешник виден без
+      # описания артефакта, а внутренний ресурс .exe — только на Windows.
+      - name: Name binary after variant
+        shell: bash
+        run: mv dist/MCU-Client-debug.exe "dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug.exe"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Windows
-          path: dist/MCU-Client-debug.exe
+          name: MCU-Client-Windows-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug.exe
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
+    needs: preflight
     if: ${{ github.event_name == 'push' || inputs.build_linux }}
     runs-on: ubuntu-latest
     steps:
@@ -90,26 +141,29 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python build.py --debug-only
 
+      - name: Name binary after variant
+        run: mv dist/MCU-Client-debug "dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Linux
-          path: dist/MCU-Client-debug
+          name: MCU-Client-Linux-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug
 
   release:
-    needs: [build-windows, build-linux]
+    needs: [preflight, build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: MCU-Client-Windows
+          name: MCU-Client-Windows-${{ needs.preflight.outputs.variant }}
           path: release-files/
 
       - uses: actions/download-artifact@v4
         with:
-          name: MCU-Client-Linux
+          name: MCU-Client-Linux-${{ needs.preflight.outputs.variant }}
           path: release-files/
 
       - name: List release files

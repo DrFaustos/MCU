@@ -473,7 +473,8 @@ if QT_AVAILABLE:
             # событиям вызова запланировать её многократно за одну итерацию —
             # повторные takeAt/addWidget на Windows роняют Qt.
             self._grid_rebuild_pending = False
-            self.setWindowTitle("MCU Client — ВКС (SIP/H.323)")
+            from . import version_string
+            self.setWindowTitle(f"MCU Client {version_string()}")
             self.resize(1280, 800)
             self._build_ui()
             # Потокобезопасная очередь событий: колбэки pjsua2 приходят из
