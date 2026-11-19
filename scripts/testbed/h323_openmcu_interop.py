@@ -349,12 +349,70 @@ def loopback_delta(seconds: float, iface: str = "lo") -> str:
 #: третье поле — ждём ли видеоканал. Порядок осмысленный: базовый compat, затем
 #: royalty-free, затем возврат H.264 по гранту, затем заведомо без видео.
 MATRIX = (
-    ("compat", "--codecs-profile compat", True),
-    ("royalty-free", "--codecs-profile royalty-free", True),
+    ("compat", "--codecs-profile compat", True,
+     {"audio": ("G.722",), "video": ("H.261",)}),
+    ("royalty-free", "--codecs-profile royalty-free", True,
+     {"audio": ("G.711",), "video": ("H.261",)}),
     ("royalty-free-allow-h264",
-     "--codecs-profile royalty-free --allow-codecs H.264", True),
-    ("no-video", "--no-video", False),
+     "--codecs-profile royalty-free --allow-codecs H.264", True,
+     {"audio": ("G.711",), "video": ("H.261",), "must_not_video": ("H.264",)}),
+    ("no-video", "--no-video", False, {}),
 )
+
+#: Ожидания по именам профилей (детям матрицы приходит только --label).
+PROFILE_EXPECTATIONS = {name: expects for name, _a, _v, expects in MATRIX}
+
+#: Ожидания записаны ДО прогона (данные env, docs/CODECS.md §8.1/§12), а не
+#: подгоняются по результату: в собранном образе OpenMCU 8 семейств из 11 — есть
+#: H.261-vic, G.722, G.726, G.729, iLBC, Speex, SILK, OPUS; нет H.263-1998,
+#: H.264_123 и VP8 (древний FFmpeg API). Отсюда два следствия, которые нельзя
+#: читать как отказ микшера: общий видеокодек у нас ровно один (H.261), значит
+#: PNG из микшера приходит только по H.261; и профиль с `--allow-codecs H.264`
+#: ОБЯЗАН финишировать как «H.264 не согласовался, у собеседника нет кодека».
+#: Если живьём аудио не G.722/G.711 — первый подозреваемый их [RECEIVE_SOUND] и
+#: порядок ключей в ini, а не наш профиль.
+EXPECTED_WHY = ("ожидания записаны до прогона по составу их образа "
+                "(8 семейств из 11, §8.1); отклонение — сначала их "
+                "[RECEIVE_SOUND] и порядок ключей ini, потом всё остальное")
+
+
+def family_matches(actual: str, families: List[str]) -> bool:
+    """Совпал ли кодек с ожидаемым СЕМЕЙСТВОМ (префикс), а не со строкой целиком.
+
+    Имена у сторон разной формы (у них «G.711-alaw», у нас «G.711», у видео-имён
+    суффикс разрешения), поэтому сверка — по началу имени без регистра. Это НЕ
+    лицензионная сверка: для неё есть license_of_capability у codecs.
+    """
+    name = (actual or "").upper()
+    for fam in families:
+        prefix = fam.upper()
+        if not name.startswith(prefix):
+            continue
+        # Граница обязательна: «G.722» — начало «G.722.1-24k» (Siren14), а это ДРУГОЙ
+        # кодек. Без проверки следующего символа прогон, в котором у них в
+        # [RECEIVE_SOUND] не нашлось G.722 и мы скатились на Siren, был бы напечатан
+        # как «ожидание compat выполнено» — то есть сравнение compat/royalty-free
+        # потеряло бы смысл ровно в том случае, ради которого его и делают. Дефис
+        # («G.722-64k», «H.264-CIF») — та же семья, точка и цифра — уже нет.
+        following = name[len(prefix):len(prefix) + 1]
+        if following and (following == "." or following.isdigit()):
+            continue
+        return True
+    return False
+
+
+def expectations_line(label: str, expects: Dict[str, Any]) -> str:
+    """Что мы ждём от этого профиля — строкой, напечатанной ДО результата."""
+    if not expects:
+        return f"{label}: ожиданий по кодекам нет (профиль ничего не согласует)"
+    parts = []
+    if expects.get("audio"):
+        parts.append("аудио " + "/".join(expects["audio"]))
+    if expects.get("video"):
+        parts.append("видео " + "/".join(expects["video"]))
+    if expects.get("must_not_video"):
+        parts.append("НЕ должно согласоваться: " + "/".join(expects["must_not_video"]))
+    return f"{label}: ждём — " + ", ".join(parts)
 
 
 def dial_candidates(args: argparse.Namespace, remote_addr: str) -> List[str]:
@@ -445,7 +503,7 @@ def run_matrix(args: argparse.Namespace) -> int:
     трогается вообще.
     """
     results = []
-    for index, (label, host_args, expect_video) in enumerate(MATRIX):
+    for index, (label, host_args, expect_video, _expects) in enumerate(MATRIX):
         if args.profiles and label not in args.profiles:
             continue
         run_dump = Path(args.dump_dir) / label
@@ -702,6 +760,9 @@ THEIR_STDOUT_TEMPLATE = (
     "capabilities: 14 entries\n"
     "[RECEIVE_SOUND] G.711-alaw 64000\n"
     "[RECEIVE_SOUND] G.722 64000\n"
+    # Siren14 рядом с G.722 — специально: на этом шаблоне офлайн исполняется
+    # граница семейства («G.722.1-24k» — НЕ G.722), а не впервые у живого микшера.
+    "[RECEIVE_SOUND] G.722.1-24k{sw} 24000\n"
     "[RECEIVE_VIDEO] H.261-CIF 352x288\n"
     "[TRANSMIT_SOUND] G.711-alaw 64000\n")
 
@@ -815,6 +876,10 @@ def main() -> int:
     if args.host_args:
         print(f"[i] профиль {label}: хосту '{args.host_args}' "
               f"(ждём видео: {args.expect_video})", flush=True)
+        if args.expect_video != "" and not args.self_check:
+            print("[i] " + expectations_line(
+                label, PROFILE_EXPECTATIONS.get(label, {})) + f" — {EXPECTED_WHY}",
+                  flush=True)
 
     binary = args.binary or find_host_binary()
     if not binary or not Path(binary).exists():
@@ -977,7 +1042,32 @@ def main() -> int:
                   f"codec={ev.get('codec')} {ev.get('width')}x{ev.get('height')} "
                   f"fps={ev.get('fps')}", flush=True)
         ours_video = [str(e.get("codec", "")) for e in got if e.get("codec")]
+        ours_audio = [str(e.get("codec", "")) for e in col.all_of("call.media")
+                      if str(e.get("kind", "")) == "audio" and e.get("codec")]
         want_video = args.expect_video == "yes"
+
+        # Ожидания этого профиля (записаны до прогона, печатались до набора). В
+        # самопроверке НЕ применяются: там собеседник — наш же хост, и сверять его
+        # с ожиданиями от OpenMCU значило бы красное без подозреваемого.
+        expects = {} if args.self_check else PROFILE_EXPECTATIONS.get(label, {})
+        if expects.get("audio"):
+            ck.check(any(family_matches(c, list(expects["audio"]))
+                         for c in ours_audio),
+                     f"аудио согласовалось как ожидалось ({'/'.join(expects['audio'])})",
+                     f"у нас {sorted(set(ours_audio)) or '—'}; если не так — "
+                     "сначала их [RECEIVE_SOUND] и порядок ключей ini")
+        if expects.get("video"):
+            ck.check(any(family_matches(c, list(expects["video"]))
+                         for c in ours_video),
+                     f"видео согласовалось как ожидалось "
+                     f"({'/'.join(expects['video'])} — общий у нас единственный)",
+                     f"у нас {sorted(set(ours_video)) or '—'}")
+        for banned in expects.get("must_not_video", ()):
+            hit = [c for c in ours_video if family_matches(c, [banned])]
+            ck.check(not hit,
+                     f"{banned} НЕ согласовался — у собеседника нет такого кодека "
+                     "(состав сборки), так и должно быть",
+                     f"наш видео-набор {sorted(set(ours_video)) or '—'}")
         if want_video:
             ck.check(bool(got),
                      "видео согласовалось (у нас открыт хотя бы один видеоканал)",

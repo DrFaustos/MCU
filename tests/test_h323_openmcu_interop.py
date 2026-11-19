@@ -328,9 +328,75 @@ def test_matrix_covers_exactly_the_agreed_four_profiles():
     гранту → заведомо без видео); последний профиль НЕ должен ждать видео, иначе
     прогон краснеет на отсутствии канала, который мы сами и выключили.
     """
-    assert [name for name, _args, _want in stand.MATRIX] == [
+    assert [name for name, _a, _w, _e in stand.MATRIX] == [
         "compat", "royalty-free", "royalty-free-allow-h264", "no-video"]
-    assert [want for _n, _a, want in stand.MATRIX] == [True, True, True, False]
+    assert [want for _n, _a, want, _e in stand.MATRIX] == [True, True, True, False]
+
+
+def test_matrix_carries_expectations_written_before_the_run():
+    """Ожидания по аудио/видео записаны в таблице, а не сочиняются по результату.
+
+    Состав их образа задан средой: 8 семейств из 11, общий видеокодек ровно один
+    (H.261), H.264 у них нет. Значит compat обязан дать G.722, royalty-free —
+    G.711, а профиль с `--allow-codecs H.264` обязан финишировать НЕсогласованием
+    H.264. Без таблицы в коде красный прогон объяснят задним числом.
+    """
+    exp = stand.PROFILE_EXPECTATIONS
+    assert exp["compat"]["audio"] == ("G.722",)
+    assert exp["royalty-free"]["audio"] == ("G.711",)
+    assert exp["compat"]["video"] == ("H.261",)
+    assert exp["royalty-free-allow-h264"]["must_not_video"] == ("H.264",)
+    assert exp["no-video"] == {}
+
+
+def test_expectations_line_is_printable_before_the_result():
+    line = stand.expectations_line("compat", stand.PROFILE_EXPECTATIONS["compat"])
+    assert "ждём" in line and "G.722" in line and "H.261" in line
+    banned = stand.expectations_line(
+        "royalty-free-allow-h264",
+        stand.PROFILE_EXPECTATIONS["royalty-free-allow-h264"])
+    assert "НЕ должно согласоваться" in banned and "H.264" in banned
+    assert "ожиданий" in stand.expectations_line("no-video", {})
+
+
+def test_family_matches_by_prefix_not_by_full_string():
+    """Сверка по семейству: у них «G.711-alaw», ожидание «G.711» — одно семейство.
+
+    Полное сравнение строк дало бы красное на совпадении (тот же класс, что
+    H.261/H.261-CIF), а лицензионный вопрос оно не решает вообще.
+    """
+    assert stand.family_matches("G.711-alaw", ["G.711"])
+    assert stand.family_matches("h.261-cif", ["H.261"])
+    assert not stand.family_matches("G.722", ["G.711"])
+    assert not stand.family_matches("", ["G.711"])
+
+
+def test_family_boundary_excludes_a_different_codec_with_same_start():
+    """«G.722» — начало «G.722.1» (Siren14), но это другой кодек: граница обязательна.
+
+    Иначе прогон, где у них в [RECEIVE_SOUND] не оказалось G.722 и мы скатились на
+    Siren, печатается как «ожидание compat выполнено», и пара compat/royalty-free
+    сравнивается по ложным данным. Дефис — та же семья, точка и цифра — уже нет.
+    """
+    assert stand.family_matches("G.722-64k{sw}", ["G.722"])
+    assert stand.family_matches("H.264-CIF", ["H.264"])     # must_not_video работает
+    assert not stand.family_matches("G.722.1-24k{sw}", ["G.722"])
+    assert not stand.family_matches("G.722.1c-48k", ["G.722"])
+    assert not stand.family_matches("G.7221", ["G.722"])
+
+
+def test_their_stdout_template_carries_the_boundary_case():
+    """Граница семейства исполняется и на шаблоне их stdout, офлайн.
+
+    Шаблон — не образец их формата, а тренажёр разбора: если в нём нет пары
+    G.722 / G.722.1, проверка границы впервые исполнится уже у живого микшера.
+    """
+    parsed = stand.parse_their_stdout(stand.THEIR_STDOUT_TEMPLATE)
+    sounds = parsed["receive"]["receive_sound"]
+    assert any("G.722.1" in item for item in sounds), sounds
+    assert any(family := item.startswith("G.722 ") for item in sounds), sounds
+    siren = [i for i in sounds if "G.722.1" in i][0].split()[0]
+    assert not stand.family_matches(siren, ["G.722"])
 
 
 def test_matrix_uses_real_host_flags():
@@ -341,7 +407,7 @@ def test_matrix_uses_real_host_flags():
     «хост игнорирует профиль», и искали бы мы не там.
     """
     src = (ROOT / "tools" / "h323d" / "main.cpp").read_text(encoding="utf-8")
-    for _name, args_str, _want in stand.MATRIX:
+    for _name, args_str, _want, _exp in stand.MATRIX:
         for flag in args_str.split():
             if flag.startswith("--"):
                 assert f'\"{flag}\"' in src, f"флага {flag} в парсере хоста нет"
