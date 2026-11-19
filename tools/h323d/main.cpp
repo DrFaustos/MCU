@@ -106,6 +106,17 @@ std::string dump_pcm;  ///< --dump-pcm DIR: WAV-дампы обоих напра
  // --video-max-width N: шире этого кадр режется в хосте, пока он ещё в кэше
  // кодека (дешевле, чем гнать 704x576 в Python и резать там).
  unsigned video_max_width = 352;
+ // --- Видео-микс (--video-mix). ДЕФАУЛТ ВЫКЛ, и это не косметика: ----------
+ // одиночные вызовы (паттерн A -> пир B) и интероп-стенд с OpenMCU завязаны
+ // на штатный тест-паттерн исходящего канала. Микшер меняет источник кадров
+ // исходящего канала на композит входящих, поэтому включается только явным
+ // флагом; без него путь не исполняется вовсе (mixer_ == nullptr у каналов).
+ // Ограничители композита (N<=4, 352x288, сетки/letterbox/stale) — шапка
+ // video_mix.hpp; здесь только решение «включать или нет».
+ bool video_mix = false;
+ ///< --video-mix-dump DIR: DIR/video_mix.log — состав каждого кадра микса
+ ///< (seq/ts_ms/wall/n/src). Пусто = только stderr-лог смены состава.
+ std::string video_mix_dump;
  // --- Кодек-профили (docs/CODECS.md) ---------------------------------------
  // Имя лицензионного профиля: royalty-free | compat (всё остальное — compat).
  std::string codec_profile = "compat";
@@ -333,6 +344,10 @@ std::unique_ptr<mcu_video::FrameServer> g_video;  // второй сокет: б
 std::mutex g_video_mu;
 std::map<std::string, mcu_video::McuVideoChannel *> g_video_mic;  // encoder: Python -> RTP
 std::map<std::string, mcu_video::McuVideoChannel *> g_video_spk;  // decoder: RTP -> Python
+// Видео-микс (--video-mix): ОДИН на процесс, живёт с main() до останова
+// (останавливается раньше g_video — см. конец main()). Каналы хранят указатель
+// атомарно и обнуляют его в Close(), поэтому висящих ссылок нет.
+std::unique_ptr<mcu_video::VideoMixer> g_mixer;
 
 // Запасной путь: кадр base64 в общий JSON-сокет. Решает КАНАЛ (он видит, есть ли
 // клиент бинарного сокета): если бы решение принималось здесь, кадр ехал бы и
@@ -363,6 +378,11 @@ void video_forget(mcu_video::McuVideoChannel *dead) {
   for (auto *m : {&g_video_mic, &g_video_spk}) {
     for (auto it = m->begin(); it != m->end();) {
       if (it->second == dead) {
+        // Микшер чистим здесь же: без этого ушедший вызов висел бы в сетке
+        // до stale_ms (застывшая картинка в композите). Порядок замков
+        // сознательный: g_video_mu -> VideoMixer::remove (remove берёт
+        // ТОЛЬКО свой замок — см. шапку video_mix.hpp), обратного пути нет.
+        if (g_mixer) g_mixer->remove(it->first);
         it = m->erase(it);
       } else {
         ++it;
@@ -669,6 +689,16 @@ PBoolean McuEndPoint::OpenVideoChannel(H323Connection &connection,
   const bool encoding = isEncoding == TRUE;
   std::string token = ipc_token_of(&connection);
   if (token.empty()) token = to_std(connection.GetCallToken());
+  // Токен композита ЗАРЕЗЕРВИРОВАН (kMixToken, video_mix.hpp): кадр микса
+  // публикуется в сокет под ним, и канал вызова с таким именем подменил бы
+  // композит в шине панели. Штатные токены — «call-N» (make_token),
+  // пересечения нет по построению; это — страховка на случай чужого
+  // CreateConnection с хитрым токеном, стоит одну строку.
+  if (token == mcu_video::kMixToken) {
+    log_info("VIDEO: токен \"" + std::string(mcu_video::kMixToken) +
+             "\" зарезервирован композитом, переключаюсь на токен соединения");
+    token = to_std(connection.GetCallToken());
+  }
 
   // Начальный размер берём из media format'а согласованного кодека, если он там
   // есть. Для decoder-стороны он не важен: настоящий размер придёт первым
@@ -685,6 +715,9 @@ PBoolean McuEndPoint::OpenVideoChannel(H323Connection &connection,
       width, height, kVideoJsonSink);
   ch->on_destroyed = [](mcu_video::McuVideoChannel *dead) { video_forget(dead); };
   video_add(token, ch);
+  // --video-mix: decoder кормит микшер, encoder берёт из него композит;
+  // указатель атомарный и обнуляется в Close() канала (video.hpp).
+  if (g_mixer) ch->set_mixer(g_mixer.get());
   // Своего Open() у канала нет и не нужен: устройств захвата/вывода в контейнере
   // нет, а AttachChannel() смотрит только на IsOpen() (codecs.h:220).
   if (!codec.AttachChannel(ch)) {
@@ -1220,6 +1253,9 @@ else if (a == "--dump-pcm") out.dump_pcm = need_value("--dump-pcm");
       static_cast<unsigned>(std::atoi(need_value("--video-fps").c_str()));
   else if (a == "--video-max-width") out.video_max_width =
       static_cast<unsigned>(std::atoi(need_value("--video-max-width").c_str()));
+  // Микш композита. Флаг-переключатель, значения не имеет; дамп — путь каталога.
+  else if (a == "--video-mix") out.video_mix = true;
+  else if (a == "--video-mix-dump") out.video_mix_dump = need_value("--video-mix-dump");
  else if (a == "--audio-profile" || a == "--codecs-profile")
    out.codec_profile = need_value(a.c_str());
  else if (a == "--audio-codecs") out.audio_codecs = need_value("--audio-codecs");
@@ -1238,9 +1274,14 @@ else if (a == "--dump-pcm") out.dump_pcm = need_value("--dump-pcm");
           "               [--allow-codecs LIST] [--video-codecs LIST]\n"
           "               [--no-video]\n"
           "               [--video-socket PATH] [--video-fps N] [--video-max-width N]\n"
+          "               [--video-mix] [--video-mix-dump DIR]\n"
           "Кадры видео идут вторым unix-сокетом (--video-socket, по умолчанию\n"
           "<socket>.video); в аудио-JSON кадр попадает только если к нему никто\n"
           "не подключился. Формат и обоснование — tools/h323d/README.md\n"
+          "--video-mix: композит 1..4 входящих видео в сетку 352x288 вместо\n"
+          "тест-паттерна исходящего канала; состав каждого кадра — в\n"
+          "DIR/video_mix.log (--video-mix-dump), панель видит его в сокете\n"
+          "кадров под зарезервированным токеном \"mix\".\n"
           "Профили и паттерны имён форматов — docs/CODECS.md\n");
       std::exit(0);
  } else {
@@ -1563,6 +1604,39 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
     }
   }
 
+  // --- Видео-микс (--video-mix) ----------------------------------------------
+  if (g_opts.video_mix && !g_opts.video) {
+    // Молча игнорировать нельзя: оператор просит композит, а каналы не
+    // откроются НИ ОДНО (--no-video снял видео из таблицы возможностей),
+    // т.е. микшер кормился бы пустоту. Честнее встать здесь, чем врать
+    // зелёным логом «видео-микс включён».
+    log_info("--video-mix несовместим с --no-video: входящих видео не будет вовсе");
+    return 2;
+  }
+  if (g_opts.video_mix) {
+    std::string mix_dump;
+    if (!g_opts.video_mix_dump.empty()) {
+      // Каталог создаёт вызывающий (стенд), как с --dump-pcm: хост не
+      // mkdir'ивает. Не откроется — VideoMixer честно скажет в логе и
+      // продолжит миксовать без дампа.
+      mix_dump = g_opts.video_mix_dump + "/video_mix.log";
+    }
+    g_mixer = std::make_unique<mcu_video::VideoMixer>(
+        g_video ? g_video.get() : nullptr, g_opts.video_fps, mix_dump,
+        [](const std::string &m) { log_info("VIDEO-MIX: " + m); });
+    g_mixer->start();
+    log_info(std::string("VIDEO-MIX: включён — композит до ") +
+             std::to_string(mcu_video::kMixMaxSources) + " источников в " +
+             std::to_string(mcu_video::kMixWidth) + "x" +
+             std::to_string(mcu_video::kMixHeight) +
+             (mix_dump.empty()
+                 ? ", дамп состава не пишется (--video-mix-dump DIR)"
+                 : ", дамп состава: " + mix_dump) +
+             ", панель: сокет кадров, токен \"" + mcu_video::kMixToken + "\"");
+  } else if (!g_opts.video_mix_dump.empty()) {
+    log_info("--video-mix-dump без --video-mix: композита нет, дамп не пишется");
+  }
+
  H323ListenerTCP *listener = new H323ListenerTCP(
  endpoint, PIPSocket::Address("0.0.0.0"), static_cast<WORD>(g_opts.port));
  if (!endpoint.StartListener(listener)) {
@@ -1577,6 +1651,8 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
  g_server->stop();
  // Видео-сокет закрываем вместе с IPC: оба — часть одного контракта, а
  // оставленный висящим unix-сокет клиент читал бы «успех» уже мёртвого хоста.
+ // Микшер — раньше транспорта кадров: его поток является в этот сокет.
+ if (g_mixer) g_mixer->stop();
  if (g_video) g_video->stop();
  return 4;
  }
@@ -1602,8 +1678,10 @@ log_info("PCM-дампы (WAV) в: " + g_opts.dump_pcm);
  if (g_server) g_server->stop();
  // Кадры останавливаем ПОСЛЕ разрыва вызовов и IPC: каналы успевают сами
  // вычиститься из реестра, а publish() в остановленный сервер всё равно
- // защищён (running_/has_client()). Сокет при этом снимается с файловой
+ // защищён (running_/has_client()). Микшер — перед FrameServer: издателя
+ // гасят раньше транспорта. Сокет при этом снимается с файловой
  // системы — клиент не должен видеть «успешное подключение» к мёртвому хосту.
+ if (g_mixer) g_mixer->stop();
  if (g_video) g_video->stop();
  return 0;
 }

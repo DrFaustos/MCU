@@ -69,6 +69,7 @@
 #include <ptlib/video.h>
 
 #include "video_frame.hpp"
+#include "video_mix.hpp"
 
 namespace mcu_video {
 
@@ -105,6 +106,12 @@ class McuVideoChannel : public PVideoChannel {
   /// недействителен — тот же договор, что у McuPcmChannel::on_destroyed.
   std::function<void(McuVideoChannel *)> on_destroyed;
 
+  /// Видео-микс (--video-mix). Указатель НЕ владея: микшер живёт в main.cpp
+  /// и останавливается ПОСЛЕ разрыва вызовов (main.cpp, порядок останова).
+  /// decoder-стороны им кормят (put в ReceiveFrame), encoder-стороны берут
+  /// композит (latest в Read); обе — через atomic, как и server_ ниже.
+  void set_mixer(VideoMixer *mixer) { mixer_.store(mixer); }
+
   // --- PChannel/PVideoChannel: состояние ------------------------------------
   // IsOpen() обязан быть TRUE ДО AttachChannel: H323Codec::AttachChannel
   // возвращает channel->IsOpen(), а Open() никто не зовёт.
@@ -120,6 +127,7 @@ class McuVideoChannel : public PVideoChannel {
   PBoolean Close() override {
     if (!open_.exchange(false)) return TRUE;
     server_.store(nullptr);  // публиковать в остановленный сервер нельзя
+    mixer_.store(nullptr);   // и кормить/спрашивать остановленный микшер тоже
     {
       std::lock_guard<std::mutex> lk(mu_);
       json_sink_ = JsonFrameSink();
@@ -187,18 +195,40 @@ class McuVideoChannel : public PVideoChannel {
     lastReadCount = 0;
     if (!open_ || !encoding_ || buf == nullptr || len == 0) return FALSE;
     Pace();
+    // --video-mix: композит спрашиваем ДО лока канала. Порядок замков:
+    // video_forget держит g_video_mu и зовёт VideoMixer::remove, Read держит
+    // mu_ канала — значит «му_ канала -> mu_ микшера» из Read закрыт (цикл к
+    // g_video_mu), а «микшер без нашего замка» — безопасен: latest() только
+    // копирует под своим коротким локом.
+    std::vector<uint8_t> mix;
+    VideoMixer *mx = mixer_.load();
+    const bool have_mix = (mx != nullptr) && mx->latest(mix);
     uint8_t *dst = static_cast<uint8_t *>(buf);
     size_t n = 0;
     {
       std::lock_guard<std::mutex> lk(mu_);
+      const size_t need = i420_size(width_, height_);
+      std::vector<uint8_t> mix_scaled;  // если канал объявил не CIF
       const std::vector<uint8_t> *src = &pattern_;
       if (!out_.empty()) {
-        src = &out_;  // кадр из Python важнее паттерна
+        src = &out_;  // кадр из Python важнее паттерна (ручной переопрос — и
+                      // при миксе: оператор всегда может подменить картинку)
+      } else if (have_mix) {
+        if (mix.size() == need) {
+          src = &mix;
+        } else {
+          // Канал меньше/иначе, чем канвас композита (QCIF-пир): вписываем
+          // весь микс в кадр канала box-average, letterbox там уже встроен.
+          mix_scaled.resize(need);
+          scale_i420(mix.data(), kMixWidth, kMixHeight, mix_scaled.data(),
+                     width_, height_);
+          src = &mix_scaled;
+        }
+        ++mixed_;  // без mu_ тоже можно (atomic), но держим счётчики вместе
       } else if (pattern_enabled_) {
         ++pattern_no_;  // бегущий блок: пир обязан видеть ДВИЖЕНИЕ, а не I-кадр
         draw_pattern(pattern_.data(), width_, height_, pattern_no_);
       }
-      const size_t need = i420_size(width_, height_);
       n = std::min(need, static_cast<size_t>(len));
       const size_t have = std::min(n, src->size());
       std::memcpy(dst, src->data(), have);
@@ -249,6 +279,9 @@ class McuVideoChannel : public PVideoChannel {
   uint64_t encoded() const { return encoded_; }
   uint64_t throttled() const { return throttled_; }
   uint64_t scaled() const { return scaled_; }
+  /// Кадры, отданные в кодек из композита (--video-mix). Ноль при включённом
+  /// миксе = микшер канала не накормил (стенд сверяет именно это).
+  uint64_t mixed() const { return mixed_; }
   unsigned width() const {
     std::lock_guard<std::mutex> lk(mu_);
     return width_;
@@ -314,6 +347,12 @@ class McuVideoChannel : public PVideoChannel {
     ++received_;
     const uint32_t seq = ++seq_;
 
+    // --video-mix: микшер кормится тем же отмасштабированным кадром, что и
+    // сокет (не сырьём: понижать дважды дороже), и НЕЗАВИСИМО от того,
+    // подключён ли клиент к сокету кадров — композит нужен и без панели.
+    // put() копирует кадр под своим замком и не блокируется.
+    if (VideoMixer *mx = mixer_.load()) mx->put(token_, dw, dh, data, size);
+
     // Основной путь — бинарный сокет. Запасной (JSON) — ТОЛЬКО когда к нему
     // никто не подключился: иначе один и тот же кадр ехал бы дважды, а вторая
     // копия в общем канале затыкала бы аудио ровно тем, что аудио не нужно.
@@ -346,6 +385,7 @@ class McuVideoChannel : public PVideoChannel {
   const bool encoding_;
   const std::string token_;
   std::atomic<FrameServer *> server_{nullptr};
+  std::atomic<VideoMixer *> mixer_{nullptr};
 
   mutable std::mutex mu_;
   JsonFrameSink json_sink_;
@@ -368,6 +408,7 @@ class McuVideoChannel : public PVideoChannel {
   std::atomic<uint64_t> encoded_{0};
   std::atomic<uint64_t> throttled_{0};
   std::atomic<uint64_t> scaled_{0};
+  std::atomic<uint64_t> mixed_{0};
 };
 
 }  // namespace mcu_video

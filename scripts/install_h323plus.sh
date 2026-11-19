@@ -118,6 +118,64 @@ build_ptlib() {
 }
 
 # --- 3. H323Plus -------------------------------------------------------------
+# БАГ АПСТРИМА h323plus v1_28_0 (h323pluginmgr.cxx:1843, в H323PluginVideoCodec::
+# Read — grab-цикл encoder'а): после каждого кодирования строка
+#     bytesPerFrame = outputDataSize;
+# затирает РАЗМЕР СЫРОГО КАДРА размером ЗАКОДИРОВАННОГО вывода (~2 Кбайт).
+# На следующем такте Read(...) вызывает SetFrameSize(352,288), тот выходит по
+# раннему return (размер не менялся, :2047) и НЕ пересчитывает bytesPerFrame —
+# значит grab-чтение уйдёт с len≈2000 вместо 152064. Плагин VIC при этом кодирует
+# РОВНО frameHeader->width*height*3/2 байт из буфера (заголовок-то 352x288), а
+# свежими оказываются только первые ~2 Кбайт: остаток буфера — данные ПЕРВОГО
+# полного кадра. Практический смысл: ИСХОДЯЩЕЕ видео зависает на первом кадре
+# (обновляется только верхняя полоса ~6 строк). Стенд видео-микса упёрся ровно
+# в это: декодер приёмника минутами держал первый кадр, не видя ни смену
+# композита, ни выключение паттерна. Прапка: удалить присваивание в encoder-пути
+# (строка сразу после dst.SetMinSize(outputDataSize); — она в файле одна).
+# Зеркальное присваивание в Write() (:1945, decoder-путь) НЕ трогаем: decoder-
+# экземпляр грабом не управляет, а размер вывода ему для чего-то нужен.
+# Идемпотентно: повторный запуск установки ничего не меняет.
+# Проверка (замер 2026-11-19): в трассировке канала Read вызывается len=152064
+# на каждом кадре; исходящее видео обновляется живо (стенды h323_video_live.py,
+# h323_video_mix.py).
+patch_pluginmgr_grabsize() {
+    local f="$1/src/h323pluginmgr.cxx"
+    if [ ! -f "${f}" ]; then
+        log "ПРЕДУПРЕЖДЕНИЕ: нет ${f} — правку grab-размера пропускаем"
+        return 0
+    fi
+    if grep -q 'MCU-H323: grab-size' "${f}"; then
+        log "h323pluginmgr: уже пропатчен (grab-size)"
+        return 0
+    fi
+    if ! grep -qE '^[[:space:]]*bytesPerFrame = outputDataSize;[[:space:]]*$' "${f}"; then
+        log "ПРЕДУПРЕЖДЕНИЕ: h323pluginmgr.cxx не похож на апстримный v1_28_0 —"
+        log "  правку grab-size не применяем; исходящее видео может зависать на первом кадре"
+        return 0
+    fi
+    log "h323pluginmgr: удаление затирания bytesPerFrame в encoder-пути (баг апстрима)"
+    cp "${f}" "${f}.orig"
+    awk '
+        prev ~ /dst\.SetMinSize\(outputDataSize\);/ &&
+        $0 ~ /^[[:space:]]*bytesPerFrame = outputDataSize;[[:space:]]*$/ {
+            print "    /* MCU-H323: grab-size — bytesPerFrame = outputDataSize удалён,"
+            print "       см. patch_pluginmgr_grabsize в scripts/install_h323plus.sh */"
+            prev = $0; next
+        }
+        { print; prev = $0 }
+    ' "${f}" > "${f}.new" && mv "${f}.new" "${f}" || {
+        log "ОШИБКА: не удалось поправить ${f}"
+        return 1
+    }
+    # Проверка: маркер на месте, и осталось ровно одно присваивание (decoder-Write).
+    local left
+    left=$(grep -cE '^[[:space:]]*bytesPerFrame = outputDataSize;[[:space:]]*$' "${f}")
+    if ! grep -q 'MCU-H323: grab-size' "${f}" || [ "${left}" -ne 1 ]; then
+        log "ОШИБКА: правка grab-size применилась неверно (осталось присваиваний: ${left})"
+        return 1
+    fi
+}
+
 build_h323plus() {
     local src="${BUILD_DIR}/h323plus"
     if [ ! -d "${src}/.git" ]; then
@@ -139,6 +197,7 @@ build_h323plus() {
         log "Переклонируйте: rm -rf ${src}"
         exit 1
     fi
+    patch_pluginmgr_grabsize "${src}" || exit 1
     log "configure H323Plus (PREFIX=${PREFIX})"
     # H323Plus ищет PTLib через PTBUILDDIR/PKGCONFIG. Передаём явно.
     # env -u PREFIX — не косметика: openh323u.mak при PREFIX в ОКРУЖЕНИИ

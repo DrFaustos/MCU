@@ -23,6 +23,9 @@
 #                                                      (Этап 4, PNG в dump-dir)
 #   ./scripts/h323_in_container.sh video-panel        # h323d + терминал с
 #                                                      операторской панелью
+#   ./scripts/h323_in_container.sh video-mix          # h323d + стенд видео-микса
+#                                                      (2 отправителя -> композит
+#                                                      -> наблюдатель, + контроль)
 #   ./scripts/h323_in_container.sh tests              # python3 tests/_runner.py
 #   ./scripts/h323_in_container.sh <cmd...>           # любая команда в контейнере
 #   ./scripts/h323_in_container.sh bash               # интерактив (репо в /work)
@@ -225,6 +228,17 @@ case "${1:-}" in
             set -e
             ./scripts/build_h323d.sh
             exec python3 scripts/testbed/h323_video_panel.py ${MCU_H323_EXTRA_ARGS:-}
+        '
+        ;;
+    video-mix)
+        # Живой стенд видео-микса: два отправителя -> композит хоста (--video-mix)
+        # -> третий участник видит обе сигнатуры через H.261/RTP; плюс negative
+        # control без флага. Доказательства (PNG + video_mix.log) стенд сам
+        # копирует в docs/evidence/video-mix-<дата>/ — /work смонтирован rw.
+        run_isolated_h323d '
+            set -e
+            ./scripts/build_h323d.sh
+            exec python3 scripts/testbed/h323_video_mix.py ${MCU_H323_EXTRA_ARGS:-}
         '
         ;;
     tests)
