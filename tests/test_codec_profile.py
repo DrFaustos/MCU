@@ -837,3 +837,54 @@ def test_our_codec_code_and_tests_have_no_cjk():
                 if _NON_LATIN_SCRIPT.search(line):
                     findings.append("%s:%d" % (rel, number))
     assert not findings, "не-латинская письменность в файлах темы: " + ", ".join(findings)
+
+
+#: Латиница → кириллические омонимы. Подмена одного символа в техническом слове
+#: («pcаp» с кириллической «а») не видна глазу и не ловится ни проверкой пробелов
+#: между кириллицей и латиницей, ни замком на CJK: буква выглядит своей, слово
+#: перестаёт быть тем, чем было. Замок поэтому смотрит не на «смешанное слово»
+#: (у нас в доках нормальны обороты вида «H.261-микшер»), а только на список
+#: терминов, которые обязаны встречаться в ASCII.
+HOMOGLYPHS = {
+    "a": "а", "c": "с", "e": "е", "o": "о", "p": "р", "x": "х", "y": "у",
+    "A": "А", "B": "В", "E": "Е", "H": "Н", "K": "К", "M": "М", "O": "О",
+    "P": "Р", "T": "Т", "X": "Х", "C": "С",
+}
+
+#: Термины, которые в наших файлах бывают написаны только латиницей.
+ASCII_ONLY_TERMS = (
+    "pcap", "tshark", "codec", "codecs", "stdout", "stderr", "trace", "ini",
+    "rtp", "h245", "h2250", "h261", "h263", "h264", "vp8", "g711", "g722",
+    "ilbc", "speex", "opus", "silk", "mcu",
+)
+
+
+def _homoglyph_pattern(term):
+    """Регулярка, ловящая термин и с подменой, и без неё."""
+    return re.compile(
+        "".join("[%s%s]" % (ch, HOMOGLYPHS[ch.lower()]) if ch.lower() in HOMOGLYPHS
+                else re.escape(ch) for ch in term), re.IGNORECASE)
+
+
+def test_technical_terms_never_carry_cyrillic_homoglyphs():
+    """Ни одной кириллической буквы внутри технического термина.
+
+    Настоящий случай: в docs/CODECS.md несколько оборотов жил «pcаp», где «а» —
+    кириллическая. Прогон был зелёный: пробельный замок видит границу
+    кириллица-латиница только когда слова разделены, CJK-замок смотрит на
+    иероглифы, а смысл слова уже сломан.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    targets = ("docs/CODECS.md", "mcuclient/codec_negotiation.py",
+               "tests/test_codec_profile.py", "tools/h323d/main.cpp")
+    findings = []
+    for rel in targets:
+        if rel.endswith("test_codec_profile.py"):
+            continue  # таблица замен живёт здесь и обязана содержать кириллицу
+        with open(os.path.join(root, rel), encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                for term in ASCII_ONLY_TERMS:
+                    for hit in _homoglyph_pattern(term).finditer(line):
+                        if not hit.group(0).isascii():
+                            findings.append("%s:%d «%s»" % (rel, number, hit.group(0)))
+    assert not findings, "термин с кириллической подменой: " + ", ".join(findings)
