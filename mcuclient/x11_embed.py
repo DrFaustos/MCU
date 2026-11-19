@@ -158,6 +158,31 @@ def unmap_window(xid: int) -> bool:
         return False
 
 
+def raise_window(xid: int) -> bool:
+    """Поднять нативное окно на передний план и фокусировать.
+
+    Нужно для фолбэк-окна превью (show=True): под XWayland новое окно
+    SDL может открыться ПОД главным окном приложения — пользователь
+    решает, что «изображение не появилось».
+    """
+    d = _display()
+    if not d or not xid:
+        return False
+    try:
+        _xlib.XMapWindow(d, ctypes.c_ulong(xid))
+        _xlib.XRaiseWindow(d, ctypes.c_ulong(xid))
+        # XSetInputFocus(Display*, Window, revert-to, time):
+        # RevertToNone(0), CurrentTime(0).
+        _xlib.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                         ctypes.c_int, ctypes.c_uint]
+        _xlib.XSetInputFocus(d, ctypes.c_ulong(xid), 0, 0)
+        _xlib.XFlush(d)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.debug("raise_window не удался: %s", exc)
+        return False
+
+
 def native_xid(video_window) -> Optional[int]:
     """Достать нативный XID из pjsua2 VideoWindow (или None)."""
     if video_window is None:

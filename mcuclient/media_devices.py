@@ -553,12 +553,16 @@ class MediaManager:
             mgr = self.aud_mgr()
             if dev_id is not None:
                 self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
-                self.dev_set(mgr, "playbackDev", "setPlaybackDev", int(dev_id))
+            # Playback НЕ трогаем. Раньше монитор ставил выбранный микрофон
+            # ЕЩЁ И динамиками (setPlaybackDev := микрофон). Микрофон не
+            # умеет играть, а у звуковых бэкендов (PortAudio/ALSA-дуплекс)
+            # отказ открыть вывод на capture-only устройстве ронял и ввод —
+            # монитор показывал ноль уже на уровне захвата. Тест микрофона
+            # визуальный (эквалайзер), слушать себя он не обязан.
             if self.dev_int(mgr, "captureDev", "getCaptureDev") < 0:
                 for i, info in enumerate(self.enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
-                        self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
                         break
             return self.dev_int(mgr, "captureDev", "getCaptureDev") >= 0
         except Exception as exc:  # noqa: BLE001
@@ -566,6 +570,21 @@ class MediaManager:
             return False
 
     def read_mic_level(self) -> float:  # pragma: no cover
+        """Уровень сигнала микрофона, нормализованный в 0.0..1.0.
+
+        Направление взято из исходников PJSIP 2.16, а не из названия
+        метода. pjsua.h документирует pjsua_conf_get_signal_level(slot,
+        tx, rx): tx — сигнал «от моста к порту» (воспроизведение), rx —
+        «от порта к мосту» (захват). А pjsua2 (pjsip/src/pjsua2/media.cpp)
+        пишет &level в ПЕРВЫЙ аргумент у getRxLevel() и во ВТОРОЙ у
+        getTxLevel(): имена перепутаны местами относительно pjsua, и
+        микрофон читается через getTxLevel(). Прежний getRxLevel()
+        измерял динамики: на тихой машине монитор показывал ноль при
+        любом микрофоне (репорт с живого Linux, 2026-11).
+
+        pjsua2 возвращает 0..100 (level*100/255); UI-монитор (прогресс-бар
+        0..100 как level*100, «пик» в формате 0.000) ждёт 0.0..1.0.
+        """
         if not self.available:
             return 0.0
         try:
@@ -574,12 +593,16 @@ class MediaManager:
             if media is None:
                 media = getattr(mgr, "getCaptureDevMedia", None)
             cap = media() if callable(media) else media
-            # Ни captureDevMedia, ни getCaptureDevMedia может не быть (другая
-            # сборка pjsua2): cap остаётся None, и .getRxLevel() падал бы
-            # AttributeError'ом, который глушил широкий except ниже.
             if cap is None:
                 return 0.0
-            return max(0.0, float(cap.getRxLevel()))
+            getter = getattr(cap, "getTxLevel", None)
+            if getter is None:
+                # Другая сборка bindings без getTxLevel: направление
+                # честно прочитать нельзя; врать уровнем динамиков не
+                # будем — нуль на мониторе виден честнее, чем ложь.
+                log.debug("AudioMedia.getTxLevel недоступен — уровень не читается")
+                return 0.0
+            return min(1.0, max(0.0, float(getter()) / 100.0))
         except Exception:  # noqa: BLE001
             return 0.0
 

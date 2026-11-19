@@ -370,7 +370,8 @@ if QT_AVAILABLE:
         BARS = 32
 
         def __init__(self, engine: SipEngine, dev_id: int | None = None,
-                     parent: QtWidgets.QWidget | None = None) -> None:
+                     parent: QtWidgets.QWidget | None = None,
+                     dev_name: str | None = None) -> None:
             super().__init__(parent)
             self.engine = engine
             self._levels = [0.0] * self.BARS
@@ -379,6 +380,21 @@ if QT_AVAILABLE:
             self.resize(560, 260)
             self._build_ui()
             self._opened = engine.open_mic_monitor(dev_id)
+            # Имя тестируемого устройства показано явно: список PJSIP
+            # (ALSA/PortAudio) отличается от привычных имён PipeWire в
+            # системных настройках — без подписи пользователь не понимает,
+            # какой именно микрофон сейчас проверяется.
+            hints: list[str] = []
+            if dev_name:
+                hints.append(f"Тестируется: {dev_name}")
+            if not self._opened:
+                # Раньше отказ молча превращался в вечный нулевой
+                # эквалайзер — пользователь не мог отличить «тишина» от
+                # «устройство не открылось».
+                hints.append("Устройство не открыто — полоски останутся "
+                             "нулевыми. Причина в журнале (Доктор → журнал).")
+            if hints:
+                self.info.setText("\n".join(hints))
             self._timer = QtCore.QTimer(self)
             self._timer.setInterval(50)
             self._timer.timeout.connect(self._tick)
@@ -1035,11 +1051,20 @@ if QT_AVAILABLE:
                 else:
                     if not done:
                         # Все попытки встроить не удались — показываем
-                        # отдельным нативным окном (фолбэк).
+                        # отдельным нативным окном (фолбэк) и ОБЯЗАТЕЛЬНО
+                        # говорим пользователю, где теперь видео: молчаливый
+                        # чёрный тайл читался как «изображение не появилось»
+                        # (репорт с живого Linux).
                         try:
-                            self.engine.restart_local_preview_window()
+                            shown = self.engine.restart_local_preview_window()
                         except Exception:  # noqa: BLE001
-                            pass
+                            shown = False
+                        if shown:
+                            self.device_status.setText(
+                                "Камера — в отдельном окне (встроить в тайл не удалось)")
+                        else:
+                            self.device_status.setText(
+                                "Не удалось открыть окно превью (сессия Wayland? см. лог)")
                     self._schedule_grid_rebuild()
             QtCore.QTimer.singleShot(50 if attempt == 0 else 0, _try)
 
@@ -1456,6 +1481,23 @@ if QT_AVAILABLE:
                 self._schedule_local_preview_attach()
             self._schedule_grid_rebuild()
 
+        def _preview_embed_possible(self) -> bool:
+            """Встроить нативное окно в тайл на этой сессии вообще возможно?
+
+            Два уровня проверки: наличие бэкенда (libX11/SetParent) и то,
+            на каком Qt-платформе мы реально крутимся — на нативном wayland
+            у виджетов нет XID, reparent не поможет никогда.
+            """
+            try:
+                if not self.engine.preview_embed_possible():
+                    return False
+                app = QtWidgets.QApplication.instance()
+                if app is not None and str(app.platformName()).lower() == "wayland":
+                    return False
+            except Exception:  # noqa: BLE001
+                return False
+            return True
+
         def _on_preview_toggle(self, checked: bool) -> None:
             if checked:
                 dev_id = self.camera_combo.currentData()
@@ -1463,12 +1505,23 @@ if QT_AVAILABLE:
                     self.preview_btn.setChecked(False)
                     self.device_status.setText("Видеоустройства недоступны")
                     return
-                if self.engine.start_local_preview(int(dev_id)):
+                embed = self._preview_embed_possible()
+                # Встроить нельзя — сразу просим отдельное окно: чёрный
+                # тайл, который потом «сам» превратится в окно, читался
+                # как «изображение не появилось» (репорт с живого Linux).
+                if self.engine.start_local_preview(int(dev_id),
+                                                   show_window=not embed):
                     self.preview_btn.setText("⏹ Остановить тест камеры")
-                    self.device_status.setText("Превью камеры открыто")
+                    if embed:
+                        self.device_status.setText("Превью камеры открыто")
+                    else:
+                        self.device_status.setText(
+                            "Камера — в отдельном окне "
+                            "(встраивание недоступно в этой сессии)")
                     # Показать локальный тайл «Вы» и встроить превью.
                     self._schedule_grid_rebuild()
-                    self._schedule_local_preview_attach()
+                    if embed:
+                        self._schedule_local_preview_attach()
                 else:
                     self.preview_btn.setChecked(False)
                     self.device_status.setText("Не удалось запустить превью камеры (см. лог)")
@@ -1502,9 +1555,11 @@ if QT_AVAILABLE:
 
         def _on_mic_monitor(self) -> None:
             dev_id = self.mic_combo.currentData()
+            dev_name = self.mic_combo.currentText() if dev_id is not None else None
             if dev_id is not None and dev_id < 0:
                 dev_id = None
-            self._mic_window = MicMonitorWindow(self.engine, dev_id, self)
+            self._mic_window = MicMonitorWindow(self.engine, dev_id, self,
+                                                dev_name=dev_name)
             self._mic_window.show()
             self.device_status.setText("Окно монитора микрофона открыто")
 

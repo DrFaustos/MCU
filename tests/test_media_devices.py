@@ -355,3 +355,101 @@ def test_busy_camera_stays_in_list():
         media_devices._v4l2_capture_nodes = orig_nodes  # type: ignore[assignment]
     assert [c.id for c in cams] == ["/dev/video0"]
     assert cams[0].name == "Busy Cam"
+
+
+# --- Монитор микрофона: направление и нормализация уровня ---
+# Репорт с живого Linux (2026-11): монитор показывал ноль при любом
+# микрофоне. Причина по исходникам PJSIP 2.16: микрофон — это уровень
+# «от порта к мосту» (pjsua rx_level), а pjsua2 кладёт его в getTxLevel()
+# (имена перепутаны относительно pjsua); прежний getRxLevel() измерял
+# динамики. Плюс монитор ставил выбранный микрофон ЕЩЁ И динамиком.
+
+class _CapMedia:
+    """AudioMedia-заглушка: tx = захват (микрофон), rx = воспроизведение."""
+
+    def __init__(self, tx=None, rx=0):
+        self._tx = tx
+        self._rx = rx
+
+    def getTxLevel(self):  # noqa: N802
+        if self._tx is None:
+            raise AttributeError("getTxLevel")
+        return self._tx
+
+    def getRxLevel(self):  # noqa: N802
+        return self._rx
+
+
+class _AudioMgr:
+    """AudDevManager-заглушка: методы-геттеры, без одноимённых атрибутов,
+    чтобы dev_set/dev_int честно проходили ветку сеттеров."""
+
+    def __init__(self, cap=None, capture_dev=-1, playback_dev=5):
+        self._cap = cap
+        self._capture = capture_dev
+        self._playback = playback_dev
+        self.set_calls: list = []
+
+    def getCaptureDevMedia(self):  # noqa: N802
+        return self._cap
+
+    def getCaptureDev(self):  # noqa: N802
+        return self._capture
+
+    def getPlaybackDev(self):  # noqa: N802
+        return self._playback
+
+    def setCaptureDev(self, value):  # noqa: N802
+        self.set_calls.append(("capture", value))
+        self._capture = value
+
+    def setPlaybackDev(self, value):  # noqa: N802
+        self.set_calls.append(("playback", value))
+        self._playback = value
+
+    def enumDev2(self):  # noqa: N802
+        return []
+
+
+class _Endpoint:
+    def __init__(self, mgr):
+        self._mgr = mgr
+
+    def audDevManager(self):  # noqa: N802
+        return self._mgr
+
+    def libRegisterThread(self, name):  # noqa: N802
+        pass
+
+
+def _manager(mgr):
+    return media_devices.MediaManager(object(), _Endpoint(mgr))
+
+
+def test_read_mic_level_reads_capture_not_playback():
+    # tx (захват) = 42, rx (динамики) = 99: монитор обязан показать 0.42,
+    # а не 0.99 — это ровно тот баг, что давал вечный ноль на тихой машине.
+    mgr = _AudioMgr(cap=_CapMedia(tx=42, rx=99))
+    assert abs(_manager(mgr).read_mic_level() - 0.42) < 1e-9
+
+
+def test_read_mic_level_normalized_and_clamped():
+    assert _manager(_AudioMgr(cap=_CapMedia(tx=0))).read_mic_level() == 0.0
+    assert _manager(_AudioMgr(cap=_CapMedia(tx=250))).read_mic_level() == 1.0
+
+
+def test_read_mic_level_without_tx_is_honest_zero():
+    # Сборка без getTxLevel: направление не прочитать; врать уровнем
+    # динамиков нельзя — честный ноль.
+    mgr = _AudioMgr(cap=_CapMedia(tx=None, rx=99))
+    assert _manager(mgr).read_mic_level() == 0.0
+
+
+def test_open_mic_monitor_does_not_touch_playback():
+    mgr = _AudioMgr(capture_dev=-1, playback_dev=5)
+    assert _manager(mgr).open_mic_monitor(3) is True
+    assert mgr.getCaptureDev() == 3
+    # Динамики (5) трогать нельзя: opening вывода на capture-only
+    # устройство роняло звуковой стрим целиком (PortAudio/ALSA дуплекс).
+    assert mgr.getPlaybackDev() == 5
+    assert ("playback", 3) not in mgr.set_calls

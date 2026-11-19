@@ -54,6 +54,11 @@ class VideoPreviewService:
         self._preview: Any = None
         self._preview_xid: Optional[int] = None
         self._preview_dev: int = -1
+        # Запускали ли мы уже .start() на текущем объекте. Повторный
+        # pjsua_vid_preview_start на активном превью отвечает ошибкой, и
+        # «повторная проверка» выглядела как мёртвая кнопка (репорт с
+        # живого Linux, 2026-11).
+        self._preview_started = False
         self._embedded_xids: dict = {}
         # Отдельное нативное окно PJSIP (фолбэк, когда X11-встраивание
         # невозможно): держим флаг, чтобы не «мигать» настройкой.
@@ -64,6 +69,10 @@ class VideoPreviewService:
     def active(self) -> bool:
         return self._preview is not None
 
+    def embed_possible(self) -> bool:
+        """Есть ли в этой сессии бэкенд встраивания нативных окон (X11/Win)."""
+        return bool(video_embed.available())
+
     @property
     def preview_dev(self) -> int:
         return self._preview_dev
@@ -73,6 +82,7 @@ class VideoPreviewService:
         self._preview = self._pj.VideoPreview(int(target))
         self._preview_dev = int(target)
         self._preview_xid = None
+        self._preview_started = False
 
     def start(self, dev_id: Optional[int] = None, show_window: bool = False) -> bool:
         if not self._endpoint_ready():
@@ -102,6 +112,17 @@ class VideoPreviewService:
             # объект (частые create/stop на одном dev ломали нативное окно).
             if self._preview is not None and int(self._preview_dev) != target:
                 self._release_preview()
+            if (self._preview is not None and self._preview_started
+                    and int(self._preview_dev) == target):
+                # Тот же уже запущенный девайс без остановки. PJSIP
+                # отвечает ошибкой на повторный preview_start, и UI
+                # рапортовал «не удалось запустить»/мёртвую кнопку —
+                # это и было «повторная проверка не запускается»
+                # (репорт с живого Linux). Сменой режима окна владеет
+                # restart_show_window(), а не повторный start().
+                self._events.emit("media.preview", active=True,
+                                  native_window=self._native_window)
+                return True
             if self._preview is None:
                 self._make_preview(target)
             self._native_window = bool(show_window)
@@ -110,6 +131,7 @@ class VideoPreviewService:
             # show=True: фолбэк — отдельное нативное окно (Wayland и пр.).
             prm.show = bool(show_window)
             self._preview.start(prm)
+            self._preview_started = True
             log.info(
                 "Локальное превью камеры запущено (dev=%s, show=%s)",
                 target, bool(show_window),
@@ -126,6 +148,7 @@ class VideoPreviewService:
     def _release_preview(self) -> None:
         """Остановить и отпустить текущий VideoPreview (best-effort)."""
         pv, self._preview = self._preview, None
+        self._preview_started = False
         if pv is not None:
             try:  # pragma: no cover
                 pv.stop()
@@ -145,7 +168,15 @@ class VideoPreviewService:
         if self._preview is None or dev < 0:
             return False
         self._release_preview()
-        return self.start(int(dev), show_window=True)
+        ok = self.start(int(dev), show_window=True)
+        if ok:
+            # Под XWayland новое окно может открыться ПОД главным окном —
+            # со стороны это выглядит как «изображение не появилось».
+            # Поднимаем и фокусим (best-effort: XID мог ещё не созреть).
+            xid = self.preview_xid()
+            if xid:
+                video_embed.raise_window(xid)
+        return ok
 
     def stop(self) -> None:
         if self._preview is None:
