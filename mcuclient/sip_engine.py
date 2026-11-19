@@ -1137,6 +1137,13 @@ class SipEngine:
             def onCallState(self, prm) -> None:  # noqa: N802
                 engine._on_call_state(self, prm)
 
+            def onCallSdpCreated(self, prm) -> None:  # noqa: N802
+                # Перехват локального (answer) SDP: единственный честный
+                # источник согласованных кодеков в pjsua2 2.16 (см.
+                # _store_answer_sdp). Базовая реализация — no-op, super не
+                # нужен; переопределение ничего не ломает в offer/answer.
+                engine._store_answer_sdp(self, prm)
+
             def onDtmfDigit(self, prm) -> None:  # noqa: N802
                 engine._on_dtmf_digit(self, prm)
 
@@ -1227,6 +1234,32 @@ class SipEngine:
             self._calls.apply_call_state(call, lambda c: c.getInfo())
         except Exception:  # noqa: BLE001 — исключение в колбэке pjsua2 не должно ронять процесс
             log.exception("Ошибка обработки состояния вызова")
+        # Аудит кодеков ДОПОЛНИТЕЛЬНО на CONFIRMED: answer-SDP создаётся в
+        # момент ответа (после onCallMediaState), поэтому только здесь он
+        # гарантированно есть и аудит информативен даже при биндингах 2.16
+        # без codecName. Хелпер сам пропускает вызов, если уже логовал.
+        try:
+            if (not getattr(call, "_mcu_codecs_logged", False)
+                    and call.getInfo().stateText == "CONFIRMED"):
+                self._log_negotiated_codecs(call.getInfo(), call)
+        except Exception:  # noqa: BLE001
+            log.debug("аудит кодеков на CONFIRMED не выполнен", exc_info=True)
+
+    def _store_answer_sdp(self, call, prm) -> None:
+        """Запомнить ЛОКАЛЬНЫЙ SDP вызова (атрибут `_mcu_sdp`).
+
+        onCallSdpCreated — единственный способ достать реальный SDP в
+        pjsua2: `prm.sdp.wholeSdp`. Нужно потому, что у CallMediaInfo в
+        2.16 нет поля codecName (проверено introspection и живым e2e), а
+        аудит «терминал соединился, но звука нет» обязан говорить правду.
+        """
+        try:
+            sdp = getattr(prm, "sdp", None)
+            text = getattr(sdp, "wholeSdp", None) if sdp is not None else None
+            if isinstance(text, str) and text.strip():
+                call._mcu_sdp = text
+        except Exception:  # noqa: BLE001 — колбэк pjsua2 не роняем
+            log.debug("onCallSdpCreated: wholeSdp нечитаем", exc_info=True)
 
     def _on_call_media_state(self, call, prm) -> None:
         """Обработка onCallMediaState.
@@ -1246,8 +1279,10 @@ class SipEngine:
         except Exception as exc:  # noqa: BLE001
             log.debug("_on_call_media_state: getInfo не удался: %s", exc)
             return
-        # Аудит кодеков читаем до видеогарда: mi.codecName безопасен всегда.
-        self._log_negotiated_codecs(ci)
+        # Аудит кодеков читаем до видеогарда: поля media info читаются
+        # безопасно всегда (codecName в 2.16 отсутствует — честный ответ
+        # даст answer-SDP, см. _store_answer_sdp).
+        self._log_negotiated_codecs(ci, call)
         # На сборках PJSIP без видео доступ к mi.videoWindow может привести к
         # нативному access violation (Python-исключение его не ловит), поэтому
         # разбор видеопотоков оставляем под флагом _video_supported.
@@ -1273,15 +1308,33 @@ class SipEngine:
             except Exception:  # noqa: BLE001
                 log.debug("bind capture on media state failed", exc_info=True)
 
-    def _log_negotiated_codecs(self, ci) -> None:
-        """Залогировать фактические кодеки и, если не согласовались — почему."""
+    def _log_negotiated_codecs(self, ci, call=None) -> None:
+        """Залогировать фактические кодеки и, если не согласовались — почему.
+
+        `call` (опционально) — объект pjsua2 Call: с него снимаем
+        перехваченный answer-SDP. В pjsua2 2.16 CallMediaInfo НЕ отдаёт
+        codecName (проверено introspection и живым контейнерным e2e), поэтому
+        без answer активные кодеки читаются как None даже на успешном вызове.
+        """
         try:
             from .call_manager import active_codecs  # noqa: PLC0415
             codecs = active_codecs(getattr(ci, "media", None), _pj)
+            answer = getattr(call, "_mcu_sdp", None) if call is not None else None
+            if answer:
+                from .codec_negotiation import answer_codecs  # noqa: PLC0415
+                agreed = answer_codecs(answer)
+                for kind in ("audio", "video"):
+                    if not codecs.get(kind) and agreed.get(kind):
+                        codecs[kind] = agreed[kind]
             log.info(
                 "Согласованные кодеки вызова: аудио=%s, видео=%s",
                 codecs.get("audio") or "-", codecs.get("video") or "-",
             )
+            if call is not None and (codecs.get("audio") or codecs.get("video")
+                                     or answer):
+                # Есть достоверный вердикт — повторный аудит (media-state после
+                # CONFIRMED) не нужен.
+                call._mcu_codecs_logged = True
             # Этап 5 (ADR-0002): если кодек не согласован, объясняем ПОЧЕМУ,
             # а не оставляем тихое "-". Особенно важно для Sony (G.722.1C,
             # G.719, H.264 High): терминал "соединился", но нет звука/видео.
@@ -1300,6 +1353,7 @@ class SipEngine:
                 codecs,
                 supported_audio_from_config(self.config.audio_codecs),
                 supported_video_from_config(self.config.video_codecs),
+                answer_sdp=answer,
             )
         except Exception:  # noqa: BLE001
             log.debug("active_codecs: ошибка", exc_info=True)

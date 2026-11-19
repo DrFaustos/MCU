@@ -29,15 +29,20 @@ class _Calls:
     def apply_media_state(self, call_info, call=None) -> None:
         self.calls.append((call_info, call))
 
+    def apply_call_state(self, call, get_info) -> None:
+        self.calls.append(("state", call))
+
 
 class _CodecLog:
     """Шпион аудита кодеков."""
 
     def __init__(self) -> None:
         self.infos: list = []
+        self.calls: list = []
 
-    def __call__(self, ci) -> None:
+    def __call__(self, ci, call=None) -> None:
         self.infos.append(ci)
+        self.calls.append(call)
 
 
 class _Bind:
@@ -100,6 +105,61 @@ def test_codecs_audited_without_video_support():
     engine._on_call_media_state(_Call(info=ci), None)
 
     assert engine._codec_log.infos == [ci]
+
+
+def test_media_state_passes_call_object_to_codec_audit():
+    """Аудит обязан получать ОБЪЕКТ вызова: из него читается перехваченный
+    answer-SDP. В pjsua2 2.16 CallMediaInfo не отдаёт codecName, поэтому без
+    call-объекта аудит слеп (всегда «-,-» на живых вызовах — поймано в
+    контейнерном e2e 2026-11-19).
+    """
+    engine = _engine(video_supported=False)
+    call = _Call(info=SimpleNamespace(id=1, media=[]))
+
+    engine._on_call_media_state(call, None)
+
+    assert engine._codec_log.calls == [call]
+
+
+def test_codecs_reaudited_on_confirmed_when_media_state_was_blind():
+    """Повторный аудит на CONFIRMED: answer-SDP создаётся при ответе, т.е.
+    ПОСЛЕ onCallMediaState — только на CONFIRMED он гарантированно есть.
+    На биндингах 2.16 (без codecName) media-state слепой, и без повтора лог
+    так и остался бы «-,-» на успешном звонке.
+    """
+    engine = _engine(video_supported=False)
+    ci = SimpleNamespace(id=1, media=[], stateText="CONFIRMED")
+    call = _Call(info=ci)
+
+    engine._on_call_state(call, None)
+
+    assert engine._codec_log.infos == [ci]
+    assert engine._codec_log.calls == [call]
+
+
+def test_codecs_not_reaudited_on_other_states():
+    """На CONNECTING/DISCONNECTED повторный аудит не нужен — ответ ещё/уже
+    неактуален, дублирование только шумит в журнале.
+    """
+    engine = _engine(video_supported=False)
+    ci = SimpleNamespace(id=1, media=[], stateText="DISCONNECTED")
+
+    engine._on_call_state(_Call(info=ci), None)
+
+    assert engine._codec_log.infos == []
+
+
+def test_real_helper_marks_call_logged_when_answer_available():
+    """Реальный хелпер при наличии answer-SDP выносит достоверный вердикт и
+    ставит флаг — повторные события не должны плодить одинаковые INFO.
+    """
+    engine = se.SipEngine(load_config(None))
+    call = _Call(info=SimpleNamespace(id=1, media=[]))
+    call._mcu_sdp = "m=audio 1 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000"
+
+    engine._log_negotiated_codecs(call.getInfo(), call)
+
+    assert getattr(call, "_mcu_codecs_logged", False) is True
 
 
 def test_video_parse_skipped_without_video_support():
@@ -177,8 +237,10 @@ def test_codec_audit_reaches_mismatch_report(monkeypatch):
 
     seen: list = []
     monkeypatch.setattr(cn, "log_codec_mismatch",
-                        lambda ci, codecs, audio_supported, video_supported:
-                        seen.append((ci, codecs, audio_supported, video_supported)))
+                        lambda ci, codecs, audio_supported, video_supported,
+                        answer_sdp=None:
+                        seen.append((ci, codecs, audio_supported, video_supported,
+                                     answer_sdp)))
 
     engine = se.SipEngine(load_config(None))
     engine._log_negotiated_codecs(SimpleNamespace(id=1, media=[]))
@@ -186,7 +248,7 @@ def test_codec_audit_reaches_mismatch_report(monkeypatch):
     assert len(seen) == 1, (
         "log_codec_mismatch не вызван: аудит падает внутри себя и молча "
         "глотается except (см. историю с audio_codecs())")
-    _ci, _codecs, audio_supported, video_supported = seen[0]
+    _ci, _codecs, audio_supported, video_supported, _answer = seen[0]
     # Списки coming из конфига: пустой список означал бы, что до compare не дошли
     assert isinstance(audio_supported, list) and isinstance(video_supported, list)
     assert audio_supported or video_supported, (

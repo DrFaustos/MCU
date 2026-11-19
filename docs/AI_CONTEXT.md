@@ -287,9 +287,14 @@ pure-Python fallback (моно + линейный ресемпл); регрес�
 `if not self._video_supported: return` оставили — на сборках PJSIP без видео
 обращение к `mi.videoWindow` роняет процесс нативным access violation, которое
 Python не перехватывает. Аудит согласованных кодеков (`_log_negotiated_codecs`)
-теперь читается ДО гарда: `mi.codecName` безопасен всегда, и диагностика
-«терминал соединился, но звука нет» (Sony/Polycom, Windows-wheel) возвращается.
-Регрессии — `tests/test_sip_engine_media_state.py` (11 кейсов).
+читается ДО видеогарда. ВАЖНО (уточнено 2026-11-19 живым контейнерным e2e):
+у `CallMediaInfo` в pjsua2 2.16 **нет поля `codecName`** — `active_codecs`
+безопасен (не падает), но на реальных биндингах всегда даёт None, из-за чего
+даже на успешном Polycom-вызове лог врал «аудио=-». Правду даёт перехват
+локального answer-SDP (`onCallSdpCreated` → `wholeSdp`, `answer_codecs`) и
+повторный аудит на CONFIRMED; без answer вердикт о терминале не выносится.
+Регрессии — `tests/test_sip_engine_media_state.py` (15 кейсов) и
+`tests/test_codec_negotiation.py` (`answer_codecs`, честный `log_codec_mismatch`).
 
 ### 3.13. Раннер обязан разбираться в том же API, что и тесты (исправлено)
 Раньше `tests/_runner.py` умел передавать только `tmp_path`, и тесты, принимавшие

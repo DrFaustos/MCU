@@ -210,22 +210,62 @@ def supported_audio_from_config(audio_list):
     return [c for c in audio_list if not _is_video(c.split('/')[0])]
 
 
+def answer_codecs(sdp_text):
+    """Кодеки из ЛОКАЛЬНОГО answer-SDP — честный источник для pjsua2 2.16.
+
+    Проверено живым контейнерным e2e и introspection биндингов: у
+    ``CallMediaInfo`` НЕТ поля codecName (поля: type/dir/status/index/
+    audioConfSlot/videoWindow...), поэтому active_codecs() на реальных
+    биндингах возвращает None ВСЕГДА — даже когда вызов жив и звук идёт.
+    Локальный answer содержит ровно те PT, которые PJMEDIA согласовал
+    (отвергнутые кодеки без a=rtpmap в ответе), так что это и есть
+    результат offer/answer.
+    """
+    result = {"audio": None, "video": None}
+    if not sdp_text:
+        return result
+    for ci in parse_sdp_codecs(str(sdp_text).splitlines()):
+        kind = "video" if _is_video(ci.name) else "audio"
+        if not result[kind]:
+            result[kind] = ci.encoding
+    return result
+
+
 def supported_video_from_config(video_list):
     return [c for c in video_list if _is_video(c.split('/')[0])]
 
 
-def log_codec_mismatch(call_info, codecs, audio_supported, video_supported):
+def log_codec_mismatch(call_info, codecs, audio_supported, video_supported,
+                       answer_sdp=None):
     """Stage 5 (ADR-0002): explain WHY audio/video was not negotiated.
 
     Sony/Polycom often connect but have no audio/video because their
     preferred codec (G.722.1C, G.719, H.264 High) was silently unmatched.
+
+    ``answer_sdp`` — локальный SDP вызова (перехвачен в onCallSdpCreated).
+    Он обязателен для честного вердикта: у CallMediaInfo в pjsua2 2.16 нет
+    codecName (проверено живым e2e), и без answer мы НЕ имеем права
+    утверждать, что «терминал не прислал rtpmap» — на успешных вызовах
+    это была ложь (стенд Polycom 2026-11-19: звук шёл, лог кричал).
     """
     for want, chosen in (("audio", codecs.get("audio")), ("video", codecs.get("video"))):
         if chosen:
             continue
+        if answer_sdp:
+            agreed = answer_codecs(answer_sdp).get(want)
+            if agreed:
+                log.info("Кодек %s: в answer-SDP согласован %s "
+                         "(биндинги pjsua2 не отдают codecName)", want, agreed)
+                continue
+            log.info("Кодек %s не согласован: в answer-SDP нет %s-потока "
+                     "(PJMEDIA не нашёл общего кодека с offer терминала)",
+                     want, want)
+            continue
         remote = _remote_codecs_from_call(call_info, want)
         if not remote:
-            log.info("Кодек %s не согласован: терминал не прислал rtpmap", want)
+            log.info("Кодек %s: медиа-состояние нечитаемо (биндинги pjsua2 не "
+                     "отдают codecName, answer SDP не перехвачен) — вердикт о "
+                     "терминале не делается", want)
             continue
         supported = audio_supported if want == "audio" else video_supported
         res = negotiate(remote, supported, want=want)
