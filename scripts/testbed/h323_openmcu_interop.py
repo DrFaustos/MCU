@@ -259,42 +259,82 @@ def describe_diff(before: Dict[str, Any], after: Dict[str, Any]) -> str:
 
 # --- снимок счётчиков RTP на НАШЕМ плече -------------------------------------
 
-def rtp_capture(seconds: float, iface: str = "any") -> Tuple[str, Optional[Path]]:
-    """Посчитать udp-пакеты на плече за `seconds`. tcpdump есть не везде.
+class PacketCapture:
+    """Счётчики и арбитраж по пакетам: буфер открывается ДО вызова, читается после.
 
-    Возвращает (человеческая строка, pcap-файл или None). Если tcpdump'а нет —
-    честно возвращаем «не снято»: отсутствие pcap не отменяет двух картинок, но
-    притворяться, что счётчики есть, стенд не будет.
+    Прежняя мгновенная съёмка в фазе 5 не могла найти TCS никогда, и по двум
+    причинам сразу: согласование (Q.931 → TCS → OLC) происходит до того, как мы
+    дошли до картинки, и фильтр `udp` в принципе не видит ни Q.931 (tcp/1720), ни
+    H.245 (tcp, порт назначается динамически). Поэтому пишем tcp+udp с самого
+    начала прогона и закрываем файл только в фазе счётчиков.
     """
-    exe = shutil.which("tcpdump")
-    if not exe:
-        return "tcpdump не установлен — счётчики RTP не сняты", None
-    out = Path("/tmp") / f"mcu_openmcu_{int(time.time())}.pcap"
-    cmd = [exe, "-i", iface, "-nn", "-U", "-w", str(out), "udp"]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE)
-    except OSError as exc:
-        return f"tcpdump не запустился: {exc}", None
-    time.sleep(max(1.0, seconds))
-    proc.terminate()
-    try:
-        err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        err = ""
-    captured = re.findall(r"(\d+) packets captured", err)
-    count = int(captured[-1]) if captured else -1
-    size = out.stat().st_size if out.exists() else 0
-    if count < 0:
-        # Без первой строки stderr это выглядит как «трафика нет», а чаще всего
-        # означает «у контейнера нет CAP_NET_RAW» или «-i any не поддерживается»:
-        # различать эти два отказа по нулевому pcap невозможно.
-        first = err.strip().splitlines()[0] if err.strip() else "stderr пуст"
-        return (f"pcap {size} Б, счётчик пакетов не разобран; tcpdump: {first}",
-                out if size else None)
-    return f"udp-пакетов за {seconds:.0f} с: {count} (pcap {size} Б)", out
+
+    def __init__(self, iface: str = "any") -> None:
+        self.iface = iface
+        self.proc: Optional[subprocess.Popen] = None
+        self.path: Optional[Path] = None
+        self.reason = ""
+        self.started = 0.0
+
+    def start(self, out_dir: Path) -> bool:
+        """Открыть буфер. False — снимать нечем, и причина уже записана."""
+        exe = shutil.which("tcpdump")
+        if not exe:
+            self.reason = "tcpdump не установлен — счётчики и арбитраж не сняты"
+            return False
+        self.path = out_dir / f"h323_capture_{int(time.time())}.pcap"
+        cmd = [exe, "-i", self.iface, "-nn", "-U", "-w", str(self.path),
+               "tcp", "or", "udp"]
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE)
+        except OSError as exc:
+            self.reason = f"tcpdump не запустился: {exc}"
+            self.path = None
+            return False
+        self.started = time.time()
+        return True
+
+    def stop(self, min_seconds: float = 0.0) -> Tuple[str, Optional[Path]]:
+        """Закрыть буфер и вернуть (человеческая строка, файл или None)."""
+        if self.proc is None or self.path is None:
+            return self.reason or "съёмка не начиналась", None
+        left = min_seconds - (time.time() - self.started)
+        if left > 0:
+            time.sleep(left)          # окно держим не меньше заказанного
+        self.proc.terminate()
+        try:
+            err = (self.proc.stderr.read().decode("utf-8", errors="replace")
+                   if self.proc.stderr else "")
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            err = ""
+        captured = re.findall(r"(\d+) packets captured", err)
+        count = int(captured[-1]) if captured else -1
+        size = self.path.stat().st_size if self.path.exists() else 0
+        elapsed = time.time() - self.started
+        if count < 0:
+            # Без первой строки stderr это читается как «трафика нет», а чаще
+            # всего значит «нет CAP_NET_RAW» или «-i any не поддерживается».
+            first = (err.strip().splitlines() or ["tcpdump молчит"])[0]
+            self.reason = f"tcpdump не снимал: {first}"
+            return self.reason, None
+        return (f"снято {count} пакетов (tcp+udp) за {elapsed:.0f} с, "
+                f"udp-медиа: {self._udp_count()}, файл {self.path.name} "
+                f"({size} Б)"), self.path
+
+    def _udp_count(self) -> str:
+        """Сколько из снятого — udp, то есть медиа, а не сигнализация."""
+        exe = shutil.which("tcpdump")
+        if not (exe and self.path and self.path.exists()):
+            return "—"
+        try:
+            proc = subprocess.run([exe, "-nn", "-r", str(self.path), "udp"],
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return "—"
+        return str(len([ln for ln in proc.stdout.splitlines() if ln.strip()]))
 
 
 def loopback_delta(seconds: float, iface: str = "lo") -> str:
@@ -998,6 +1038,17 @@ def main() -> int:
                 with open(args.their_trace, "a", encoding="utf-8") as fh:
                     fh.write(THEIR_TRACE_AFTER_CALL)
 
+        # Съёмка открывается ДО набора: TCS и OLC существуют только в момент
+        # согласования, и закрыть их позже — значит гарантированно получить «TCS не
+        # найден» там, где всё согласовалось.
+        capture = PacketCapture()
+        if args.pcap > 0:
+            if capture.start(dump):
+                print("[i] съёмка пакетов открыта до вызова (tcp+udp, -i any)",
+                      flush=True)
+            else:
+                print(f"[i] {capture.reason}", flush=True)
+
         attempts = dial_candidates(args, remote_addr)
         token = ""
         dial_used = ""
@@ -1241,8 +1292,8 @@ def main() -> int:
 
         # --- 5. счётчики на нашем плече ---------------------------------------
         if args.pcap > 0:
-            line, pcap = rtp_capture(args.pcap)
-            print(f"[i] RTP на нашем плече: {line}", flush=True)
+            line, pcap = capture.stop(min_seconds=args.pcap)
+            print(f"[i] плечо пакетов: {line}", flush=True)
             if pcap is not None:
                 verdict = tshark_h245(pcap)
                 print("[i] арбитраж tshark: " + verdict.replace("\n", "\n   "),
@@ -1251,12 +1302,9 @@ def main() -> int:
                     ck.check("TCS не найден" not in verdict,
                              "TCS виден в H.245 (FastStart у них выключен)",
                              verdict.splitlines()[0])
-            if pcap is not None:
-                try:
-                    shutil.copy(pcap, dump / pcap.name)
-                except OSError as exc:
-                    print(f"[i] pcap не сохранён: {exc}", flush=True)
-            else:
+            # Файл пишется сразу в каталог дампа — копировать его «в дамп» было бы
+            # копированием само на себя.
+            if pcap is None:
                 # Снимать нечем — берём то, что доступно без CAP_NET_RAW, и прямо
                 # говорим, что это грубая замена.
                 print("[i] запасной замер: " + loopback_delta(args.pcap), flush=True)

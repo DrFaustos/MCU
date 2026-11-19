@@ -177,12 +177,64 @@ def test_snapshot_reports_dead_url_without_raising():
 
 # --- честность замеров, которые не удались ------------------------------------
 
-def test_rtp_capture_is_honest_when_tcpdump_absent(monkeypatch):
+def test_capture_is_honest_when_tcpdump_absent(monkeypatch, tmp_path):
     """Без tcpdump — прямое «не снято», а не пустой pcap и не молчание."""
     monkeypatch.setattr(stand.shutil, "which", lambda _name: None)
-    line, pcap = stand.rtp_capture(0.1)
+    cap = stand.PacketCapture()
+    assert cap.start(tmp_path) is False
+    line, pcap = cap.stop()
     assert pcap is None
     assert "не сняты" in line, line
+
+
+def test_capture_starts_before_the_call_and_covers_tcp(monkeypatch,
+                                                                 tmp_path):
+    """Фильтр обязан включать tcp, а буфер — открываться до набора.
+
+    Q.931 — это tcp/1720, H.245 — tcp на динамическом порту; фильтр `udp` терял
+    ровно TCS и OLC, ради которых арбитраж и затеян. И согласование кончается
+    раньше фазы картинки, поэтому съёмка стартует до `call.make`.
+    """
+    seen = {}
+
+    class _Popen:
+        def __init__(self, cmd, **_kw):
+            seen["cmd"] = list(cmd)
+            self.stderr = None
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tcpdump")
+    monkeypatch.setattr(stand.subprocess, "Popen", _Popen)
+    cap = stand.PacketCapture()
+    assert cap.start(tmp_path) is True
+    cmd = " ".join(seen["cmd"])
+    assert "tcp" in cmd and "udp" in cmd, cmd
+    assert "-i any" in cmd, cmd
+    assert seen["cmd"][seen["cmd"].index("-w") + 1].startswith(str(tmp_path)), \
+        "файл пишется сразу в каталог дампа"
+
+
+def test_capture_names_the_real_reason_when_it_could_not_capture(monkeypatch,
+                                                                 tmp_path):
+    """«Нет CAP_NET_RAW» не должно приехать в отчёт как «трафик не пошёл»."""
+    class _Proc:
+        stderr = None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tcpdump")
+    monkeypatch.setattr(stand.subprocess, "Popen", lambda *a, **k: _Proc())
+    cap = stand.PacketCapture()
+    cap.start(tmp_path)
+    line, pcap = cap.stop()
+    assert pcap is None
+    assert "не снимал" in line, line
 
 
 def test_loopback_delta_names_the_missing_interface():
