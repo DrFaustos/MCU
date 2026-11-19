@@ -1,8 +1,8 @@
-"""Единая настройка логирования для MCU Client.
+"""Единая настройка логирования для MCU.
 
 Лог пишется:
 * в stderr (для консольного/headless-режима);
-* в файл ``mcu-client.log`` рядом с приложением (или в текущей директории,
+* в файл ``mcu.log`` рядом с приложением (или в текущей директории,
   если запись туда невозможна). Это критично для Windows-сборки в режиме
   ``--windowed``, где stderr отсутствует и падение иначе не увидеть.
 
@@ -35,7 +35,7 @@ import threading
 from pathlib import Path
 
 _CONFIGURED = False
-LOG_FILENAME = "mcu-client.log"
+LOG_FILENAME = "mcu.log"
 _log_fd = None          # dup файлового дескриптора для faulthandler
 _log_path: Path | None = None
 
@@ -359,7 +359,7 @@ def report_fatal(message: str) -> None:
         tail = f"Подробности в лог-файле:\n{log_path}"
     else:
         # Обещать путь, которого нет, — отправить оператора искать файл,
-        # который не создавался (README: «приложите mcu-client.log»).
+        # который не создавался (README: «приложите mcu.log»).
         tail = ("Файл журнала НЕ создан ({log_path}); "
                 "текст ошибки только в этом окне")
     text = f"{message}\n\n{tail}"
@@ -369,7 +369,7 @@ def report_fatal(message: str) -> None:
             import ctypes  # noqa: PLC0415
 
             ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
-                0, text, "MCU Client — критическая ошибка", 0x10
+                0, text, "MCU — критическая ошибка", 0x10
             )
             shown = True
         except Exception as exc:  # noqa: BLE001

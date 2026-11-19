@@ -6,7 +6,9 @@
 файлы, а не запускает сборку (она долгая и требует Windows).
 
 Текущий контракт релиза: по тегу собираются **только debug-бинарники**
-(расширенный лог, MCU_DEBUG=1) — `MCU-Client-debug.exe` и `MCU-Client-debug`.
+(расширенный лог, MCU_DEBUG=1) — `MCU-debug.exe` и `MCU-debug`; имена
+выводятся из build.py APP_NAME, а не из литерала: после ренима
+MCU-Client → MCU литерал только переживал бы рассинхрон.
 """
 
 from __future__ import annotations
@@ -44,13 +46,24 @@ def test_release_builds_debug_only():
     assert "--console" not in text, "релиз больше не должен собирать console-вариант"
 
 
+def _app_name() -> str:
+    """Имя бинаря — из build.py APP_NAME (единственный источник, см. test_release_variant)."""
+    m = re.search(r'^APP_NAME\s*=\s*"([^"]+)"', _read(BUILD), re.M)
+    assert m, "build.py: не найден APP_NAME"
+    return m.group(1)
+
+
 def test_release_artifacts_are_debug_only():
     text = _read(RELEASE)
-    assert "dist/MCU-Client-debug.exe" in text
-    assert "dist/MCU-Client-debug" in text
+    app = _app_name()
+    assert f"dist/{app}-debug.exe" in text
+    assert f"dist/{app}-debug" in text
     # Старые релизные артефакты не должны попадать в релиз.
-    assert "dist/MCU-Client.exe" not in text
-    assert "MCU-Client-console.exe" not in text
+    assert f"dist/{app}.exe" not in text
+    assert f"{app}-console.exe" not in text
+    # Реним MCU-Client → MCU обратного хода не имеет: legacy-имя в контракте
+    # сборки — это уже другой продукт (v0.3.0-<variant> собирается только MCU).
+    assert "MCU-Client" not in text
 
 
 def test_build_supports_debug_only_flag():

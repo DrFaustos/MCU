@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Установка единого медиа-слоя H323Plus + PTLib для MCU Client.
+# Установка единого медиа-слоя H323Plus + PTLib для MCU.
 #
 # Это Этап 0 из docs/ADR-0002-h323plus-unified-media.md: H323Plus (форк
 # willamowius) становится единственным владельцем медиа (RTP, кодеки,

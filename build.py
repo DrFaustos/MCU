@@ -1,4 +1,4 @@
-"""Скрипт сборки MCU Client в исполняемый файл.
+"""Скрипт сборки MCU в исполняемый файл.
 
 Использует PyInstaller. На Windows добавляет метаданные (версия, манифест,
 иконка) и отключает UPX — это снижает ложные срабатывания антивирусов и
@@ -38,14 +38,14 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-APP_NAME = "MCU-Client"
+APP_NAME = "MCU"
 ROOT = Path(__file__).resolve().parent
 APPIMAGETOOL_URL = (
     "https://github.com/AppImage/AppImageKit/releases/download/continuous/"
     "appimagetool-x86_64.AppImage"
 )
 VERSION_FILE = ROOT / "packaging" / "version_info.txt"
-MANIFEST_FILE = ROOT / "packaging" / "mcu-client.manifest"
+MANIFEST_FILE = ROOT / "packaging" / "mcu.manifest"
 
 
 def log(message: str) -> None:
@@ -148,7 +148,7 @@ def build_binary(console: bool = False, name: str | None = None,
             cmd += ["--version-file", str(VERSION_FILE)]
         if MANIFEST_FILE.exists():
             cmd += ["--manifest", str(MANIFEST_FILE)]
-        ico = make_ico(ROOT / "packaging" / "mcu-client.ico")
+        ico = make_ico(ROOT / "packaging" / "mcu.ico")
         cmd += ["--icon", str(ico)]
         cmd += ["--collect-all", "pjsua2", "--collect-all", "_pjsua2"]
 
@@ -241,8 +241,8 @@ def build_appimage(binary: Path) -> Path:
     )
     apprun.chmod(0o755)
 
-    desktop_src = ROOT / "packaging" / "mcu-client.desktop"
-    icon_src = ROOT / "packaging" / "mcu-client.svg"
+    desktop_src = ROOT / "packaging" / "mcu.desktop"
+    icon_src = ROOT / "packaging" / "mcu.svg"
     shutil.copy2(desktop_src, apps_dir / desktop_src.name)
     shutil.copy2(icon_src, icon_dir / icon_src.name)
     shutil.copy2(desktop_src, appdir / desktop_src.name)
@@ -294,7 +294,7 @@ def main(argv: list[str] | None = None) -> None:
     if want_appimage:
         _ensure_appimage_host()
 
-    log("[+] Начало сборки MCU Client...")
+    log("[+] Начало сборки MCU...")
     ensure_pjsua2(allow_missing=allow_no_pjsip)
     ensure_pyinstaller()
 
