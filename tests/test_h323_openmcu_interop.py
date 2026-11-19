@@ -244,6 +244,34 @@ def test_stand_has_no_hanging_hyphen_in_source():
     assert not bad, f"висячий перенос в строках: {[b[-40:] for b in bad]}"
 
 
+def test_status_diff_is_a_claim_only_when_we_sent_video():
+    """Дифф их статуса — доказательство только если видео шли МЫ.
+
+    В профиле `--no-video` галочка «у них появился H.261» означала бы «OpenMCU
+    принял наше видео», которого не было. Самопроверка матрицы ловила именно это:
+    профиль no-video проходил зелёным с такой галочкой.
+    """
+    assert stand.video_diff_verdict(True, ["G.722", "H.261-CIF"]) == (True, ["H.261-CIF"])
+    assert stand.video_diff_verdict(True, ["G.722"]) == (True, [])
+    assert stand.video_diff_verdict(False, ["H.261-CIF"])[0] is False
+
+
+def test_name_shape_note_warns_without_diagnosing():
+    """Разные формы имени видео — заметка, а не диагноз.
+
+    Правило разбора из docs/CODECS.md §8.1: аудио-имена совпадают буквально, а
+    видео-имя у OpenMCU имеет форму, не влезающую в нашу таблицу. Стенд обязан
+    сказать «форма разная», но НЕ «согласование сломано»: сравнением строк этот
+    вопрос не решается (для лицензии есть license_of_capability).
+    """
+    note = stand.name_shape_note(["H.261-CIF"], ["H.261{sw}"])
+    assert "форма имени" in note, note
+    assert "license_of_capability" in note
+    assert "не согласовано" not in note
+    assert stand.name_shape_note(["H.261-CIF"], ["H.261-CIF"]) == ""
+    assert stand.name_shape_note([], ["H.261{sw}"]) == ""
+
+
 # --- матрица (план codecs) ----------------------------------------------------
 
 def test_matrix_covers_exactly_the_agreed_four_profiles():

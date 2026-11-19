@@ -120,6 +120,40 @@ def dump_snap(dirn: Path, tag: str, snap: Dict[str, Any]) -> None:
         (dirn / name).write_bytes(body)
 
 
+def video_diff_verdict(want_video: bool, new_tokens: List[str]
+                       ) -> Tuple[bool, List[str]]:
+    """Значит ли дифф их статуса что-то про НАС: (проверять, видеотокены).
+
+    В профиле `--no-video` нам нечем было показать картинку, и «у них в статусе
+    появился H.261» там — не про нас: в комнате может быть кто-то ещё, или страница
+    изменилась по своей причине. Зелёная галочка в этом профиле читалась бы как
+    «OpenMCU принял наше видео», которого не было (самопроверка матрицы поймала это
+    как раз: профиль no-video проходил с ней).
+    """
+    video = [t for t in new_tokens if t.upper().startswith("H.2")]
+    return want_video, video
+
+
+def name_shape_note(ours: List[str], theirs: List[str]) -> str:
+    """Заметка о ФОРМЕ имён видеокодеков, если они у сторон не совпадают буквально.
+
+    Правило разбора (docs/CODECS.md §8.1, вывод codecs по их исходникам): аудио-имена
+    у нас и у них совпадают буквально, а видео-имя у них имеет форму, которая в нашу
+    таблицу не влезает — «H.261» не является подстрокой «H.261-CIF», суффикс `{sw}`
+    тоже меняет сравнение. Значит «слышно, но не видно» в этом интеропе НЕ означает,
+    что согласование сломано вообще. Стенд это только замечает, но не проверяет:
+    проверка по строке здесь была бы тем самым сравнением имён, от которого все
+    отговаривают.
+    """
+    if not ours or not theirs:
+        return ""
+    if {t.upper() for t in ours} & {t.upper() for t in theirs}:
+        return ""
+    return (f"имена видео у сторон не совпадают буквально (у нас {sorted(set(ours))}, "
+            f"у них {sorted(set(theirs))}) — это форма имени, а не диагноз "
+            "согласования; лицензию смотреть license_of_capability, не сравнением")
+
+
 def describe_diff(before: Dict[str, Any], after: Dict[str, Any]) -> str:
     """Что добавилось в их статусе после вызова — в человеческую строку."""
     new_tokens = sorted(after["tokens"] - before["tokens"])
@@ -656,6 +690,7 @@ def main() -> int:
             print(f"[i] call.media: direction={ev.get('direction')} "
                   f"codec={ev.get('codec')} {ev.get('width')}x{ev.get('height')} "
                   f"fps={ev.get('fps')}", flush=True)
+        ours_video = [str(e.get("codec", "")) for e in got if e.get("codec")]
         want_video = args.expect_video == "yes"
         if want_video:
             ck.check(bool(got),
@@ -724,14 +759,28 @@ def main() -> int:
             diff = describe_diff(before, after)
             print(f"[i] их статус ПОСЛЕ вызова: {diff}", flush=True)
             new_tokens = sorted(after["tokens"] - before["tokens"])
-            video_tokens = [t for t in new_tokens if t.upper().startswith("H.2")]
-            ck.check(bool(video_tokens),
-                     "на их стороне после вызова появился видеокодек (дифф статуса)",
-                     f"{diff}; сырой дамп — status_after_*.html в {dump}")
-            if not video_tokens and after["bytes"] != before["bytes"]:
-                print("[i] страница изменилась, но опознавательных имён видео "
-                      "не найдено: разбор надо уточнить по дампу — это НЕ "
-                      "утверждение «они не приняли видео»", flush=True)
+            check_diff, video_tokens = video_diff_verdict(want_video, new_tokens)
+            if check_diff:
+                ck.check(bool(video_tokens),
+                         "на их стороне после вызова появился видеокодек "
+                         "(дифф статуса)",
+                         f"{diff}; сырой дамп — status_after_*.html в {dump}")
+                if not video_tokens and after["bytes"] != before["bytes"]:
+                    print("[i] страница изменилась, но опознавательных имён видео "
+                          "не найдено: разбор надо уточнить по дампу — это НЕ "
+                          "утверждение «они не приняли видео»", flush=True)
+            else:
+                note = name_shape_note(ours_video, video_tokens)
+                if note:
+                    print("[i] " + note, flush=True)
+            if video_tokens and not check_diff:
+                print(f"[i] профиль без видео, а в их статусе появилось "
+                      f"{video_tokens}: это не про нас (кто-то ещё в комнате либо "
+                      "страница изменилась по своей причине) — проверкой не считаем",
+                      flush=True)
+            else:
+                print("[i] профиль без видео: дифф статуса не проверяется — "
+                      "показать нам было нечего", flush=True)
 
         # --- 4. обратная картинка: кадры от них в наш второй сокет -------------
         if not want_video:
