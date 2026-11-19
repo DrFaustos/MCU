@@ -27,7 +27,7 @@ SDP-парсер, конфиг — всё проверяется на текст
 ## L1 — два MCU-процесса (реальный SIP, реальный pjsua2)
 
 Два экземпляра MCU звонят друг другу локально; проверяются регистрация,
-создание зала, mix-logs.詳細 и готовые обёртки —
+создание зала, mix-logs. Подробности и готовые обёртки —
 [TESTING_TWO_CLIENTS.md](TESTING_TWO_CLIENTS.md). Требует pjsua2 в
 интерпретаторе (его ставит `scripts/install_pjsua2.sh`; на этой машине его
 нет в системном python — есть только в контейнерном образе `mcu-dev`, см.
@@ -152,13 +152,13 @@ sudo tcpdump -i any host <ip_терминала> -w terminal_invite.pcap
 192.0.2.0/24 для c= и Contact), в README фикстур честно указывается
 статус «synthetic».
 
-## Что реально работает на этой машине (проверено, ноябрь 2025)
+## Что реально работает на этой машине (проверено, ноябрь 2026)
 
 | Уровень | Статус |
 |---|---|
 | L0 | ✅ `/usr/bin/python3 tests/_runner.py` — зелёный |
 | L1 | ⚠️ только в контейнере `mcu-dev` (в системном python pjsua2 нет) |
-| L2 | ✅ контейнеры: сценарии гоняются против встроенного UAS (`podman`, образ `docker.io/sipp/sipp:latest` скачан); хостовых asterisk/sipp нет; `podman compose` — нужен podman-compose/docker-compose (на этой машине провайдера compose нет, эквивалент — команды `podman run` из README каталога) |
+| L2 | ✅ проверено живьём (ноябрь 2026): контейнер `mcu-testbed-asterisk` (Asterisk 20) + MCU в `mcu-dev` + sipp: Polycom INVITE через asterisk в зал 6001 — MCU принял, дожил до BYE; sony→echo 600 — green; таймеры/UPDATE — green. `podman compose` требует podman-compose/docker-compose (провайдера на хосте нет — эквивалент `podman run` в README каталога). Хостовых asterisk/sipp нет |
 | L3 | ✅ зелёные тесты фикстур (runner и pytest) |
 | L4 | ⚠️ только container-netem (host: нет `tc`, нет `sudo -n`); `tcpdump`/`ffmpeg` на хосте есть |
 | L5 | ⚠️ запись есть чем (`tcpdump`), реплей требует `tcpreplay` (не установлен) или sipp PCAPPLAY (образ есть) |

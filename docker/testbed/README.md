@@ -49,15 +49,24 @@ podman compose up --abort-on-container-exit sipp-polycom
 ```bash
 podman network create testbed --subnet 10.101.0.0/24 2>/dev/null || true
 podman build -t localhost/mcu-testbed-asterisk -f docker/testbed/asterisk.Dockerfile .
-podman run -d --name tb-asterisk --network testbed localhost/mcu-testbed-asterisk:latest
+# алиас asterisk ОБЯЗАТЕЛЕН: и mcu.config.json (registrar sip:asterisk:15080),
+# и сценарии выше резолвят именно это имя, а не имя контейнера
+podman run -d --name tb-asterisk --network testbed:alias=asterisk localhost/mcu-testbed-asterisk:latest
 # ждём health: транспорт 15080 в pjsip
 until podman exec tb-asterisk asterisk -rx "pjsip show transports" 2>/dev/null | grep -q 15080; do sleep 2; done
 podman run -d --name tb-mcu --network testbed -v "$PWD:/src:ro,z" -w /src localhost/mcu-dev:latest \
   python3 run.py --headless --config /src/docker/testbed/mcu.config.json --null-audio
-podman run --rm --network testbed -v "$PWD/scripts/testbed/sipp:/scenarios:ro,z" \
+podman run --rm --network testbed:ip=10.101.0.30 \
+  -v "$PWD/scripts/testbed/sipp:/scenarios:ro,z" \
   --entrypoint sipp docker.io/sipp/sipp -sf /scenarios/uac_sony_audio.xml asterisk:15080 \
   -p 15091 -m 1 -r 1 -l 1 -timeout 60s -nostdin
 ```
+
+Про статический IP клиента: `identify`-правило echo-anon в образе сужено
+адресом из `ARG TESTBED_SIPP_IP` (по умолчанию 10.101.0.30 — тот же адрес,
+что у sipp-сервисов в compose). Без `ip=10.101.0.30` вызовы с динамического
+адреса получают честный 401 (проверено живьём). Если образ собран с другим
+`TESTBED_SIPP_IP` — используйте его.
 
 Про SELinux: тома только с `:z` (без флага sipp показывает
 дезинформирующее «Unable to load or parse xml scenario file»).
@@ -75,14 +84,28 @@ podman run --rm --network testbed -v "$PWD/scripts/testbed/sipp:/scenarios:ro,z"
   бинарного пакета asterisk нет вообще (проверено apt и packages.debian.org),
   а debian:11 дал бы Asterisk 16 без session timers.
 
-## Что здесь реально проверено (на машине написания, ноябрь 2025)
+## Что здесь реально проверено (на машине написания, ноябрь 2026)
 
-* образ `mcu-testbed-asterisk` собирается; sipp-сценарии гоняются против
-  живого UAS в контейнере (`docker.io/sipp/sipp:latest`, sipp 3.8.0-TLS-PCAP);
-* `mcu.config.json` проходит `mcuclient.config.load_config`;
-* docker-compose.yml синтаксически валиден (YAML-парсер) и согласован с
-  `asterisk.Dockerfile` (подсеть/порт/healthcheck);
-* полный `podman compose up` на этой машине НЕ выполнялся: нет
-  compose-провайдера и образа `mcu-dev` (base ещё достраивается). Статус
-  прогонов «до конца» — честное «не запускалось», см. таблицу в
-  docs/TESTING_NO_HW.md.
+* образ `mcu-testbed-asterisk` собирается (ubuntu:24.04, Asterisk 20.6),
+  транспорт 15080 поднимается, `identify` по sed'у попадает в конфиг;
+* ПОЛНЫЙ СТЕК e2e живьём (podman-сеть compose, MCU из `mcu-dev`
+  зарегистрирован как 6001): `uac_polycom_video.xml` → asterisk → зал 6001 —
+  «Вызов принят», CONFIRMED, чистый BYE; `uac_sony_audio.xml` → echo 600 —
+  green; `uac_100rel_timers.xml` → green (Asterisk принял `Require: timer`
+  и REFRESH методом UPDATE; Contact в UPDATE/BYE обязателен — без него
+  pjsip честно отвечает 400);
+* `mcu.config.json` проходит `mcuclient.config.load_config`, регистрация
+  6001 с digest-аутентификацией работает;
+* docker-compose.yml синтаксически валиден и согласован с
+  `asterisk.Dockerfile` (подсеть/порт/healthcheck/статический IP);
+* НЕ выполнялся сам `podman compose up`: на хосте нет compose-провайдера
+  (проверено — 7 ошибок поиска podman-compose/docker-compose). Команды
+  `podman run` выше — не догадка, а ровно то, на чём всё это ездило.
+
+Мелкое честное наблюдение (исправлено в той же сессии, ноябрь 2026): на ноге
+asterisk→MCU лог MCU ругался «терминал не прислал rtpmap», хотя вызов жил и
+звук шёл. Корень оказался не в строгости парсера, а глубже: у `CallMediaInfo`
+в pjsua2 2.16 нет поля `codecName`, поэтому аудит кодеков читал всегда-пустое
+поле. Исправлено перехватом answer-SDP (`onCallSdpCreated` → `answer_codecs`)
+без вердикта о терминале, когда данных нет; регрессии — `answer_codecs` и
+честный `log_codec_mismatch` в `tests/test_codec_negotiation.py`.

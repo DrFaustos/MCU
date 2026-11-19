@@ -22,13 +22,22 @@
 
 name: mcu-testbed
 
+# Подсеть стенда по умолчанию 10.101.0.0/24. Если она (или её /8-родитель,
+# напр. корпоративный VPN 10.0.0.0/8) уже занята на хосте, netavark откажет:
+# «subnet is already used». Задайте подсеть, IP сценариев и ПЕРЕСОБЕРИТЕ
+# asterisk согласованно (identify запечён в образ), напр.:
+#   export MCU_TESTBED_SUBNET=10.222.8.0/24 MCU_TESTBED_SIPP_IP=10.222.8.30
+#   podman build --build-arg TESTBED_SIPP_IP=$MCU_TESTBED_SIPP_IP \
+#     -f docker/testbed/asterisk.Dockerfile -t localhost/mcu-testbed-asterisk:latest .
+
 networks:
   testbed:
     ipam:
       config:
-        # Подсеть обязана совпадать с ARG TESTBED_NET в asterisk.Dockerfile:
-        # identify-правила стенда расширены на неё, а не на 127.0.0.1/32.
-        - subnet: 10.101.0.0/24
+        # Подсеть обязана совпадать с тем, что передан в asterisk.Dockerfile
+        # (ARG TESTBED_SIPP_IP — identify-правило стенда сужено к IP
+        # сценариев внутри этой подсети, а не к 127.0.0.1/32).
+        - subnet: ${MCU_TESTBED_SUBNET:-10.101.0.0/24}
 
 services:
   asterisk:
@@ -98,7 +107,14 @@ services:
       - -nostdin
     volumes:
       - ../../scripts/testbed/sipp:/scenarios:ro,z
-    networks: [testbed]
+    networks:
+      testbed:
+        # Статический IP обязателен: identify echo-anon в образе asterisk
+        # сужен до адреса сценариев (ARG TESTBED_SIPP_IP), а не до подсети —
+        # иначе анонимный catch-all перехватывал бы REGISTER зала (живой e2e
+        # показал 403 «no configured AORs»). Меняйте вместе с подсетью и
+        # пересобирайте asterisk с тем же TESTBED_SIPP_IP.
+        ipv4_address: ${MCU_TESTBED_SIPP_IP:-10.101.0.30}
     depends_on:
       asterisk:
         condition: service_healthy
@@ -129,7 +145,14 @@ services:
       - -nostdin
     volumes:
       - ../../scripts/testbed/sipp:/scenarios:ro,z
-    networks: [testbed]
+    networks:
+      testbed:
+        # Статический IP обязателен: identify echo-anon в образе asterisk
+        # сужен до адреса сценариев (ARG TESTBED_SIPP_IP), а не до подсети —
+        # иначе анонимный catch-all перехватывал бы REGISTER зала (живой e2e
+        # показал 403 «no configured AORs»). Меняйте вместе с подсетью и
+        # пересобирайте asterisk с тем же TESTBED_SIPP_IP.
+        ipv4_address: ${MCU_TESTBED_SIPP_IP:-10.101.0.30}
     depends_on:
       asterisk:
         condition: service_healthy
@@ -157,7 +180,14 @@ services:
       - -nostdin
     volumes:
       - ../../scripts/testbed/sipp:/scenarios:ro,z
-    networks: [testbed]
+    networks:
+      testbed:
+        # Статический IP обязателен: identify echo-anon в образе asterisk
+        # сужен до адреса сценариев (ARG TESTBED_SIPP_IP), а не до подсети —
+        # иначе анонимный catch-all перехватывал бы REGISTER зала (живой e2e
+        # показал 403 «no configured AORs»). Меняйте вместе с подсетью и
+        # пересобирайте asterisk с тем же TESTBED_SIPP_IP.
+        ipv4_address: ${MCU_TESTBED_SIPP_IP:-10.101.0.30}
     depends_on:
       asterisk:
         condition: service_healthy

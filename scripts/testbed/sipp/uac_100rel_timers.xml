@@ -68,20 +68,24 @@
   <!-- 100 Trying факультативен (за ним mandatory-recv). -->
   <recv response="100" optional="true"/>
 
-  <!-- Первый non-100 provisional. Обязательный recv: PRACK обязан уйти до
-       200 OK, а между optional-recv и send sipp не пускает. ereg ловит
-       RSeq (первая переменная — полное совпадение, группа — rseq);
-       сработавшая rseq через test=/next= уводит в PRACK-ветку. Нет
-       provisional вовсе (сразу 2xx) — ontimeout в wait200. -->
-  <recv response="1(80|83)" regexp_match="true" timeout="20000" ontimeout="wait200"
-        test="rseq" next="prack">
+  <!-- Первый non-100 provisional — optional, и это не небрежность, а
+       живой урок: echo-подобные пиры (Asterisk 600) отвечают 200 СРАЗУ,
+       без 180/183. mandatory-recv с ожиданием 1xx на таком_peer'е
+       ловит «unexpected message» (проверено живьём), а optional-recv
+       пропускает прямой 200 сканом вниз до обязательного recv —
+       ровно так же, как это уже работает в uac_sony_audio. Если же
+       180/183 пришёл, ereg ловит RSeq (первая переменная — полное
+       совпадение, группа — rseq), и сработавшая rseq через test=/next=
+       уводит в PRACK-ветку. Статическое правило «optional нельзя
+       непосредственно перед send» не нарушено: за цепочкой optional
+       идёт обязательный recv 200. -->
+  <recv response="1(80|83)" regexp_match="true" optional="true" test="rseq" next="prack">
     <action>
       <ereg regexp="RSeq:[ ]*([0-9]+)" search_in="msg" check_it="false" assign_to="rseq_full,rseq"/>
     </action>
   </recv>
   <Reference variables="rseq_full"/>
 
-  <label id="wait200"/>
   <!-- Петля «лишних» provisional (перетраны честного 100rel-пира, второй
        180 и т.п.): метка перед optional-recv, финальный 200 — обязательный
        recv, статическое правило не нарушено. -->
@@ -120,6 +124,7 @@
       To: <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
       Call-ID: [call_id]
       CSeq: 3 UPDATE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
       Session-Expires: 180; refresher=uac
       Max-Forwards: 70
       Content-Length: 0
@@ -141,6 +146,7 @@
       To: <sip:600@[remote_ip]:[remote_port]>[peer_tag_param]
       Call-ID: [call_id]
       CSeq: 4 BYE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
       Max-Forwards: 70
       Content-Length: 0
     ]]>

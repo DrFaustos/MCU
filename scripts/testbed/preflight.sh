@@ -27,10 +27,10 @@ set -uo pipefail
 
 MODE="${1:-full}"
 [ "$MODE" = "--quick" ] && MODE=quick
-[ "$MODE" = "full" ] || {
+if [ "$MODE" != "full" ] && [ "$MODE" != "quick" ]; then
   echo "использование: $0 [--quick]" >&2
   exit 2
-}
+fi
 
 SIP_PORT="${SIP_PORT:-15080}"   # транспорт стенда (asterisk pjsip.conf)
 SIPP_PORT="${SIPP_PORT:-15090}" # локальный порт sipp-сценариев

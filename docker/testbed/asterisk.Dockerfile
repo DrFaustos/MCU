@@ -45,17 +45,20 @@ COPY scripts/testbed/asterisk/pjsip.conf \
 #  1) транспорт слушает 0.0.0.0:15080 — внутри podman-сети 127.0.0.1
 #     недоступен остальным сервисам compose; порт НЕ меняем: 15080 вшит в
 #     комментарии стенда, доки и docker-compose.yml;
-#  2) identify-правила match=127.0.0.1... расширяются на подсеть compose-сети
-#     (сценарии и MCU приходят из неё). Изолированный стендовый нет — это
-#     допустимо и задокументировано в docker/testbed/README.md.
+#  2) identify echo-anon (в репо — строго 127.0.0.1/32, bash-стенд) в образе
+#     сужается НЕ на всю подсеть, а на статический IP sipp-контейнеров.
+#     ПОЧЕМУ НЕ ПОДСЕТЬ (проверено живым e2e): unauthenticated REGISTER
+#     матчится по IP раньше секций auth; echo-anon без AOR перехватывал
+#     REGISTER'ы MCU (именно 6001) и отвечал 403 «no configured AORs» —
+#     зал никогда не регистрировался. Сужение к IP источника сценариев
+#     сохраняет анонимный вход для sipp и отдаёт регистрацию по auth.
 # RTP-окно: шире стендового 16000-16100 — в контейнере нет «живого аудио
 # рядом», конфликтить не с чем, а двум десяткам вызовов окна в 100 портов
 # уже мало.
-ARG TESTBED_NET=10.101.0.0/24
+ARG TESTBED_SIPP_IP=10.101.0.30
 RUN sed -i 's|^bind=127.0.0.1:15080|bind=0.0.0.0:15080|' /etc/asterisk/pjsip.conf \
-    && sed -i "s|^match=127.0.0.1/32|match=${TESTBED_NET}|; s|^match=127.0.0.1$|match=${TESTBED_NET}|" \
-         /etc/asterisk/pjsip.conf \
-    && grep -q "match=${TESTBED_NET}" /etc/asterisk/pjsip.conf \
+    && sed -i "s|^match=127.0.0.1/32|match=${TESTBED_SIPP_IP}|" /etc/asterisk/pjsip.conf \
+    && grep -q "match=${TESTBED_SIPP_IP}" /etc/asterisk/pjsip.conf \
     && printf '[general]\nrtpstart=10000\nrtpend=10999\n' > /etc/asterisk/rtp.conf
 
 # Готовность = транспорт жив (тот же критерий, что у run_local_sip_testbed.sh
