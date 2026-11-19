@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import os
 import re
 import shutil
 import subprocess
@@ -213,6 +214,227 @@ def loopback_delta(seconds: float, iface: str = "lo") -> str:
             f"tx +{(second[1]-first[1])//1024} КиБ (все байты интерфейса, не только RTP)")
 
 
+# --- матрица прогонов (план codecs) -------------------------------------------
+
+#: Четыре конфигурации нашего хоста, которые надо прогнать одной командой. Аргументы
+#: уходят НАШЕМУ хосту через `H323_CODEC_ARGS` (его подхватывает `start_host`),
+#: третье поле — ждём ли видеоканал. Порядок осмысленный: базовый compat, затем
+#: royalty-free, затем возврат H.264 по гранту, затем заведомо без видео.
+MATRIX = (
+    ("compat", "--codecs-profile compat", True),
+    ("royalty-free", "--codecs-profile royalty-free", True),
+    ("royalty-free-allow-h264",
+     "--codecs-profile royalty-free --allow-codecs H.264", True),
+    ("no-video", "--no-video", False),
+)
+
+
+def finish(ck: Checker, dump: Path, args: argparse.Namespace) -> int:
+    """Итог прогона: список артефактов и код возврата. Ресурсы чистит `finally`.
+
+    Вынесено, потому что выходов из прогона теперь два: обычный (после обратного
+    канала) и досрочный — профиль без видео, где fourth фаза не имеет смысла.
+    Оба обязаны напечатать одно и то же, иначе «профиль без видео» отчитается
+    меньше, чем обычный, и это заметит только читающий отчёт.
+    """
+    print(f"[i] артефакты: {dump} (status_before_*.html, status_after_*.html, "
+          "their_stdout_*.txt, their_trace_*.txt, from_openmcu_*.png, h323_*.log)",
+          flush=True)
+    if args.self_check:
+        print("[i] напоминание: это САМОПРОВЕРКА пайплайна; интероп с OpenMCU "
+              "ей не доказан", flush=True)
+    return 0 if ck.failed == 0 else 1
+
+
+def matrix_command(args: argparse.Namespace, label: str, host_args: str,
+                   expect_video: bool, port: int) -> List[str]:
+    """Команда одного прогона матрицы. Чистая функция — чтобы её можно было проверить.
+
+    Порты разводим на 4 на профиль: прогоны идут подряд, а порт и сокет освобождаются
+    только в конце профиля, и «второй хост не поднялся» в матрице — худшее из
+    возможных красных, потому что выглядит как проблема интеропа.
+    """
+    # Значение, начинающееся с `--` (`--no-video`), argparse съедает как следующий
+    # флаг: `--host-args --no-video` в матрице давало rc=2 «expected one argument».
+    # Форма `--флаг=значение` — единственный способ передать такой аргумент.
+    cmd = [sys.executable, str(Path(__file__).resolve()),
+           "--label", label, f"--host-args={host_args}",
+           "--expect-video", "yes" if expect_video else "no",
+           "--local-port", str(port),
+           "--dump-dir", str(Path(args.dump_dir) / label)]
+    for flag in ("--remote-h323", "--room", "--dial", "--wait", "--video-wait",
+                 "--frames", "--pcap", "--their-log", "--their-trace",
+                 "--their-ini", "--binary"):
+        value = getattr(args, flag[2:].replace("-", "_"), None)
+        if value in (None, "", 0, 0.0, [], False):
+            continue
+        cmd += [flag, str(value)]
+    for url in args.status_url:
+        cmd += ["--status-url", url]
+    if args.self_check:
+        cmd += ["--self-check"]
+    return cmd
+
+
+def run_matrix(args: argparse.Namespace) -> int:
+    """Прогнать профили матрицы, каждый — ОТДЕЛЬНЫМ процессом этого же стенда.
+
+    Так выбор сделан намеренно: четыре вызова в одном процессе означали бы четыре
+    стартовавших хоста с общей памятью и одним отчётом, где провал одного
+    объясняется состоянием другого. Отдельный процесс = ровно тот же одиночный
+    прогон, который уже проверен, со своим хостом, своим каталогом артефактов и
+    своим кодом возврата. Матрица при этом стоит на месте: OpenMCU снаружи не
+    трогается вообще.
+    """
+    results = []
+    for index, (label, host_args, expect_video) in enumerate(MATRIX):
+        if args.profiles and label not in args.profiles:
+            continue
+        run_dump = Path(args.dump_dir) / label
+        run_dump.mkdir(parents=True, exist_ok=True)
+        cmd = matrix_command(args, label, host_args, expect_video,
+                             args.local_port + 4 * index)
+        env = dict(os.environ)
+        env["H323_CODEC_ARGS"] = host_args
+        log = run_dump / "stand.log"
+        print(f"\n=== профиль {label}: хосту '{host_args}' "
+              f"({'видео ждём' if expect_video else 'видео не ждём'}) ===",
+              flush=True)
+        with open(log, "w", encoding="utf-8") as sink:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  env=env)
+            sink.write(proc.stdout or "")
+        tail = [ln for ln in (proc.stdout or "").splitlines()
+                if ln.startswith(("[+]", "[X]", "[i] их ", "[i] RTP", "[i] профиль"))]
+        for ln in tail:
+            print("   " + ln, flush=True)
+        results.append((label, proc.returncode, log))
+    print("\n=== матрица: итог ===", flush=True)
+    failed = 0
+    for label, rc, log in results:
+        failed += 1 if rc else 0
+        print(f"[{'OK' if rc == 0 else 'ПРОВАЛ'}] {label}: rc={rc}, лог {log}",
+              flush=True)
+    return 1 if failed else 0
+
+
+def slice_from(path: Optional[Path], start: int) -> Tuple[str, int]:
+    """Прочитать ДОПИСАННОЕ с offsets — их логи пишутся и до нашего вызова.
+
+    Целиком читать чужой лог бессмысленно: в нём строки всех предыдущих вызовов, и
+    «у них есть H.261» превращается в наблюдение за историей, а не за нашим прогоном.
+    """
+    if path is None:
+        return "", start
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return "", start
+    return raw[start:].decode("utf-8", errors="replace"), len(raw)
+
+
+#: Их stdout: списки того, что терминал/микшер принимает и передаёт. Имена маркеров
+#: взяты из описания codecs и ПРОВЕРЯЮТСЯ прогоном: если у них другой регистр или
+#: префикс, парсер просто вернёт пусто, и стенд скажет «не найдено», а не «не принимают».
+THEIR_IO_LINE = re.compile(r"\[(RECEIVE|TRANSMIT)_([A-Z]+)\]\s*(.*)", re.IGNORECASE)
+THEIR_CAP_LINE = re.compile(r"capabilit\w+\s*:\s*(.*)", re.IGNORECASE)
+
+
+def parse_their_stdout(text: str) -> Dict[str, Any]:
+    """Списки приём/передача из их stdout, сгруппированные по виду среды."""
+    kinds: Dict[str, List[str]] = {}
+    for match in THEIR_IO_LINE.finditer(text):
+        direction, medium, rest = match.group(1).upper(), match.group(2).upper(), \
+            match.group(3).strip()
+        kinds.setdefault(f"{direction.lower()}_{medium.lower()}", []).append(rest)
+    caps = [m.group(1).strip() for m in THEIR_CAP_LINE.finditer(text)]
+    return {"kinds": kinds, "capabilities": caps,
+            "video_tokens": sorted({t.upper() for t in CODEC_TOKENS.findall(text)})}
+
+
+def parse_their_trace(text: str) -> Dict[str, Any]:
+    """Их H.245-trace: порядок предпочтений и реально открытые логические каналы.
+
+    `Codecs (in preference order)` — это ИХ очередь предпочтений (по ней и
+    согласуется), а `OpenLogicalChannel` — что фактически открылось. Сверять надо
+    именно их, а не наш `call.media`: расхождение двух сторон и есть классический
+    молчаливый mismatch.
+    """
+    order: List[str] = []
+    in_order = False
+    for line in text.splitlines():
+        if "preference order" in line.lower():
+            in_order = True
+            continue
+        if in_order:
+            stripped = line.strip()
+            if not stripped:
+                in_order = False
+                continue
+            order.append(stripped)
+    olc = re.findall(r"OpenLogicalChannel[^\n]*", text)
+    rejects = len(re.findall(r"OpenLogicalChannelReject", text))
+    return {"preference": order[:24], "open_logical_channel": olc[:24],
+            "rejects": rejects,
+            "video_tokens": sorted({t.upper() for t in CODEC_TOKENS.findall(text)})}
+
+
+def parse_their_ini(text: str) -> Dict[str, List[str]]:
+    """Их ini: что включено в приём и передачу (только чтение, ничего не правим).
+
+    Рецепт codecs «после автогенерации оставить G.711+H.261, остальное False» —
+    про этот файл. Стенд его НЕ пишет: он его читает и печатает, какой конфиг у
+    прогона, чтобы красный результат было с чем сопоставить.
+    """
+    out: Dict[str, List[str]] = {"receive": [], "transmit": [], "off": []}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key.upper().startswith(("RECEIVE_", "TRANSMIT_")):
+            if value.lower() in ("false", "0", "no", "off", ""):
+                out["off"].append(key.upper())
+            else:
+                out["receive" if key.upper().startswith("RECEIVE_")
+                    else "transmit"].append(key.upper())
+    return out
+
+
+def tshark_h245(pcap: Path) -> str:
+    """Арбитр по пакетам: TCS и OLC искаем в H.245, не в H.225.
+
+    FastStart у OpenMCU по умолчанию выключен (данные codecs), поэтому искать
+    TransferCapabilitySet в H.225-сообщении — гарантированно не найти и сделать
+    вывод «TCS не было». Идём через `_ws.col.Info`: имена полей h245 у разных
+    версий tshark разъезжаются, а колонка «Information» — то, что реально видно
+    человеку в Wireshark.
+    """
+    exe = shutil.which("tshark")
+    if not exe:
+        return "tshark не установлен — арбитраж по пакетам не выполнен"
+    if not pcap.exists() or pcap.stat().st_size == 0:
+        return f"pcap пуст ({pcap.name}) — арбитраж не выполнен"
+    cmd = [exe, "-r", str(pcap), "-Y", "h245 || h225", "-T", "fields",
+           "-e", "frame.number", "-e", "_ws.col.Info"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"tshark не запустился: {exc}"
+    lines = (proc.stdout or "").splitlines()
+    tcs = [ln for ln in lines if "ransferCapabilitySet" in ln]
+    olc = [ln for ln in lines if "OpenLogicalChannel" in ln]
+    h225_tcs = [ln for ln in tcs if "H.225" in ln or "Setup" in ln]
+    summary = (f"строк H.245/H.225: {len(lines)}; TCS: {len(tcs)} "
+               f"(из них в H.225: {len(h225_tcs)}); OLC: {len(olc)}")
+    if not tcs:
+        summary += " — TCS не найден: проверь фильтр и то, что вызов был в pcap"
+    return summary + "\n   " + "\n   ".join((tcs + olc)[:12])
+
+
 # --- подставная «админка» для --self-check ------------------------------------
 
 class _FakeAdmin(http.server.BaseHTTPRequestHandler):
@@ -278,7 +500,37 @@ def main() -> int:
                     help="не ждать их видеоканал (если точно знаем, что его нет)")
     ap.add_argument("--self-check", action="store_true",
                     help="прогон на двух НАШИХ хостах + подставная админка")
+    ap.add_argument("--matrix", action="store_true",
+                    help="прогнать четыре профиля (compat / royalty-free / "
+                         "royalty-free+H.264 / --no-video) отдельными прогонами")
+    ap.add_argument("--profile", action="append", default=[], dest="profiles",
+                    help="имя профиля из матрицы (можно несколько; по умолчанию все)")
+    ap.add_argument("--label", default="", help="метка прогона (для матрицы)")
+    ap.add_argument("--host-args", default="",
+                    help="аргументы НАШЕМУ хосту (уходят в H323_CODEC_ARGS)")
+    ap.add_argument("--expect-video", choices=("yes", "no"), default="yes",
+                    help="ждать ли видеоканал (для --no-video: no)")
+    ap.add_argument("--their-log", default="",
+                    help="файл их stdout (лог контейнера) — списки приём/передача")
+    ap.add_argument("--their-trace", default="",
+                    help="файл их H.245 trace.txt (уровень 2 из [Parameters])")
+    ap.add_argument("--their-ini", default="",
+                    help="их ini: какие RECEIVE_*/TRANSMIT_* включены (только чтение)")
     args = ap.parse_args()
+
+    if args.matrix:
+        return run_matrix(args)
+
+    if args.host_args:
+        # Единственный механизм проброса аргументов нашему хосту: H323_CODEC_ARGS
+        # (его подхватывает start_host в h323_native_two_hosts).
+        os.environ["H323_CODEC_ARGS"] = (
+            os.environ.get("H323_CODEC_ARGS", "").strip() + " " + args.host_args
+        ).strip()
+    label = args.label or ("self-check" if args.self_check else "прогон")
+    if args.host_args:
+        print(f"[i] профиль {label}: хосту '{args.host_args}' "
+              f"(ждём видео: {args.expect_video})", flush=True)
 
     binary = args.binary or find_host_binary()
     if not binary or not Path(binary).exists():
@@ -355,6 +607,15 @@ def main() -> int:
         print(f"[i] наша таблица: возможностей {ready.get('capabilities')}, "
               f"аудио-кодеков {ready.get('audio_codecs_count', '?')}", flush=True)
 
+        # ПУТЬ и ТЕКСТ живут в разных переменнях специально: когда путь и срез
+        # назывались одинаково, «файла нет» (не проверять) и «файл не вырос»
+        # (проверка красная) сливались в одно, и самопроверка краснела на ровном
+        # месте — пустая строка это не None.
+        their_log_path = Path(args.their_log) if args.their_log else None
+        their_trace_path = Path(args.their_trace) if args.their_trace else None
+        _theirs_before, log_pos = slice_from(their_log_path, 0)
+        _theirs_trace_before, trace_pos = slice_from(their_trace_path, 0)
+
         before = snapshot(args.status_url) if args.status_url else {}
         if before:
             dump_snap(dump, "before", before)
@@ -395,14 +656,68 @@ def main() -> int:
             print(f"[i] call.media: direction={ev.get('direction')} "
                   f"codec={ev.get('codec')} {ev.get('width')}x{ev.get('height')} "
                   f"fps={ev.get('fps')}", flush=True)
-        ck.check(bool(got),
-                 "видео согласовалось (у нас открыт хотя бы один видеоканал)",
-                 f"направлений={sorted({str(e.get('direction')) for e in got}) or '—'}")
+        want_video = args.expect_video == "yes"
+        if want_video:
+            ck.check(bool(got),
+                     "видео согласовалось (у нас открыт хотя бы один видеоканал)",
+                     f"направлений={sorted({str(e.get('direction')) for e in got}) or '—'}")
+        else:
+            ck.check(not got,
+                     "без видео: видеоканал не согласовался (как и ожидается)",
+                     f"call.media={[(e.get('direction'), e.get('codec')) for e in got]}")
 
         # --- 3. исходящая картинка: паттерн + что отреагировало у них ----------
-        ck.check(client.send_command("video.pattern", token=token, on="1"),
-                 "исходящий паттерн включён (video.pattern on)")
+        if want_video:
+            ck.check(client.send_command("video.pattern", token=token, on="1"),
+                     "исходящий паттерн включён (video.pattern on)")
+        else:
+            print("[i] паттерн не включаем: видеоканала нет по условию прогона",
+                  flush=True)
         time.sleep(max(2.0, args.video_wait / 4))
+
+        stdout_text, log_pos = slice_from(their_log_path, log_pos)
+        trace_text, trace_pos = slice_from(their_trace_path, trace_pos)
+        (dump / f"their_stdout_{label}.txt").write_text(stdout_text,
+                                                        encoding="utf-8")
+        (dump / f"their_trace_{label}.txt").write_text(trace_text,
+                                                       encoding="utf-8")
+        if stdout_text:
+            parsed = parse_their_stdout(stdout_text)
+            kinds = {k: len(v) for k, v in sorted(parsed["kinds"].items())}
+            print(f"[i] их stdout за прогон: списки {kinds or '—'}, "
+                  f"токены {parsed['video_tokens'][:8] or '—'}", flush=True)
+            ck.check(bool(parsed["kinds"]),
+                     "их stdout подтверждает списки приём/передача",
+                     f"строк {len(stdout_text.splitlines())}; если пусто — "
+                     f"скорее всего указан не тот файл (--their-log)")
+        elif their_log_path is not None:
+            ck.check(False, "их stdout подтверждает списки приём/передача",
+                     f"{their_log_path} не вырос за прогон")
+        if trace_text:
+            traced = parse_their_trace(trace_text)
+            print(f"[i] их trace за прогон: предпочтения {traced['preference'][:6] or '—'}, "
+                  f"OLC {len(traced['open_logical_channel'])}, "
+                  f"rejects {traced['rejects']}, "
+                  f"токены {traced['video_tokens'][:6] or '—'}", flush=True)
+            ck.check(bool(traced["open_logical_channel"]),
+                     "в их trace есть OpenLogicalChannel (каналы реально открывались)",
+                     f"rejects={traced['rejects']}")
+        elif their_trace_path is not None:
+            ck.check(False, "в их trace есть OpenLogicalChannel",
+                     f"{their_trace_path} не вырос: уровень трассировки в "
+                     f"[Parameters] не 2, или это не тот файл")
+        if args.their_ini:
+            try:
+                ini = parse_their_ini(Path(args.their_ini).read_text(
+                    encoding="utf-8", errors="replace"))
+                print(f"[i] их ini: приём {ini['receive'] or '—'}, передача "
+                      f"{ini['transmit'] or '—'}, выключено {len(ini['off'])}",
+                      flush=True)
+                print("[i] (это контекст, не проверка: рецепт codecs — оставить "
+                      "G.711+H.261, остальное False; стенд их ini не правит)",
+                      flush=True)
+            except OSError as exc:
+                print(f"[i] их ini не прочитан: {exc}", flush=True)
         if before:
             after = snapshot(args.status_url)
             dump_snap(dump, "after", after)
@@ -419,6 +734,13 @@ def main() -> int:
                       "утверждение «они не приняли видео»", flush=True)
 
         # --- 4. обратная картинка: кадры от них в наш второй сокет -------------
+        if not want_video:
+            sock_video = Path(video_socket_path(str(lsock)))
+            ck.check(not sock_video.exists(),
+                     "без видео: сокет кадров не создан (честный признак)",
+                     f"{sock_video}")
+            print("[i] обратный канал в этом профиле не проверяется", flush=True)
+            return finish(ck, dump, args)
         if args.self_check:
             # Паттерн на «их» стороне включаем ДО захвата: у нашего хоста кадр
             # появляется только когда encoder-канал реально что-то кодирует.
@@ -469,6 +791,14 @@ def main() -> int:
             line, pcap = rtp_capture(args.pcap)
             print(f"[i] RTP на нашем плече: {line}", flush=True)
             if pcap is not None:
+                verdict = tshark_h245(pcap)
+                print("[i] арбитраж tshark: " + verdict.replace("\n", "\n   "),
+                      flush=True)
+                if not verdict.startswith(("tshark не", "pcap пуст")):
+                    ck.check("TCS не найден" not in verdict,
+                             "TCS виден в H.245 (FastStart у них выключен)",
+                             verdict.splitlines()[0])
+            if pcap is not None:
                 try:
                     shutil.copy(pcap, dump / pcap.name)
                 except OSError as exc:
@@ -483,12 +813,7 @@ def main() -> int:
 
         client.send_command("video.pattern", token=token, on="0")
         client.hangup(token)
-        print(f"[i] артефакты: {dump} (status_before_*.html, status_after_*.html, "
-              "from_openmcu_*.png, h323_*.log)", flush=True)
-        if args.self_check:
-            print("[i] напоминание: это САМОПРОВЕРКА пайплайна; интероп с OpenMCU "
-                  "ей не доказан", flush=True)
-        return 0 if ck.failed == 0 else 1
+        return finish(ck, dump, args)
     finally:
         for grab in grabs.values():
             grab.stop()

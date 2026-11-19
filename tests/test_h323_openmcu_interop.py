@@ -11,10 +11,12 @@ HTTP-сервере, без внешней сети и без контейнер
 
 from __future__ import annotations
 
+import argparse
 import http.server
 import importlib.util
 import re
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -240,3 +242,193 @@ def test_stand_has_no_hanging_hyphen_in_source():
     bad = [ln for ln in src.splitlines()
            if re.search(r"[А-Яа-яЁёA-Za-z]-\s*$", ln)]
     assert not bad, f"висячий перенос в строках: {[b[-40:] for b in bad]}"
+
+
+# --- матрица (план codecs) ----------------------------------------------------
+
+def test_matrix_covers_exactly_the_agreed_four_profiles():
+    """Матрица — это четыре согласованных конфигура, а не «сколько придумается».
+
+    Порядок и состав договорены с codecs (compat → royalty-free → возврат H.264 по
+    гранту → заведомо без видео); последний профиль НЕ должен ждать видео, иначе
+    прогон краснеет на отсутствии канала, который мы сами и выключили.
+    """
+    assert [name for name, _args, _want in stand.MATRIX] == [
+        "compat", "royalty-free", "royalty-free-allow-h264", "no-video"]
+    assert [want for _n, _a, want in stand.MATRIX] == [True, True, True, False]
+
+
+def test_matrix_uses_real_host_flags():
+    """Аргументы матрицы — настоящие имена флагов хоста, а не похожие.
+
+    `--codecs-profile` (он же `--audio-profile`), `--allow-codecs`, `--no-video` —
+    проверка по парсеру аргументов в tools/h323d/main.cpp; опечатка здесь дала бы
+    «хост игнорирует профиль», и искали бы мы не там.
+    """
+    src = (ROOT / "tools" / "h323d" / "main.cpp").read_text(encoding="utf-8")
+    for _name, args_str, _want in stand.MATRIX:
+        for flag in args_str.split():
+            if flag.startswith("--"):
+                assert f'\"{flag}\"' in src, f"флага {flag} в парсере хоста нет"
+
+
+def _args(**over):
+    ns = argparse.Namespace(dump_dir="/work/tmp/mx", local_port=1721,
+                            remote_h323="127.0.0.1:1720", room="8888", dial="",
+                            wait=25.0, video_wait=25.0, frames=8, pcap=0.0,
+                            their_log="", their_trace="", their_ini="",
+                            binary="", status_url=["http://127.0.0.1:1420/"],
+                            self_check=False)
+    for key, value in over.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def test_matrix_command_carries_profile_expectation_and_port_spread():
+    cmd_a = stand.matrix_command(_args(), "compat", "--codecs-profile compat",
+                                 True, 1721)
+    cmd_b = stand.matrix_command(_args(), "no-video", "--no-video", False, 1725)
+    # Форма `--host-args=…` обязательна: значение `--no-video` отдельным элементом
+    # argparse съедает как следующий флаг (проверено живым прогоном матрицы: rc=2
+    # «expected one argument»).
+    assert "--host-args=--codecs-profile compat" in cmd_a
+    assert "--host-args=--no-video" in cmd_b
+    assert cmd_a[cmd_a.index("--expect-video") + 1] == "yes"
+    assert cmd_b[cmd_b.index("--expect-video") + 1] == "no"
+    # Порты обязаны различаться: прогоны идут подряд, а порт освобождается не
+    # мгновенно, и «не поднялся второй хост» свалили бы на интероп.
+    assert cmd_a[cmd_a.index("--local-port") + 1] == "1721"
+    assert cmd_b[cmd_b.index("--local-port") + 1] == "1725"
+    assert cmd_a[cmd_a.index("--dump-dir") + 1].endswith("/compat")
+    assert cmd_b[cmd_b.index("--dump-dir") + 1].endswith("/no-video")
+    assert cmd_a.count("--status-url") == 1
+
+
+def test_matrix_command_can_run_whole_matrix_offline():
+    """--self-check обязан пробрасываться в детей: иначе матрицу нельзя проверить
+    до появления OpenMCU, а проверять оркестрацию «на живом» — значит первый
+    красный прогон получить на чужой стороне."""
+    cmd = stand.matrix_command(_args(self_check=True), "compat",
+                               "--codecs-profile compat", True, 1721)
+    assert "--self-check" in cmd
+
+
+# --- их доказательства: stdout, trace, ini ------------------------------------
+
+_THEIR_STDOUT = """
+OpenMCU-ru starting
+[RECEIVE_SOUND] G.711-alaw 64000
+[RECEIVE_SOUND] G.722 64000
+[TRANSMIT_SOUND] G.711-alaw 64000
+[RECEIVE_VIDEO] H.261-CIF 352x288
+capabilities: 12 entries
+"""
+
+_THEIR_TRACE = """2026/10/22 11:00:01.001  Codecs (in preference order)
+2026/10/22 11:00:01.001   H.261-CIF
+2026/10/22 11:00:01.001   G.711-alaw
+
+2026/10/22 11:00:02.010  OnOpenLogicalChannel: 16 (capability 3 H.261-CIF)
+2026/10/22 11:00:02.060  OnOpenLogicalChannel: 18 (capability 1 G.711)
+2026/10/22 11:00:02.070  OpenLogicalChannelReject: 20 reason=capacityUnavailable
+"""
+
+_THEIR_INI = """
+[MCU]
+RECEIVE_G711 = 1
+RECEIVE_G722 = 1
+RECEIVE_H263 = False
+TRANSMIT_G711 = 1
+TRANSMIT_H261 = 1
+TRANSMIT_H264 = 0
+"""
+
+
+def test_their_stdout_parser_groups_receive_and_transmit_by_medium():
+    parsed = stand.parse_their_stdout(_THEIR_STDOUT)
+    assert sorted(parsed["kinds"]["receive_sound"]) == ["G.711-alaw 64000",
+                                                        "G.722 64000"]
+    assert parsed["kinds"]["receive_video"] == ["H.261-CIF 352x288"]
+    assert parsed["kinds"]["transmit_sound"] == ["G.711-alaw 64000"]
+    assert "H.261-CIF" in parsed["video_tokens"]
+    assert parsed["capabilities"] == ["12 entries"]
+
+
+def test_their_stdout_parser_stays_empty_on_unrecognised_markers():
+    """Незнание — это пусто, а не «не принимают».
+
+    Если у них другие маркеры, чекер скажет «списков не найдено, проверь файл», и
+    это честный вопрос к формату; выводить пустые списки как «видео не принимают»
+    значило бы обвинить OpenMCU в том, чего мы не наблюдали.
+    """
+    parsed = stand.parse_their_stdout("MCU started on port 1720, 4 terminals\n")
+    assert parsed["kinds"] == {}
+    assert parsed["capabilities"] == []
+
+
+def test_their_trace_parser_reads_preference_order_and_channels():
+    parsed = stand.parse_their_trace(_THEIR_TRACE)
+    assert "H.261-CIF" in parsed["preference"][0]
+    assert len(parsed["open_logical_channel"]) == 3   # включая Reject-строку? см. ниже
+    assert parsed["rejects"] == 1
+
+
+def test_their_ini_parser_separates_enabled_from_disabled():
+    ini = stand.parse_their_ini(_THEIR_INI)
+    assert ini["receive"] == ["RECEIVE_G711", "RECEIVE_G722"]
+    assert ini["transmit"] == ["TRANSMIT_G711", "TRANSMIT_H261"]
+    assert sorted(ini["off"]) == ["RECEIVE_H263", "TRANSMIT_H264"]
+
+
+# --- tshark как арбитр --------------------------------------------------------
+
+def test_tshark_is_honest_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: None)
+    verdict = stand.tshark_h245(tmp_path / "nothing.pcap")
+    assert verdict.startswith("tshark не")
+
+
+def test_tshark_is_honest_on_empty_pcap(monkeypatch, tmp_path):
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
+    empty = tmp_path / "e.pcap"
+    empty.write_bytes(b"")
+    assert stand.tshark_h245(empty).startswith("pcap пуст")
+
+
+def test_tshark_searches_h245_and_reports_tcs_and_olc(monkeypatch, tmp_path):
+    """TCS ищем в H.245: FastStart у OpenMCU выключен, в H.225 его просто нет.
+
+    Отфильтровать по `h245` и зачитать колонку Information — единственный способ
+    не зависеть от имён полей диссектора, которые между версиями tshark меняются.
+    """
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
+    pcap = tmp_path / "call.pcap"
+    pcap.write_bytes(b"pcap")
+    seen = {}
+
+    def fake_run(cmd, *a, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd, 0,
+            stdout="12\tH.225 Setup\n17\tH.245 TransferCapabilitySet\n"
+                   "21\tH.245 OpenLogicalChannel\n", stderr="")
+
+    monkeypatch.setattr(stand.subprocess, "run", fake_run)
+    verdict = stand.tshark_h245(pcap)
+    assert "h245" in " ".join(seen["cmd"])
+    assert "_ws.col.Info" in seen["cmd"]
+    assert "TCS: 1" in verdict, verdict
+    assert "OLC: 1" in verdict, verdict
+    assert "TCS не найден" not in verdict
+
+
+def test_tshark_says_so_when_tcs_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(stand.shutil, "which", lambda _n: "/usr/bin/tshark")
+    pcap = tmp_path / "c.pcap"
+    pcap.write_bytes(b"pcap")
+    monkeypatch.setattr(
+        stand.subprocess, "run",
+        lambda cmd, *a, **kw: subprocess.CompletedProcess(
+            cmd, 0, stdout="3\tH.245 TerminalCapabilitySet\n", stderr=""))
+    # «TerminalCapabilitySet» — другая подстрока; TCS ищем как TransferCapabilitySet.
+    assert "TCS не найден" in stand.tshark_h245(pcap)
