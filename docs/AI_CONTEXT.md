@@ -4,7 +4,7 @@
 какие задачи решались, какие грабли уже собраны**. Читать в первую очередь —
 до того, как трогать код. Обновлять при значимых изменениях.
 
-Дата последнего обновления: **2026-10-07 (сессия 5)**, версия проекта **0.2.33**.
+Дата последнего обновления: **2026-11-19 (сессия 6: лицензии/Opus/стенд без железа)**, версия проекта **0.2.33**.
 
 ---
 
@@ -761,6 +761,15 @@ event loop` в `test_mixed_audio_track.py` (в 3.14 `asyncio.get_event_loop()`
 
 | Коммит | Что |
 |--------|-----|
+| `842cd5e` | стенд без железа: вендорные SDP-фикстуры+32 кейса, sipp Polycom/Sony/100rel, preflight, docker/testbed compose, TESTING_NO_HW.md |
+| `f18f9d7` | эмпирический снимок кодеков сборки в CODEC_LICENSING (зонд: royalty_free покрыт целиком) |
+| `c3447f0` | codec_probe: чистый JSON (C-логи PJSIP обходят logConfig, нужен dup2) |
+| `343d002` | APT_MIRROR в mcu-dev-base.Dockerfile (archive.ubuntu.com деградирует) |
+| `a08d8ce` | Opus в ручном RTP-мосту (ctypes/libopus, mediasoup produce=1 кодек, G.711 побайтово не тронут) |
+| `8ed9dd8` | royalty_free в селекторах GUI/web + страж сверки реестра профилей |
+| `2de0b82` | профиль royalty_free + широкополосные вверх + лицензионная политика |
+| `7b62d1f` | паритет pure-Python/numpy аудио-веток (падал _resample_mono на моно без numpy) |
+| `333046c` | ABR: None-метрика ≠ «0 потерь», нет ложного повышения битрейта |
 | `5e47c47` | исходящий вызов: state в register_participant; стенды: pump вместо sleep |
 | `b4d22ee` | аудио-мост SIP<->веб поднимается сам (SipBridgeService) |
 | `57861b5` | onCallMediaState: один разбор медиа, аудит кодеков без видео |
