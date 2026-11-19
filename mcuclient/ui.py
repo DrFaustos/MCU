@@ -1,4 +1,4 @@
-"""Qt-интерфейс MCU Client (PySide6).
+"""Qt-интерфейс MCU (PySide6).
 
 Окно содержит:
 * визуальную сетку видео участников (виды компоновки: speaker / gallery 2x2 / 3x3 / auto);
@@ -474,7 +474,7 @@ if QT_AVAILABLE:
             # повторные takeAt/addWidget на Windows роняют Qt.
             self._grid_rebuild_pending = False
             from . import version_string
-            self.setWindowTitle(f"MCU Client {version_string()}")
+            self.setWindowTitle(f"MCU {version_string()}")
             self.resize(1280, 800)
             self._build_ui()
             # Потокобезопасная очередь событий: колбэки pjsua2 приходят из
@@ -2096,7 +2096,7 @@ def run_gui(config: Config, engine: SipEngine, h323: H323Gateway,
 
     log.info("GUI: создание QApplication...")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("MCU Client")
+    app.setApplicationName("MCU")
     app.setOrganizationName("MCU")
 
     log.info("GUI: создание главного окна...")

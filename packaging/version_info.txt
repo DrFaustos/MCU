@@ -1,4 +1,4 @@
-# PyInstaller version resource для MCU-Client.exe
+# PyInstaller version resource для MCU.exe
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(0, 2, 34, 0),
@@ -14,13 +14,13 @@ VSVersionInfo(
     StringFileInfo([
       StringTable(
         u'040904B0',
-        [StringStruct(u'CompanyName', u'MCU Client Project'),
-         StringStruct(u'FileDescription', u'MCU Client - videoconference client [h323] 0.2.34-h323'),
+        [StringStruct(u'CompanyName', u'MCU Project'),
+         StringStruct(u'FileDescription', u'MCU - videoconference server/terminal [h323] 0.2.34-h323'),
          StringStruct(u'FileVersion', u'0.2.34.0'),
-         StringStruct(u'InternalName', u'MCU-Client'),
+         StringStruct(u'InternalName', u'MCU'),
          StringStruct(u'LegalCopyright', u'MIT License'),
-         StringStruct(u'OriginalFilename', u'MCU-Client.exe'),
-         StringStruct(u'ProductName', u'MCU Client [h323]'),
+         StringStruct(u'OriginalFilename', u'MCU.exe'),
+         StringStruct(u'ProductName', u'MCU [h323]'),
          StringStruct(u'ProductVersion', u'0.2.34.0')])
     ]),
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])

@@ -89,13 +89,13 @@ jobs:
       # описания артефакта, а внутренний ресурс .exe — только на Windows.
       - name: Name binary after variant
         shell: bash
-        run: mv dist/MCU-Client-debug.exe "dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug.exe"
+        run: mv dist/MCU-debug.exe "dist/MCU-${{ needs.preflight.outputs.variant }}-debug.exe"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Windows-${{ needs.preflight.outputs.variant }}
-          path: dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug.exe
+          name: MCU-Windows-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-${{ needs.preflight.outputs.variant }}-debug.exe
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
@@ -142,13 +142,13 @@ jobs:
         run: python build.py --debug-only
 
       - name: Name binary after variant
-        run: mv dist/MCU-Client-debug "dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug"
+        run: mv dist/MCU-debug "dist/MCU-${{ needs.preflight.outputs.variant }}-debug"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Linux-${{ needs.preflight.outputs.variant }}
-          path: dist/MCU-Client-${{ needs.preflight.outputs.variant }}-debug
+          name: MCU-Linux-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-${{ needs.preflight.outputs.variant }}-debug
 
   release:
     needs: [preflight, build-windows, build-linux]
@@ -158,17 +158,24 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: MCU-Client-Windows-${{ needs.preflight.outputs.variant }}
+          name: MCU-Windows-${{ needs.preflight.outputs.variant }}
           path: release-files/
 
       - uses: actions/download-artifact@v4
         with:
-          name: MCU-Client-Linux-${{ needs.preflight.outputs.variant }}
+          name: MCU-Linux-${{ needs.preflight.outputs.variant }}
           path: release-files/
 
       - name: List release files
         run: ls -la release-files/
 
+      # Линия варианта разрастается ассетами по 300–750 МБ на релиз.
+      # Чистим релизы старейшие-вниз, оставляя 3 свежих; git-теги не трогаем
+      # (--cleanup-tag=false). Сортировка по created_at, не по имени:
+      # лексикографический порядок врёт на легаси-номерах 0.2.9 vs 0.2.10.
+      # $VAR передаётся в jq через --arg: внутри jq-программы в двойных
+      # кавычках «$VAR == "sip"» раскрывался бы в голый h323/sip до вызова jq —
+      # compile error, молча маскируемый конвейером (проверено локально).
       # Если релиз по этому тегу уже существует (напр. тег переставлен),
       # удаляем его — иначе softprops/action-gh-release падает с
       # "already_exists: tag_name" на финализации.
@@ -187,3 +194,17 @@ jobs:
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune old releases of this line (keep 3 latest (после Create — иначе было бы 4))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VAR="${{ needs.preflight.outputs.variant }}"
+          # линия = релизы с суффиксом варианта + (только для sip) легаси-теги
+          # без суффикса: до введения вариантов это была sip-нумерация.
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r --arg var "$VAR" 'if type == "array" then .[] | select((.tag_name | endswith("-" + $var)) or ($var == "sip" and (.tag_name | test("^v[0-9.]+$")))) | "\(.created_at) \(.id) \(.tag_name)" else empty end' \
+            | sort -r | tail -n +4 | while read -r _ ID TAG; do
+              echo "prune: release $ID ($TAG)"
+              gh release delete "$ID" --yes --cleanup-tag=false || true; done
