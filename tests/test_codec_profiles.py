@@ -141,3 +141,22 @@ def test_set_codec_profile_rejects_unknown():
     cfg = load_config(None)
     with pytest.raises(ConfigError):
         cfg.set_codec_profile("royalty-free")  # дефис, не подчёркивание
+
+
+def test_every_profile_is_selectable_in_gui_and_web():
+    """Профиль, которого нет в селекторах, оператору недоступен.
+
+    Тот же класс лжи, что `docs ⊆ код` в test_doc_status_fields: реестр
+    профилей (CODEC_PROFILES) и его отражение в интерфейсах обязаны
+    сверяться кодом, иначе `royalty_free` годами жил бы только в конфиге.
+    Проверяем по исходникам (текст), чтобы работало без PySide6.
+    """
+    root = Path(__file__).resolve().parent.parent
+    ui_src = (root / "mcuclient" / "ui.py").read_text(encoding="utf-8")
+    web_src = (root / "mcuclient" / "webui" / "index.html").read_text(
+        encoding="utf-8")
+    for profile in CODEC_PROFILES:
+        assert f'("{profile}"' in ui_src, (
+            f"профиль {profile} отсутствует в селекторе ui.py")
+        assert f'value="{profile}"' in web_src, (
+            f"профиль {profile} отсутствует в селекторе webui/index.html")
