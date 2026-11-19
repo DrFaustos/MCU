@@ -12,7 +12,7 @@
 (`ROYALTY_FREE_AUDIO_DENY`, `select_advertised`, `host_codec_args`), механика
 таблицы возможностей — в `tools/h323d/main.cpp` (`apply_codec_profile`,
 `ReorderCapabilities`), замок от расхождения языков и правил —
-`tests/test_codec_profile.py` — 38 кейсов.
+`tests/test_codec_profile.py` — 39 кейсов.
 
 ## 1. Чем этот документ не является
 
@@ -592,7 +592,7 @@ OpenH264, хотя configure рапортовал «H.264-OpenH264: yes». Пр�
 ## 12. Что осталось на живом стенде
 
 Локально (без H323Plus на машине) проверяется только логика и статические
-контракты — 38 кейсов `tests/test_codec_profile.py` плюс общий прогон раннера.
+контракты — 39 кейсов `tests/test_codec_profile.py` плюс общий прогон раннера.
 На стенде (`./scripts/h323_in_container.sh`) остаются:
 
 1. имена видео-возможностей сняты с исходников (§5.2) и теперь подтверждены

@@ -27,6 +27,7 @@ Polycom, H.264 — пул AVC, AMR — FRAND). Оператор закрытог
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -800,3 +801,39 @@ def test_substring_direction_is_the_interop_mine():
                                 ("G.722-64k{sw}", "G.722-64k{sw}"),
                                 ("iLBC-13k3{sw}", "iLBC-13k3{sw}")):
         assert matches_pattern(our_name, (their_key,))
+
+
+# Диапазоны собраны из кодовых точек, а не литералами: иначе сам замок содержал бы
+# то, что ищет (тот же приём, что в docs-замке test_knowledge_and_docs_have_no_cjk).
+_NON_LATIN_SCRIPT_RANGES = ((0x3000, 0x303F), (0x4E00, 0x9FFF), (0xFF00, 0xFFEF))
+_NON_LATIN_SCRIPT = re.compile(
+    "[" + "".join("%s-%s" % (chr(lo), chr(hi)) for lo, hi in _NON_LATIN_SCRIPT_RANGES) + "]"
+)
+
+#: Мои файлы с русскими комментариями: тот же риск потерянной раскладки, что и в
+#: документации, но docs-замок их не видит, потому что это код, а не док.
+CJK_GUARD_TARGETS = (
+    "mcuclient/codec_negotiation.py",
+    "tests/test_codec_profile.py",
+    "tools/h323d/main.cpp",
+)
+
+
+def test_our_codec_code_and_tests_have_no_cjk():
+    """Русский текст в коде не должен терять раскладку незамеченным.
+
+    Причина не теоретическая: в этой сессии в сообщение teammate уехали иероглифы
+    посреди русского предложения, и поймать это было нечем — docs-замок смотрит на
+    документацию, а комментарий в .py или .cpp с той же опечаткой проходил бы
+    сколько угодно. Замок намеренно шире иероглифов: куша и полноширинная пунктуация
+    — тот же симптом.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    findings = []
+    for rel in CJK_GUARD_TARGETS:
+        path = os.path.join(root, rel)
+        with open(path, encoding="utf-8") as handle:
+            for number, line in enumerate(handle, 1):
+                if _NON_LATIN_SCRIPT.search(line):
+                    findings.append("%s:%d" % (rel, number))
+    assert not findings, "не-латинская письменность в файлах темы: " + ", ".join(findings)
