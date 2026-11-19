@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mcuclient",
         description="Кроссплатформенный ВКС-клиент (SIP/H.323) уровня MCU",
     )
+    # Вариант сборки в --version обязателен: на машине по два клиента каждой
+    # линейки, и отличать их можно только строкой версии (тег = версия-вариант).
+    from mcuclient import version_string
+    p.add_argument("--version", action="version", version=version_string())
     p.add_argument("--config", help="путь к config.json")
     p.add_argument("--listen", help="адрес приёма вызовов, напр. 0.0.0.0:5060")
     p.add_argument("--display-name", help="имя комнаты/дисплея")
