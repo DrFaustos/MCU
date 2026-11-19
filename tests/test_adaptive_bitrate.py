@@ -83,3 +83,44 @@ def test_reset():
     assert c.target_kbps < 1000
     c.reset(1200)
     assert c.target_kbps == 1200
+
+
+# --- «нет данных» обязан НЕ читаться как «идеальный канал» (2026-10-10) ---
+
+
+def test_missing_jitter_blocks_increase():
+    # Потери нулевые, джиттер не измерен: задирать битрейт не на чем.
+    c = AdaptiveBitrateController(AbrConfig(start_kbps=1000))
+    for _ in range(6):
+        d = c.update(loss_fraction=0.0, jitter_ms=None)
+        assert d.changed is False
+        assert d.direction == "hold"
+    assert c.target_kbps == 1000, c.target_kbps
+    assert "джиттер" in d.reason, d.reason
+
+
+def test_no_metrics_at_all_holds():
+    # Ни потерь, ни джиттера (поток не начался) — ABR молчит.
+    c = AdaptiveBitrateController(AbrConfig(start_kbps=1000))
+    for _ in range(6):
+        d = c.update(loss_fraction=None, jitter_ms=None)
+        assert d.changed is False
+    assert c.target_kbps == 1000, c.target_kbps
+    assert "нет" in d.reason, d.reason
+
+
+def test_missing_loss_never_reduces():
+    # Понижать битрейт без измеренных потерь — выдумывать дефект канала.
+    c = AdaptiveBitrateController(AbrConfig(start_kbps=1000))
+    d = c.update(loss_fraction=None, jitter_ms=5.0)
+    assert d.changed is False
+    assert c.target_kbps == 1000
+
+
+def test_real_loss_reduces_even_without_jitter():
+    # Реакция на измеренные потери обязана пережить пустой джиттер.
+    c = AdaptiveBitrateController(AbrConfig(start_kbps=1000, down_factor=0.75))
+    d = c.update(loss_fraction=0.10, jitter_ms=None)
+    assert d.changed is True
+    assert d.direction == "down"
+    assert d.kbps == 750

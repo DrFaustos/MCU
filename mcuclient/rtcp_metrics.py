@@ -5,6 +5,11 @@
 
 Всё делается защитно: если поле отсутствует или тип не тот, возвращаем
 None — ABR просто не получит обновление на этом тике.
+
+Ключевой контракт (2026-10-10): ``None`` означает «метрика не измерена»,
+а не «ноль». Нулевой джиттер и нулевые потери — это диагноз «идеальный
+канал», по которому ABR заддирает битрейт; отсутствие данных таким
+диагнозом быть не должно.
 """
 
 from __future__ import annotations
@@ -22,7 +27,8 @@ class RtcpSample:
     """Один снимок метрик RTCP/джиттера по медиапотоку."""
 
     loss_fraction: float
-    jitter_ms: float
+    # None — джиттер не измерен (MathStat не набран), а не «нулевой».
+    jitter_ms: float | None
     packets: int = 0
     lost: int = 0
 
@@ -35,14 +41,15 @@ def _int(value: Any, default: int = 0) -> int:
 
 
 def _loss_fraction(rx_stat: Any) -> float | None:
-    """Доля потерь из RtcpStreamStat."""
+    """Доля потерь из RtcpStreamStat (None, если метрик нет)."""
     if rx_stat is None:
         return None
     lost = _int(getattr(rx_stat, "loss", 0))
     pkt = _int(getattr(rx_stat, "pkt", 0))
     total = pkt + lost
     if total <= 0:
-        return 0.0
+        # Пакетов не было вовсе: это отсутствие данных, а не «0% потерь».
+        return None
     frac = lost / total
     if frac < 0.0:
         return 0.0
@@ -89,7 +96,7 @@ def _usec_ms(value: Any) -> float | None:
 
 
 def _jitter_ms(stat: Any, rtcp: Any) -> float | None:
-    """Джиттер приёма в мс.
+    """Джиттер приёма в мс (None, если ни один источник не набран).
 
     Источники по убыванию точности: ``rxIpdvUsec`` (набирается только при
     PJMEDIA_RTCP_STAT_HAS_IPDV), ``rxStat.jitterUsec`` (реальный RTP-джиттер,
@@ -121,7 +128,7 @@ def _jitter_ms(stat: Any, rtcp: Any) -> float | None:
 
 
 def parse_stream_stat(stat: Any) -> RtcpSample | None:
-    """Разобрать Call.getStreamStat(idx) в RtcpSample."""
+    """Разобрать Call.getStreamStat(idx) в RtcpSample (None, если метрик нет)."""
     if stat is None:
         return None
     try:
@@ -134,9 +141,9 @@ def parse_stream_stat(stat: Any) -> RtcpSample | None:
     loss = _loss_fraction(rx_stat)
     if loss is None:
         return None
+    # Джиттер остаётся None, если ни один источник не набран: «нет данных»
+    # не должно читаться контроллером как «нулевой джиттер».
     jitter = _jitter_ms(stat, rtcp)
-    if jitter is None:
-        jitter = 0.0
     return RtcpSample(
         loss_fraction=loss,
         jitter_ms=jitter,
@@ -193,14 +200,19 @@ class RtcpCollector:
         return parse_stream_stat(stat)
 
     def sample_calls(self, calls: list) -> RtcpSample | None:
-        """Усреднить метрики по нескольким вызовам."""
+        """Усреднить метрики по нескольким вызовам.
+
+        Джиттер усредняется только по тем вызовам, где он реально набран;
+        если не набран ни у одного — остаётся None.
+        """
         samples = [s for s in (self.sample_call(c) for c in calls) if s is not None]
         if not samples:
             return None
         if len(samples) == 1:
             return samples[0]
         loss = sum(s.loss_fraction for s in samples) / len(samples)
-        jitter = sum(s.jitter_ms for s in samples) / len(samples)
+        jitter_vals = [s.jitter_ms for s in samples if s.jitter_ms is not None]
+        jitter = (sum(jitter_vals) / len(jitter_vals)) if jitter_vals else None
         return RtcpSample(
             loss_fraction=loss,
             jitter_ms=jitter,

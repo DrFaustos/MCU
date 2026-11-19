@@ -2028,8 +2028,15 @@ class SipEngine:
     def target_video_bitrate_kbps(self) -> int:
         return self._abr.target_kbps
 
-    def report_rtcp_metrics(self, loss_fraction: float, jitter_ms: float) -> int:
-        """Скормить RTCP-метрики; при изменении применяет новый битрейт."""
+    def report_rtcp_metrics(
+        self,
+        loss_fraction: Optional[float],
+        jitter_ms: Optional[float],
+    ) -> int:
+        """Скормить RTCP-метрики; при изменении применяет новый битрейт.
+
+        None — «метрика не измерена» (не ноль): на пустых метриках ABR молчит.
+        """
         return self._abr.report_metrics(loss_fraction, jitter_ms)
 
     def mute_participant(self, participant_id: int, muted: bool) -> bool:

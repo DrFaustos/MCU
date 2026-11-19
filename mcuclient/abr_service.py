@@ -4,6 +4,9 @@
 управляет фоновым опросом RTCP. Зависимости передаются явно (DI): шина
 событий, применение битрейта к конфигу, список активных вызовов и
 регистрация потока в pjlib. SipEngine остаётся фасадом.
+
+Метрики могут прийти как None («не измерено») — сервис передаёт их как есть,
+не подменяя нулём: на пустых метриках контроллер сам решает молчать.
 """
 
 from __future__ import annotations
@@ -16,6 +19,18 @@ from .log import get_logger
 from .rtcp_metrics import RtcpCollector
 
 log = get_logger("abr")
+
+
+def _fmt_loss(loss_fraction: Optional[float]) -> str:
+    if loss_fraction is None:
+        return "нет"
+    return f"{loss_fraction * 100.0:.1f}%"
+
+
+def _fmt_jitter(jitter_ms: Optional[float]) -> str:
+    if jitter_ms is None:
+        return "нет"
+    return f"{jitter_ms:.0f} мс"
 
 
 class AbrService:
@@ -59,8 +74,15 @@ class AbrService:
         return self._enabled
 
     # --- решение по метрикам ---
-    def report_metrics(self, loss_fraction: float, jitter_ms: float) -> int:
-        """Скормить RTCP-метрики; при изменении применяет новый битрейт."""
+    def report_metrics(
+        self,
+        loss_fraction: Optional[float],
+        jitter_ms: Optional[float],
+    ) -> int:
+        """Скормить RTCP-метрики; при изменении применяет новый битрейт.
+
+        None означает «метрика не измерена» и передаётся контроллеру как есть.
+        """
         if not self._enabled:
             return self._controller.target_kbps
         decision = self._controller.update(loss_fraction, jitter_ms)
@@ -92,8 +114,8 @@ class AbrService:
             return None
         new = self.report_metrics(sample.loss_fraction, sample.jitter_ms)
         log.debug(
-            "RTCP: потери %.1f%%, джиттер %.0f мс -> битрейт %d кбит/с",
-            sample.loss_fraction * 100.0, sample.jitter_ms, new,
+            "RTCP: потери %s, джиттер %s -> битрейт %d кбит/с",
+            _fmt_loss(sample.loss_fraction), _fmt_jitter(sample.jitter_ms), new,
         )
         return new
 

@@ -81,3 +81,58 @@ def test_start_and_stop_poller_registers_thread():
     svc.start_poller()
     svc.stop_poller()
     assert thread == ["rtcp-poll"]
+
+
+# --- боевая форма pjsua2: «нет данных» больше не выглядит идеальным каналом ---
+
+
+class _MathStat:
+    # Форма pjsua2.MathStat: mean/n, а не число (биндинг 2.16).
+
+    def __init__(self, mean=0, n=0):
+        self.mean = mean
+        self.n = n
+
+
+class _NoJitterCall:
+    # Вызов как в бою: потерь нет (измерено), джиттер не набран вовсе.
+
+    def getInfo(self):
+        class _Media:
+            type = 2
+            index = 0
+
+        class _Info:
+            media = [_Media()]
+
+        return _Info()
+
+    def getStreamStat(self, idx):
+        class _Rx:
+            pkt = 500
+            loss = 0
+            jitterUsec = _MathStat(0, 0)
+
+        class _Rtcp:
+            rxStat = _Rx()
+            rxIpdvUsec = _MathStat(0, 0)
+            rxRawJitterUsec = _MathStat(0, 0)
+
+        class _Jbuf:
+            discard = 0
+
+        class _Stat:
+            rtcp = _Rtcp()
+            jbuf = _Jbuf()
+
+        return _Stat()
+
+
+def test_poll_does_not_raise_bitrate_on_unmeasured_jitter():
+    # Болевой путь: pjsua2 без IPDV больше не выглядит идеальным каналом.
+    applied: list = []
+    svc = _service(applied=applied, calls=[_NoJitterCall()])
+    for _ in range(6):
+        svc.poll()
+    assert applied == [], applied
+    assert svc.target_kbps == 1000, svc.target_kbps

@@ -57,13 +57,6 @@ def test_parse_returns_none_without_rxstat():
     assert parse_stream_stat(_Stat(rtcp=_Rtcp(rx=None))) is None
 
 
-def test_parse_zero_packets_is_zero_loss():
-    s = _Stat(rtcp=_Rtcp(rx=_RxStat(pkt=0, loss=0)))
-    sample = parse_stream_stat(s)
-    assert sample is not None
-    assert sample.loss_fraction == 0.0
-    assert sample.jitter_ms == 0.0
-
 
 def test_loss_fraction_is_clamped_to_one():
     s = _Stat(rtcp=_Rtcp(rx=_RxStat(pkt=0, loss=5)))
@@ -232,3 +225,62 @@ def test_real_binding_shape_not_read_as_zero():
     assert sample is not None
     assert sample.jitter_ms > 0.0, sample.jitter_ms
     assert abs(sample.loss_fraction - 0.05) < 1e-9
+
+
+# --- «нет данных» обязан НЕ читаться как «идеальный канал» (2026-10-10) ---
+# Замер зондом .agent/probe_abr_no_data.py: на боевой форме pjsua2 без
+# PJMEDIA_RTCP_STAT_HAS_IPDV (и на потоке, что ещё не начался) ABR задирал
+# битрейт 1500 -> 2655 кбит/с за 6 тиков, потому что парсер подставлял 0.0
+# туда, где метрик просто нет. прежний кейс test_parse_zero_packets_is_zero_loss
+# утверждал обратное и был частью дефекта — удалён.
+
+
+def test_no_packets_yields_no_sample():
+    # Поток не начался (pkt=0), джиттер не набран: метрик нет -> None.
+    assert parse_stream_stat(_Stat(rtcp=_Rtcp(rx=_RxStat(pkt=0, loss=0)))) is None
+
+
+def test_packets_without_jitter_keeps_loss_and_reports_no_jitter():
+    # Боевая форма pjsua2 без IPDV: потери измерены, джиттера нет -> None.
+    rtcp = _Rtcp(rx=_RxStat(pkt=500, loss=0))
+    rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)
+    rtcp.rxRawJitterUsec = _MathStat(mean=0, n=0)
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert sample.loss_fraction == 0.0
+    assert sample.jitter_ms is None, sample.jitter_ms
+
+
+def test_real_loss_parses_when_jitter_unmeasured():
+    # Реакция на настоящие потери не должна теряться из-за пустого джиттера.
+    rtcp = _Rtcp(rx=_RxStat(pkt=450, loss=50))
+    rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)
+    sample = parse_stream_stat(_Stat(rtcp=rtcp))
+    assert sample is not None
+    assert abs(sample.loss_fraction - 0.1) < 1e-9
+    assert sample.jitter_ms is None
+
+
+def test_average_mixes_only_measured_jitter():
+    # Среднее по вызовам: джиттер усредняется только по тем, где он набран.
+    rtcp1 = _Rtcp(rx=_RxStat(pkt=100, loss=0))
+    rtcp1.rxIpdvUsec = _MathStat(mean=0, n=0)
+    rtcp2 = _Rtcp(rx=_RxStat(pkt=100, loss=0))
+    rtcp2.rxIpdvUsec = _MathStat(mean=20000, n=10)
+    sample = RtcpCollector(_Pj).sample_calls(
+        [_FakeCall(_Stat(rtcp=rtcp1)), _FakeCall(_Stat(rtcp=rtcp2))])
+    assert sample is not None
+    assert sample.jitter_ms is not None
+    assert abs(sample.jitter_ms - 20.0) < 1e-6, sample.jitter_ms
+
+
+def test_average_keeps_jitter_none_when_unmeasured_everywhere():
+    # Если джиттера нет ни у одного вызова — среднее обязано остаться None.
+    def _bare():
+        rtcp = _Rtcp(rx=_RxStat(pkt=100, loss=0))
+        rtcp.rxIpdvUsec = _MathStat(mean=0, n=0)
+        return _Stat(rtcp=rtcp)
+
+    sample = RtcpCollector(_Pj).sample_calls([_FakeCall(_bare()), _FakeCall(_bare())])
+    assert sample is not None
+    assert sample.jitter_ms is None, sample.jitter_ms

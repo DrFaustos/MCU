@@ -9,6 +9,10 @@
 * потери выше ``loss_high`` — шаг вниз (быстро, агрессивно);
 * потери ниже ``loss_low`` и джиттер в норме — шаг вверх (осторожно);
 * между порогами — без изменений.
+
+``None`` в метрике означает «не измерена» и НЕ равна нулю (2026-10-10):
+без измеренных потерь понижать битрейт нечем, а повышение при неизмеренном
+джиттере — решение вслепую. На пустых метриках контроллер стоит на месте.
 """
 
 from __future__ import annotations
@@ -68,19 +72,25 @@ class AdaptiveBitrateController:
         self._kbps = self._clamp(kbps if kbps is not None else self.config.start_kbps)
         return self._kbps
 
-    def update(self, loss_fraction: float, jitter_ms: float) -> AbrDecision:
+    def update(self, loss_fraction: float | None, jitter_ms: float | None) -> AbrDecision:
         """Пересчитать целевой битрейт по метрикам.
 
-        :param loss_fraction: доля потерянных пакетов (0..1).
-        :param jitter_ms: джиттер в миллисекундах.
+        :param loss_fraction: доля потерянных пакетов (0..1) или None.
+        :param jitter_ms: джиттер в миллисекундах или None.
+
+        None — «метрика не измерена», и это не ноль: без измеренных потерь
+        снижать нечем, а повышать при неизмеренном джиттере — вслепую.
         """
+        if loss_fraction is None and jitter_ms is None:
+            return AbrDecision(False, self._kbps, "hold", "нет метрик канала")
         try:
-            loss = max(0.0, float(loss_fraction))
-            jitter = max(0.0, float(jitter_ms))
+            loss = None if loss_fraction is None else max(0.0, float(loss_fraction))
+            jitter = None if jitter_ms is None else max(0.0, float(jitter_ms))
         except (TypeError, ValueError):
             return AbrDecision(False, self._kbps, "hold", "некорректные метрики")
 
-        if loss > self.config.loss_high:
+        # Шаг вниз — только по измеренным потерям.
+        if loss is not None and loss > self.config.loss_high:
             new = self._clamp(int(self._kbps * self.config.down_factor))
             if new < self._kbps:
                 old, self._kbps = self._kbps, new
@@ -89,14 +99,29 @@ class AdaptiveBitrateController:
                 return AbrDecision(True, new, "down", reason)
             return AbrDecision(False, self._kbps, "hold", "уже на минимуме")
 
-        if loss < self.config.loss_low and jitter < self.config.jitter_high_ms:
-            new = self._clamp(int(self._kbps * self.config.up_factor))
-            if new > self._kbps:
-                old, self._kbps = self._kbps, new
-                reason = f"потери {loss:.1%}, джиттер {jitter:.0f} мс — запас есть"
-                log.info("ABR вверх: %d -> %d кбит/с (%s)", old, new, reason)
-                return AbrDecision(True, new, "up", reason)
-            return AbrDecision(False, self._kbps, "hold", "уже на максимуме")
+        if loss is None:
+            return AbrDecision(False, self._kbps, "hold", "нет измеренных потерь")
+
+        if loss < self.config.loss_low:
+            # Повышаем только когда есть подтверждение чистого канала:
+            # джиттер обязан быть измерен и находиться в допустимой зоне.
+            if jitter is None:
+                return AbrDecision(
+                    False, self._kbps, "hold",
+                    f"потери {loss:.1%}, джиттер не измерен — повышать не на чём",
+                )
+            if jitter < self.config.jitter_high_ms:
+                new = self._clamp(int(self._kbps * self.config.up_factor))
+                if new > self._kbps:
+                    old, self._kbps = self._kbps, new
+                    reason = f"потери {loss:.1%}, джиттер {jitter:.0f} мс — запас есть"
+                    log.info("ABR вверх: %d -> %d кбит/с (%s)", old, new, reason)
+                    return AbrDecision(True, new, "up", reason)
+                return AbrDecision(False, self._kbps, "hold", "уже на максимуме")
+            return AbrDecision(
+                False, self._kbps, "hold",
+                f"джиттер {jitter:.0f} мс > {self.config.jitter_high_ms:.0f} мс",
+            )
 
         return AbrDecision(False, self._kbps, "hold", "метрики в допустимой зоне")
 
