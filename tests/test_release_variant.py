@@ -13,8 +13,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import tomllib
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -33,8 +31,12 @@ def test_version_string_equals_tag_form():
 
 
 def test_pyproject_version_matches_package():
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["version"] == mcuclient.__version__
+    # tomllib нельзя: CI гоняет 3.10, а он только с 3.11 (сломанный CI
+    # на 39d6ada это показал). Регулярка по секции [project] — ровно то
+    # поле, которое сверяем.
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'\[project\][^\[]*?^version\s*=\s*"([^"]+)"', text, re.M | re.S)
+    assert m and m.group(1) == mcuclient.__version__
 
 
 def test_windows_resource_carries_version_and_variant():
