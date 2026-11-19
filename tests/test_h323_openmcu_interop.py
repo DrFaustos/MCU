@@ -272,6 +272,29 @@ def test_name_shape_note_warns_without_diagnosing():
     assert stand.name_shape_note([], ["H.261{sw}"]) == ""
 
 
+def test_dial_candidates_order_goes_specific_to_general():
+    """Порядок попыток: специфичная форма комнаты → просто адрес → голое имя.
+
+    Их README обещает `имя_комнаты@адрес`, но H323Plus трактует строку набора сам,
+    и выбрать одну форму наугад означало бы «вызов не прошёл» при рабочей сети.
+    Каждая попытка видна в отчёте, поэтому провал — это замер, а не догадка.
+    """
+    args = _args(dial="", room="room101", self_check=False)
+    assert stand.dial_candidates(args, "127.0.0.1:1720") == [
+        "room101@127.0.0.1:1720", "127.0.0.1:1720", "room101"]
+
+
+def test_dial_explicit_overrides_the_whole_list():
+    assert stand.dial_candidates(_args(dial="8888@mcu.local"), "127.0.0.1:1720") == [
+        "8888@mcu.local"]
+
+
+def test_selfcheck_does_not_waste_time_on_room_forms():
+    """В самопроверке второй хост — не OpenMCU: комната ему не нужна."""
+    assert stand.dial_candidates(_args(room="room101", self_check=True),
+                                 "127.0.0.1:1722") == ["127.0.0.1:1722"]
+
+
 # --- матрица (план codecs) ----------------------------------------------------
 
 def test_matrix_covers_exactly_the_agreed_four_profiles():

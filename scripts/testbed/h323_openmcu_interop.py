@@ -277,6 +277,33 @@ MATRIX = (
 )
 
 
+def dial_candidates(args: argparse.Namespace, remote_addr: str) -> List[str]:
+    """Список строк набора, которые стенд пробует по порядку.
+
+    Адресация комнаты у OpenMCU — единственный вопрос, на который у нас нет ответа
+    ДО прогона (их README говорит: `имя_комнаты@адрес`, без имени берётся комната по
+    умолчанию из `[Parameters]/Default room`, а как именно H323Plus трактует строку
+    набора — отдельный вопрос). Угадывать одну форму — значит получить «вызов не
+    прошёл» там, где просто не та форма. Поэтому порядок от самой специфичной к
+    самой общей, и каждая попытка честно видна в отчёте. `--dial` перебивает список
+    целиком.
+    """
+    if args.dial:
+        return [args.dial]
+    if args.self_check:
+        # В самопроверке второй хост — не OpenMCU: ему имя комнаты не нужен, а
+        # лишние попытки только сождали бы таймауты.
+        return [remote_addr]
+    room = args.room.strip()
+    out: List[str] = []
+    if room:
+        out.append(f"{room}@{remote_addr}")
+    out.append(remote_addr)
+    if room:
+        out.append(room)
+    return out
+
+
 def finish(ck: Checker, dump: Path, args: argparse.Namespace) -> int:
     """Итог прогона: список артефактов и код возврата. Ресурсы чистит `finally`.
 
@@ -408,6 +435,12 @@ def parse_their_trace(text: str) -> Dict[str, Any]:
     согласуется), а `OpenLogicalChannel` — что фактически открылось. Сверять надо
     именно их, а не наш `call.media`: расхождение двух сторон и есть классический
     молчаливый mismatch.
+
+    Число reject'ов печатается специально рядом: связка «OLC в видео-сессии есть,
+    OLCReject нет, а кадров в нашем сокете нет» — это не «не согласовалось», а «не
+    понеслось по среде», и по договорённости с codecs именно она является триггером
+    отдельного разбора pcap по дескрипторам (OID-записи TCS). Стенд этот разбор не
+    делает: он его честно объявляет следующим шагом.
     """
     order: List[str] = []
     in_order = False
@@ -676,17 +709,32 @@ def main() -> int:
         if args.self_check:
             _FakeAdmin.marker.write_text("1", encoding="utf-8")
 
-        dial = args.dial or remote_addr
-        if not ck.check(client.make_call(dial, display="MCU-h323d"),
-                        f"вызов в {dial} (комната {args.room})",
-                        "строка набора = --dial, если задан; иначе адрес"):
-            print(tail_log(dump / "h323_L.log", 20), flush=True)
-            return 1
-        conn = col.wait("call.connected", timeout=args.wait)
-        token = str((conn or {}).get("token", "") or "")
-        if not ck.check(bool(token), "соединение установлено", f"token={token}"):
+        attempts = dial_candidates(args, remote_addr)
+        token = ""
+        dial_used = ""
+        # Короткий таймаут на попытку: без него «не та форма адреса» выглядит как
+        # зависший интероп, и прогон ждёшь втрое дольше.
+        per_try = min(args.wait, 12.0) if len(attempts) > 1 else args.wait
+        for attempt in attempts:
+            print(f"[i] попытка набора: {attempt!r} (ждём {per_try:.0f} с)", flush=True)
+            if not client.make_call(attempt, display="MCU-h323d"):
+                print("[i]   хост отказался принимать вызов (IPC-уровень)", flush=True)
+                continue
+            conn = col.wait("call.connected", timeout=per_try)
+            token = str((conn or {}).get("token", "") or "")
+            if token:
+                dial_used = attempt
+                break
+            print("[i]   за это время соединение не установилось", flush=True)
+            client.send_command("call.hangup", token="*")
+        if not ck.check(bool(token),
+                        f"соединение установлено (набор {dial_used!r} из "
+                        f"{len(attempts)} попыток)",
+                        f"пробовали: {attempts}"):
             print(tail_log(dump / "h323_L.log", 25), flush=True)
             return 1
+        print(f"[i] адресация комнаты, которая сработала: {dial_used!r} "
+              f"(запишите её в --dial для повторных прогонов)", flush=True)
 
         # --- 2. кодеки с обеих сторон ------------------------------------------
         def media() -> List[Dict[str, Any]]:
