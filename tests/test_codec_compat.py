@@ -4,7 +4,15 @@
 * дефолтный конфиг содержит обязательные для парка ВКС кодеки;
 * базовые имена кодеков в PJSIP-формате разбираются однозначно
   (H263 != H263-1998, G722 != G7221);
-* порядок = приоритет (PCMU/PCMA выше opus, H264 выше VP8).
+* порядок = приоритет (широкополосные opus/G.722 выше узкополосных,
+  H264 выше VP8).
+
+Приоритет аудио переписан 2026-11: раньше тесты защищали «G.711 выше
+opus», но MCU чаще ОТВЕЧАЕТ (авто-ответ на входящий), а отвечающий по
+RFC 3264 выбирает из СВОЕГО верхнего приоритета — узкополосным первым
+он глушил широкий звук даже с терминалами, которые просят opus/G.722.
+Тесты ниже отражают новую договорённость (config.py, комментарий к
+CODEC_PROFILES), а не прежнюю.
 """
 
 from __future__ import annotations
@@ -31,11 +39,22 @@ def test_video_codecs_cover_legacy_and_modern():
         assert any(c.startswith(must) for c in video), f"нет кодека {must}"
 
 
-def test_g711_has_priority_over_opus():
+def test_wideband_has_priority_over_g711():
+    """opus и G.722 обязаны идти раньше PCMU/PCMA (сознательная смена приоритета).
+
+    Старый тест требовал обратного («G.711 выше opus для совместимости»).
+    Мы осознанно меняем это требование: MCU авто-отвечает на входящий, а
+    отвечающий выбирает СВОЙ верхний приоритет из общего пересечения — с
+    G.711 первым он резал до 8 кГц и Polycom RealPresence, и софт-клиенты
+    с opus. G.711 остаются в списке сразу за широкополосными, поэтому
+    старый шлюз без opus/G.722 согласует PCMU/PCMA как раньше.
+    """
     audio = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["audio"]]
     idx_pcmu = next(i for i, c in enumerate(audio) if c.startswith("pcmu"))
     idx_opus = next(i for i, c in enumerate(audio) if c.startswith("opus"))
-    assert idx_pcmu < idx_opus, "G.711 должен идти раньше opus для совместимости"
+    idx_g722 = next(i for i, c in enumerate(audio) if c.startswith("g722/"))
+    assert idx_opus < idx_pcmu, "opus должен идти раньше G.711"
+    assert idx_g722 < idx_pcmu, "G.722 должен идти раньше G.711"
 
 
 def test_h264_has_priority_over_vp8():
@@ -101,12 +120,24 @@ def test_video_covers_polycom_legacy_plus():
     assert any(c.startswith("h261") for c in video), "нет H.261"
 
 
-def test_g719_and_g722_above_opus():
+def test_g719_and_g722_stay_as_opportunistic_entries():
+    """G.719/G.722.1C остаются в списке, но БОЛЬШЕ НЕ приоритетнее opus.
+
+    Прежний тест требовал их «раньше opus для Polycom». Реальная сборка
+    PJSIP 2.16 не содержит G7221*/G719 вовсе (PJMEDIA не собирает их по
+    умолчанию из-за патентов Polycom) — позиция в списке для них ничего
+    не значила, а порядок «выше opus» обещал несуществующий приоритет.
+    Теперь это «opportunistic» записи для кастомных сборок (политика —
+    docs/CODEC_LICENSING.md): пусть будут, но реально собранные
+    широкополосные первыми.
+    """
     audio = [c.lower() for c in DEFAULT_CONFIG["sip"]["codecs"]["audio"]]
+    for must in ("g719", "g7221/48000"):
+        assert any(c.startswith(must) for c in audio), f"нет записи {must}"
     idx_opus = next(i for i, c in enumerate(audio) if c.startswith("opus"))
     for must in ("g719", "g7221/48000"):
         idx = next(i for i, c in enumerate(audio) if c.startswith(must))
-        assert idx < idx_opus, f"{must} должен идти раньше opus для Polycom"
+        assert idx > idx_opus, f"{must} — opportunistic-запись, ниже opus"
 
 
 def test_h264_is_first_video_codec():

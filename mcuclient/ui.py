@@ -826,6 +826,7 @@ if QT_AVAILABLE:
             for _value, _text in (
                 ("max_compat", "максимум совместимости (рекомендуется)"),
                 ("wideband", "только широкий звук (G.722/opus + H.264)"),
+                ("royalty_free", "без роялти: opus/G.722/G.711 + VP8"),
                 ("g711_only", "аварийный: только G.711 + H.264"),
             ):
                 self.codec_combo.addItem(_text, _value)

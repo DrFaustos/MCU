@@ -33,6 +33,9 @@ STAND_SH = ROOT / "scripts" / "testbed" / "lib" / "stand.sh"
 STANDALONE_RUNNERS = [
     "scripts.testbed.verify_registration",
     "scripts.testbed.test_mcu_sip_call",
+    # Зонд кодеков — тоже стендовый скрипт: без pjsua2 он обязан вернуть 2,
+    # иначе CI прочитает пустой JSON как «кодеков нет», а не как «не запускался».
+    "scripts.codec_probe",
 ]
 
 
