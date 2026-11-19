@@ -23,6 +23,8 @@ jobs:
   # h323-кодом внутри, и имя артефакта только соврало бы красивее.
   preflight:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       variant: ${{ steps.v.outputs.variant }}
     steps:
@@ -54,6 +56,21 @@ jobs:
           fi
           echo "variant=$SUFFIX" >> "$GITHUB_OUTPUT"
           echo "OK: тег/запуск = $SUFFIX, исходники = $SRC, версия = $VER"
+
+      - name: Prune old releases of this line (keep 3 latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VAR="${{ steps.v.outputs.variant }}"
+          # линия = релизы с суффиксом варианта + (только для sip) легаси-теги
+          # без суффикса: до введения вариантов это была sip-нумерация.
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r --arg var "$VAR" 'if type == "array" then .[] | select((.tag_name | endswith("-" + $var)) or ($var == "sip" and (.tag_name | test("^v[0-9.]+$")))) | "\(.created_at) \(.id) \(.tag_name)" else empty end' \
+            | sort -r | tail -n +4 | while read -r _ ID TAG; do
+              echo "prune: release $ID ($TAG)"
+              gh release delete "$ID" --yes --cleanup-tag=false || true; done
+
 
   build-windows:
     needs: preflight
@@ -151,6 +168,7 @@ jobs:
           path: dist/MCU-${{ needs.preflight.outputs.variant }}-debug
 
   release:
+    if: ${{ github.event_name == 'push' }}
     needs: [preflight, build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
@@ -194,17 +212,3 @@ jobs:
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prune old releases of this line (keep 3 latest (после Create — иначе было бы 4))
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VAR="${{ needs.preflight.outputs.variant }}"
-          # линия = релизы с суффиксом варианта + (только для sip) легаси-теги
-          # без суффикса: до введения вариантов это была sip-нумерация.
-          curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            | jq -r --arg var "$VAR" 'if type == "array" then .[] | select((.tag_name | endswith("-" + $var)) or ($var == "sip" and (.tag_name | test("^v[0-9.]+$")))) | "\(.created_at) \(.id) \(.tag_name)" else empty end' \
-            | sort -r | tail -n +4 | while read -r _ ID TAG; do
-              echo "prune: release $ID ($TAG)"
-              gh release delete "$ID" --yes --cleanup-tag=false || true; done
