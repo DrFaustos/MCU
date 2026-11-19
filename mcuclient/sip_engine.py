@@ -39,6 +39,7 @@ from .media_control_service import MediaControlService
 from .call_service import CallService
 from .video_source_service import VideoSourceService
 from .video_preview_service import VideoPreviewService
+from .video_mixer import VideoMixerService
 from .layout_service import LayoutService
 
 # Слой PJSIP изолирован в mcuclient/pjsip_adapter.py.
@@ -432,6 +433,20 @@ class SipEngine:
             set_video_device=self.set_video_device,
             get_video_xid=self._registry.get_video_xid,
         )
+        # Видео-микшер (mosaic, ADR-0003): серверная сетка видео вместо чистого
+        # роутинга. Молча неактивен, пока не включён в конфиге, нет ffmpeg или
+        # pjsua2 собран без видео. Шину веба для раздачи кадров подключаем
+        # позже (set_mosaic_bus её просто запоминает).
+        self._mosaic_bus: Any = None
+        self._video_mixer = VideoMixerService(
+            self.events,
+            pj_module=_pj,
+            endpoint_ready=lambda: endpoint_ready(self._endpoint),
+            video_supported=lambda: self._video_supported,
+            config=dict(config.features.get("video_mixer", {}) or {}),
+            bind_capture=self._bind_capture_to_calls,
+            bus_getter=lambda: self._mosaic_bus,
+        )
         # Аннотация обычная, а не `# type:`-комментарием: линтер не читает
         # комментарии и помечал импорт Callable неиспользуемым.
         self._answer_dispatch: Optional[Callable[[int], None]] = None
@@ -572,6 +587,10 @@ class SipEngine:
             self._select_virtual_device()
         self._start_device_watcher()
         self._start_rtcp_poller()
+        # Мозаика включается после подъёма эндпоинта: available() проверяет
+        # готовность PJSIP и наличие ffmpeg; при выключенном флаге — no-op.
+        if self.config.features.get("video_mixer", {}).get("enabled", False):
+            self._video_mixer.set_enabled(True)
 
     def stop(self) -> None:
         if not self._running:
@@ -580,6 +599,10 @@ class SipEngine:
             self._recording.stop_conference_recording()
             self._recording.stop_audio_recording_silent()
             self._vpreview.stop()
+            # Микшер гасим ДО libDestroy: его рекордеры/плеер живут на
+            # видеомосту эндпоинта, после разрушения либа трогать нельзя.
+            self._video_mixer.set_enabled(False)
+            self._video_mixer.cleanup_files()
             self._vsource.stop_screen_share_silent()
             self._vsource.stop_virtual_camera_silent()
             self._detach_own_media()
@@ -631,6 +654,18 @@ class SipEngine:
             self._endpoint.libHandleEvents(int(max(0.0, timeout) * 1000))
         except Exception as exc:  # noqa: BLE001
             log.debug("libHandleEvents: %s", exc)
+        # Тик видео-микшера: ВСЕ его нативные вызовы (рекордеры, плеер,
+        # transmit) делаются отсюда — из потока-владельца PJSIP. У сервиса
+        # нет своего потока именно поэтому: при threadCnt=0 второй поток с
+        # нативными вызовами даёт AB-BA дедлок с libHandleEvents (e2e 11/2026).
+        # getattr: процесс_events() вызывают и на движке, собранном в обход
+        # __init__ (тест «не роняй накачку»).
+        mixer = getattr(self, "_video_mixer", None)
+        if mixer is not None and mixer.enabled:
+            try:
+                mixer.reconcile()
+            except Exception:  # noqa: BLE001 — микшер не роняет накачку
+                log.debug("reconcile микшера не прошёл", exc_info=True)
 
     def set_answer_dispatch(self, dispatch) -> None:
         self._answer_dispatch = dispatch
@@ -1307,6 +1342,63 @@ class SipEngine:
                 self._bind_capture_to_calls(int(dev))
             except Exception:  # noqa: BLE001
                 log.debug("bind capture on media state failed", exc_info=True)
+        # Видео-микшер: подводим декодирующий порт к композитору; если мозаика
+        # уже собрана — она важнее локальной камеры на исходящем видео
+        # (ADR-0003: v1 — единая общая сетка всем участникам).
+        self._mixer_attach(call, ci)
+        if self._video_mixer.player_dev_id >= 0:
+            try:
+                self._bind_capture_to_calls(self._video_mixer.player_dev_id)
+            except Exception:  # noqa: BLE001
+                log.debug("rebind на мозаику не прошёл", exc_info=True)
+
+    def _mixer_attach(self, call: Any, ci: Any) -> None:
+        """Подключить видео вызова к видео-микшеру (если он включён).
+
+        Источник — getDecodingVideoMedia(idx): декодированные кадры вызова.
+        ВАЖНО: в pjsua2 2.16 метод ТРЕБУЕТ индекс видеопотока (проверено
+        живым e2e — без аргумента это TypeError, который легко проглотить).
+        Без видеопотока нативный вызов бросает — проходим мимо молча.
+        """
+        mixer = self._video_mixer
+        if mixer is None or not mixer.enabled:
+            log.debug("микшер выключен — видео вызова в него не пойдёт")
+            return
+        idx = 0
+        try:
+            got = call.vidGetStreamIdx()
+            if got is not None and int(got) >= 0:
+                idx = int(got)
+        except Exception:  # noqa: BLE001 — нет активного видео — остаёмся на 0
+            pass
+        try:
+            source = call.getDecodingVideoMedia(idx)
+        except Exception as exc:  # noqa: BLE001 — видео в этом вызове нет
+            log.debug("getDecodingVideoMedia(%d) источник не дал: %s",
+                      idx, exc.__class__.__name__)
+            return
+        part = None
+        try:
+            part = self._registry.find_by_call(call, getattr(ci, "id", None))
+        except Exception:  # noqa: BLE001
+            pass
+        pid = str(part.id) if part is not None else str(getattr(ci, "id", "?"))
+        mixer.attach(pid, source, getattr(part, "remote_uri", "") or pid)
+        log.debug("участник %s подключён к мозаике (medIdx=%d)", pid, idx)
+
+    def set_mosaic_bus(self, bus: Any) -> None:
+        """Веб-панель подключает свою MediaBus: кадры мозаики пойдут туда."""
+        self._mosaic_bus = bus
+
+    @property
+    def video_mixer_active(self) -> bool:
+        """Собран ли сейчас композит (для статусов UI/API)."""
+        return bool(self._video_mixer.running)
+
+    def set_video_mixer_enabled(self, enabled: bool) -> bool:
+        """Включить/выключить мозаику из UI/API (ADR-0003)."""
+        self._video_mixer.set_enabled(bool(enabled))
+        return self._video_mixer.enabled
 
     def _log_negotiated_codecs(self, ci, call=None) -> None:
         """Залогировать фактические кодеки и, если не согласовались — почему.
@@ -2191,6 +2283,8 @@ class SipEngine:
     def _drop_participant(self, participant_id: int) -> None:
         """Удаляет участника и связанные с ним видео-окна (без утечек)."""
         self._registry.drop(participant_id)
+        # Микшер узнаёт о уходе участника: композит пересоберётся без него.
+        self._video_mixer.detach(str(participant_id))
         # Паркуем и снимаем владение: иначе деструктор выстрелит после
         # libDestroy (или на очистке модулей) -> assertion abort.
         _park_call(self._live_calls.pop(participant_id, None))

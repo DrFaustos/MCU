@@ -153,6 +153,48 @@ def test_mediasoup_node_must_be_a_string():
         validate_config(cfg)
 
 
+def test_video_mixer_defaults_present():
+    """Мозаика объявлена в DEFAULT_CONFIG и выключена до обкатки на железе
+    (docs/ADR-0003-video-mixer.md)."""
+    mixer = DEFAULT_CONFIG["features"]["video_mixer"]
+    assert mixer["enabled"] is False
+    assert mixer["fps"] == 15
+    assert mixer["tile_width"] == 320
+    assert mixer["tile_height"] == 240
+    assert mixer["max_slots"] == 9
+    assert mixer["min_participants"] == 2
+    validate_config(_cfg())  # дефолты проходят валидатор целиком
+
+
+def test_video_mixer_valid_override_passes():
+    cfg = _cfg()
+    cfg["features"]["video_mixer"].update(
+        {"enabled": True, "fps": 25, "tile_width": 480,
+         "tile_height": 270, "max_slots": 4, "min_participants": 3})
+    validate_config(cfg)
+
+
+def test_video_mixer_must_be_an_object():
+    cfg = _cfg()
+    cfg["features"]["video_mixer"] = "on"
+    with _raises(ConfigError, "video_mixer"):
+        validate_config(cfg)
+
+
+def test_video_mixer_fps_must_be_positive():
+    cfg = _cfg()
+    cfg["features"]["video_mixer"]["fps"] = 0
+    with _raises(ConfigError, "fps"):
+        validate_config(cfg)
+
+
+def test_video_mixer_max_slots_out_of_range():
+    cfg = _cfg()
+    cfg["features"]["video_mixer"]["max_slots"] = 99
+    with _raises(ConfigError, "max_slots"):
+        validate_config(cfg)
+
+
 def test_parse_listen_bad_port():
     with _raises(ValueError):
         parse_listen("0.0.0.0:notaport")

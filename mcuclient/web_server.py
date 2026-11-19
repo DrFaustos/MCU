@@ -334,6 +334,11 @@ class WebSession:
                                     ice_servers=self._ice_servers,
                                     audio_mix=self.audio_mix)
         self.audio_mix.start()
+        # Видео-микшер движка (mosaic) льёт композит в эту же шину — зрители
+        # видят сетку как обычного участника с pid "mosaic" (ADR-0003).
+        set_bus = getattr(self._engine, "set_mosaic_bus", None)
+        if callable(set_bus):
+            set_bus(self.conference.bus)
         # Запись web-конференции: кадры FrameHub + смешанное аудио.
         self._web_recorder = WebRecorder(output_dir=self._recording_dir())
         self._rec_thread: Optional[threading.Thread] = None

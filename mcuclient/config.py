@@ -385,6 +385,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                 "max_rooms": 0,
             },
         },
+        # Видео-микшер (mosaic): внешний ffmpeg-композитор + штатные
+        # pjsua2-порты (VideoRecorder -> fifo -> композитор -> VideoPlayer).
+        # См. docs/ADR-0003-video-mixer.md и mcuclient/video_mixer.py.
+        "video_mixer": {
+            "enabled": False,        # по умолчанию выключен до обкатки на железе
+            "fps": 15,               # частота композита
+            "tile_width": 320,       # плитка участника в мозаике
+            "tile_height": 240,
+            "max_slots": 9,          # максимум плиток (3x3), лишние участники не показываются
+            "min_participants": 2,   # при меньшем числе композитор не запускается
+        },
     },
 }
 
@@ -700,6 +711,25 @@ def validate_config(raw: Dict[str, Any]) -> Dict[str, Any]:
                        ms.get("timeout", 10.0), 0.5, 600.0)
             _check_int("features.web.mediasoup.max_rooms",
                        ms.get("max_rooms", 0), 0, 100000)
+
+    # Видео-микшер (mosaic): композитор читает эти параметры при запуске,
+    # значит битое значение должно ловиться при загрузке конфига, а не
+    # молча уходить в ffmpeg на старте процесса. См. ADR-0003.
+    mixer = features.get("video_mixer")
+    if mixer is not None:
+        if not isinstance(mixer, dict):
+            raise ConfigError("features.video_mixer должен быть объектом")
+        _check_bool("features.video_mixer.enabled", mixer.get("enabled", False))
+        _check_int("features.video_mixer.fps",
+                   mixer.get("fps", 15), VIDEO_FPS_MIN, VIDEO_FPS_MAX)
+        _check_int("features.video_mixer.tile_width",
+                   mixer.get("tile_width", 320), VIDEO_DIM_MIN, VIDEO_DIM_MAX)
+        _check_int("features.video_mixer.tile_height",
+                   mixer.get("tile_height", 240), VIDEO_DIM_MIN, VIDEO_DIM_MAX)
+        _check_int("features.video_mixer.max_slots",
+                   mixer.get("max_slots", 9), 1, 16)
+        _check_int("features.video_mixer.min_participants",
+                   mixer.get("min_participants", 2), 1, 16)
 
     return raw
 
