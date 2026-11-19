@@ -152,6 +152,68 @@ def dump_snap(dirn: Path, tag: str, snap: Dict[str, Any]) -> None:
         (dirn / name).write_bytes(body)
 
 
+#: Их веб-морда умела отвечать 400 на ЛЮБЫЕ запросы: PString::Mid в бандлине
+#: PTLib 2.0.1 при GCC11 сворачивается в пустоту (signed overflow), и PHTTPServer
+#: получает пустые аргументы. Лечится -fwrapv. Пока это не устранено, «400 на все
+#: кандидаты» — артефакт сборки, а не ответ микшера, и в отчёте обязано называться
+#: так, иначе разбор начнётся с ложного «у них админка так работает».
+THEIR_HTTP_400_BUILD_ARTIFACT = (
+    "4xx на все кандидаты — известный артефакт сборки: PString::Mid в их PTLib "
+    "2.0.1 при GCC11 (signed overflow → пустые аргументы у PHTTPServer), лечится "
+    "-fwrapv; это НЕ «OpenMCU так отвечает»")
+
+
+def http_verdict(ok: List[Dict[str, Any]], fail: List[str]) -> str:
+    """Как читать ответы их админки: жива, мертва, или сломана сборкой."""
+    codes = [int(item.get("code", 0)) for item in ok]
+    if not codes:
+        return ("ни один кандидат не ответил ("
+                + "; ".join(fail[:3]) + ")")
+    if all(400 <= code < 500 for code in codes):
+        return THEIR_HTTP_400_BUILD_ARTIFACT
+    bad = [c for c in codes if c >= 400]
+    if bad:
+        return (f"отвечают {len(codes)} шт., из них коды 4xx: "
+                f"{sorted(set(bad))} — часть путей мертва, сверяй список кандидатов")
+    return f"живая: отвечают 2xx/3xx — {len(codes)} шт."
+
+
+#: В образе OpenMCU нет плагинов H.263-1998/H.264/VP8. Значит пустой обратный
+#: канал при отсутствующем H.264 в их диффе — это состав сборки, а не отказ
+#: микшера показывать картинку.
+THEIR_VIDEO_PLUGINS_ABSENT = "H.263-1998, H.264, VP8"
+
+
+def build_composition_note(frames: int, diff_tokens: List[str]) -> str:
+    """Пустой обратный канал: отказ микшера или в образе просто нечего показывать."""
+    if frames:
+        return ""
+    upper = {t.upper() for t in diff_tokens}
+    if any(t.startswith("H.263") or t.startswith("H.264") or "VP8" in t
+           for t in upper):
+        return ""
+    return (f"обратный канал пуст, и в их диффе нет ни одного кодека из "
+            f"{THEIR_VIDEO_PLUGINS_ABSENT}: в образе этих плагинов НЕТ — это состав "
+            "сборки, а не отказ микшера показывать картинку")
+
+
+def status_measurable(snap: Dict[str, Any]) -> Tuple[bool, str]:
+    """Можно ли вообще измерять их статус: живая страница или мёртвая морда.
+
+    Дифф «до/после» по несуществующей странице краснеет так же, как по отказу
+    микшера показать картинку, — и это та же ложная краснота, что мы выправляем в
+    других местах: при 400 на все кандидаты (см. THEIR_HTTP_400_BUILD_ARTIFACT) или
+    при «ни один URL не ответил» проверка не красная, а НЕИЗМЕРЁННАЯ, с причиной.
+    """
+    codes = [int(item.get("code", 0)) for item in snap.get("ok", [])]
+    if not codes:
+        return False, ("ни одна их страница не ответила: "
+                       + "; ".join(snap.get("fail", [])[:2] or ["список URL пуст"]))
+    if all(400 <= code < 500 for code in codes):
+        return False, THEIR_HTTP_400_BUILD_ARTIFACT
+    return True, ""
+
+
 def video_diff_verdict(want_video: bool, new_tokens: List[str]
                        ) -> Tuple[bool, List[str]]:
     """Значит ли дифф их статуса что-то про НАС: (проверять, видеотокены).
@@ -322,7 +384,8 @@ def dial_candidates(args: argparse.Namespace, remote_addr: str) -> List[str]:
     return out
 
 
-def finish(ck: Checker, dump: Path, args: argparse.Namespace) -> int:
+def finish(ck: Checker, dump: Path, args: argparse.Namespace,
+           skipped: Optional[List[str]] = None) -> int:
     """Итог прогона: список артефактов и код возврата. Ресурсы чистит `finally`.
 
     Вынесено, потому что выходов из прогона теперь два: обычный (после обратного
@@ -330,6 +393,8 @@ def finish(ck: Checker, dump: Path, args: argparse.Namespace) -> int:
     Оба обязаны напечатать одно и то же, иначе «профиль без видео» отчитается
     меньше, чем обычный, и это заметит только читающий отчёт.
     """
+    for item in skipped or []:
+        print(f"[!] не измерялось: {item}", flush=True)
     print(f"[i] артефакты: {dump} (status_before_*.html, status_after_*.html, "
           "their_stdout_*.txt, their_trace_*.txt, from_openmcu_*.png, h323_*.log)",
           flush=True)
@@ -744,6 +809,9 @@ def main() -> int:
             os.environ.get("H323_CODEC_ARGS", "").strip() + " " + args.host_args
         ).strip()
     label = args.label or ("self-check" if args.self_check else "прогон")
+    # Что стенд НЕ смог измерить — отдельный список: «не проверялось» и «проверено,
+    # но красное» должны различаться в конце прогона.
+    skipped: List[str] = []
     if args.host_args:
         print(f"[i] профиль {label}: хосту '{args.host_args}' "
               f"(ждём видео: {args.expect_video})", flush=True)
@@ -844,10 +912,11 @@ def main() -> int:
         _theirs_before, log_pos = slice_from(their_log_path, 0)
         _theirs_trace_before, trace_pos = slice_from(their_trace_path, 0)
 
+        new_tokens: List[str] = []     # дифф их статуса; нужен и в фазе приёма
         before = snapshot(args.status_url) if args.status_url else {}
         if before:
             dump_snap(dump, "before", before)
-            print(f"[i] их статус ДО вызова: страниц {len(before['ok'])}, "
+            print(f"[i] их статус ДО вызова: {http_verdict(before['ok'], before['fail'])}; "
                   f"токенов {sorted(before['tokens'])[:6] or '—'}, "
                   f"байт {before['bytes']}", flush=True)
             for f in before["fail"]:
@@ -992,7 +1061,14 @@ def main() -> int:
             diff = describe_diff(before, after)
             print(f"[i] их статус ПОСЛЕ вызова: {diff}", flush=True)
             new_tokens = sorted(after["tokens"] - before["tokens"])
-            check_diff, video_tokens = video_diff_verdict(want_video, new_tokens)
+            measurable, why = status_measurable(before)
+            if not measurable:
+                print("[i] " + why + " — дифф их статуса НЕ измерялся (и не "
+                      "красный: мерить было нечем)", flush=True)
+                skipped.append("дифф их статуса: " + why)
+            measurable, _why = status_measurable(before)
+            check_diff, video_tokens = video_diff_verdict(want_video and measurable,
+                                                          new_tokens)
             if check_diff:
                 ck.check(bool(video_tokens),
                          "на их стороне после вызова появился видеокодек "
@@ -1022,7 +1098,7 @@ def main() -> int:
                      "без видео: сокет кадров не создан (честный признак)",
                      f"{sock_video}")
             print("[i] обратный канал в этом профиле не проверяется", flush=True)
-            return finish(ck, dump, args)
+            return finish(ck, dump, args, skipped)
         if args.self_check:
             # Паттерн на «их» стороне включаем ДО захвата: у нашего хоста кадр
             # появляется только когда encoder-канал реально что-то кодирует.
@@ -1040,10 +1116,15 @@ def main() -> int:
             while time.monotonic() < deadline and len(grab.frames) < 1:
                 time.sleep(0.5)
             full = len(grab.frames)
+            # Пустой приём сам по себе читается как «микшер отказал». Если в образе
+            # нет ни одного плагина, которым он мог бы ответить, это другой разговор,
+            # и он обязан быть в той же строке, что и проверка.
+            comp = build_composition_note(full, new_tokens)
             ck.check(full > 0,
                      "их видео дошло до нас (сокет кадров)",
                      f"полных={full} неполных={grab.incomplete} "
-                     f"байт={grab.bytes_in} err={grab.error or '—'}")
+                     f"байт={grab.bytes_in} err={grab.error or '—'}"
+                     + ("; " + comp if comp else ""))
             for i, frame in enumerate(grab.frames[:3]):
                 rgb = yuv420p_to_rgb(frame.data, frame.width, frame.height)
                 if rgb is None:
@@ -1095,7 +1176,7 @@ def main() -> int:
 
         client.send_command("video.pattern", token=token, on="0")
         client.hangup(token)
-        return finish(ck, dump, args)
+        return finish(ck, dump, args, skipped)
     finally:
         for grab in grabs.values():
             grab.stop()

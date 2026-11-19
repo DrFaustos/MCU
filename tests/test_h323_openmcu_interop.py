@@ -535,6 +535,66 @@ def test_levers_note_names_the_right_suspect_for_missing_audio():
     assert "существующ" in stand.THEIR_LEVERS_NOTE, "аудио — правкой существующего ключа, не созданием"
 
 
+def test_http_400_on_every_candidate_is_a_build_artifact():
+    """400 на все пути — их PTLib 2.0.1 при GCC11, а не «OpenMCU так отвечает».
+
+    Сломанный PString::Mid (signed overflow → пустые аргументы у PHTTPServer) лечится
+    -fwrapv. Если этого не писать в отчёт, разбор начнётся с ложного вывода про
+    поведение микшера, и никто не вспомнит про флаг компилятора.
+    """
+    verdict = stand.http_verdict(
+        [{"code": 400}, {"code": 400}], [])
+    assert "артефакт сборки" in verdict and "fwrapv" in verdict, verdict
+    assert "PString::Mid" in verdict
+
+
+def test_http_verdict_separates_alive_from_partly_broken():
+    assert "живая" in stand.http_verdict([{"code": 200}, {"code": 302}], [])
+    assert "4xx" in stand.http_verdict([{"code": 200}, {"code": 404}], [])
+    dead = stand.http_verdict([], ["http://x/: refused"])
+    assert "не ответил" in dead and "refused" in dead
+
+
+def test_empty_incoming_channel_is_not_blamed_on_the_mixer():
+    """Плагинов H.263-1998/H.264/VP8 в образе нет — пустой приём это состав сборки.
+
+    Без этой оговорки красная проверка «их видео дошло» читается как «микшер
+    отказался показывать картинку», и правку пойдут искать в настройках комнаты.
+    """
+    note = stand.build_composition_note(0, ["G.722", "H.261-CIF"])
+    assert "соста" in note and "НЕ" in note, note
+    assert "отказ микшера" in note
+    # Если H.264 в диффе есть — оговорка не нужна: показать им есть чем.
+    assert stand.build_composition_note(0, ["H.264-CIF"]) == ""
+    assert stand.build_composition_note(5, []) == ""
+
+
+def test_unmeasurable_status_page_is_not_a_red_check():
+    """Мёртвая их админка = «не измерялось», а не «проверка не прошла».
+
+    Дифф по несуществующей странице краснеет ровно так же, как отказ микшера
+    показывать картинку. С их PTLib 2.0.1 при GCC11 (400 на всё) это красное
+    стало бы нормой каждого прогона и обесценило бы отчёт.
+    """
+    ok, why = stand.status_measurable({"ok": [{"code": 400}], "fail": []})
+    assert ok is False and "артефакт сборки" in why
+    ok, why = stand.status_measurable({"ok": [], "fail": ["http://x/: refused"]})
+    assert ok is False and "refused" in why
+    ok, why = stand.status_measurable({"ok": [{"code": 200}], "fail": []})
+    assert ok is True and why == ""
+
+
+def test_unmeasurable_checks_are_listed_separately_from_red_ones():
+    """В конце прогона «не измерялось» печатается отдельной строкой.
+
+    Иначе «ошибок проверки: 0» и «проверка не проводилась» выглядят одинаково
+    зелёными, а это два разных результата.
+    """
+    src = (ROOT / "scripts" / "testbed" / "h323_openmcu_interop.py").read_text(
+        encoding="utf-8")
+    assert "не измерялось: " in src
+
+
 # --- tshark как арбитр --------------------------------------------------------
 
 def test_tshark_is_honest_when_missing(monkeypatch, tmp_path):
