@@ -45,7 +45,7 @@ export const config = {
   listenIp: envStr('MCU_MEDIASOUP_LISTEN_IP', '0.0.0.0'),
   announcedIp: envStr('MCU_MEDIASOUP_ANNOUNCED_IP', ''),
 
-  // Включать ли лог в stderr (Python перенаправляет в mcu-client.log).
+  // Включать ли лог в stderr (Python перенаправляет в mcu.log).
   logLevel: envStr('MEDIASOUP_LOG_LEVEL', 'warn'),
   logTags: envList('MEDIASOUP_LOG_TAGS', []),
 

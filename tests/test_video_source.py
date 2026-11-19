@@ -4,13 +4,33 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _skip import skip  # noqa: E402
 import mcuclient.video_source as vs  # noqa: E402
 from mcuclient.video_source import (  # noqa: E402
     SourceInfo,
     VideoSourceSwitcher,
     default_sources,
 )
+
+
+def _require_cam() -> None:
+    """Коммутатор собран: без numpy/pyvirtualcam кадры строить нечем.
+
+    Прежняя форма `if not vs._HAVE_CAM: return` засчитывалась обеими точками
+    проверки как успех, поэтому на машине без pyvirtualcam (и в CI, где его не
+    ставят вовсе) четыре кейса — форма кадра, бегущая полоса, обе ветки `_fit` —
+    не исполнялись никогда, а прогон был зелёным. Причина в прежних комментариях
+    («numpy недоступен») к тому же неверна: `_HAVE_CAM` — это numpy И pyvirtualcam
+    (mcuclient/video_source.py: `try: import numpy, pyvirtualcam`), т.е. при живом
+    numpy тест всё равно пропускается, и писать только про numpy — значит врать
+    читателю о причине.
+    """
+    if not vs._HAVE_CAM:
+        skip("нет numpy/pyvirtualcam — _make_colorbar() и _fit() нечего строить")
 
 
 def test_default_sources_has_off_colorbar_screen():
@@ -40,8 +60,7 @@ def test_stop_without_start_is_safe():
 
 
 def test_colorbar_frame_shape_and_rgb():
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
     frame = sw._make_colorbar()
     assert frame.shape == (48, 64, 3)
@@ -105,8 +124,7 @@ def test_stop_is_idempotent():
 
 def test_colorbar_has_moving_bar():
     """Бегущая полоса должна менять положение при росте frames_sent."""
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     sw = VideoSourceSwitcher(device="/dev/null", width=200, height=40, fps=5)
     sw._frames_sent = 0
     f0 = sw._make_colorbar()
@@ -118,8 +136,7 @@ def test_colorbar_has_moving_bar():
 def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
     """Если cv2 нет и размеры не совпадают — _fit не должен падать."""
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     import numpy as np
 
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
@@ -132,8 +149,7 @@ def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
 
 
 def test_fit_passthrough_when_size_matches():
-    if not vs._HAVE_CAM:
-        return
+    _require_cam()
     import numpy as np
 
     sw = VideoSourceSwitcher(device="/dev/null", width=16, height=8, fps=5)

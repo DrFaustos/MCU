@@ -1,0 +1,131 @@
+# OpenMCU-ru в контейнере (интероп-эталон ADR-0002)
+
+Зачем: ADR-0002 фиксирует OpenMCU-ru как поведенческий эталон H.323-MCU.
+Для проверки «картинка уходит в OpenMCU и возвращается оттуда» нужен живой
+OpenMCU, собранный НЕ нашим стеком: у него в дереве собственные копии PTLib и
+H323Plus, поэтому он ходит в сеть и согласовывает кодеки независимо от того,
+что лежит в `/usr/local` образа `mcu-dev-h323`. Два стека в одном контейнере —
+гарантия, что интероп не «самоподтверждается».
+
+## Какое дерево собрано (важно для предсказаний кодеков)
+
+`willamowius/openmcu` (зеркало openmcu.ru), **тег v3.48.0**, пин
+`2b9350878bd829674e6da877807e0f8b51d42089` (sha одинакова с тегом в
+muggot/openmcu). Ветка собрана НЕ master сознательно: на master отбор
+исходящего видео идёт по имени строки (`SelectRemoteCapability` →
+подстрочный `FindCapability`), и их ключ `H.261{sw}` не является подстрокой
+нашего `H.261-CIF{sw}` — видеоинтероп краснел бы не по нашей вине. На v3.48.0
+отбор штатный, по дескрипторам.
+
+## Сборка образа
+
+```sh
+podman build -f docker/openmcu-ru.Dockerfile \
+    -t localhost/openmcu-ru:v3.48.0 "$(mktemp -d)"
+```
+
+Контекст не нужен (источник клонируется внутри сборки, с пинами и громкой
+проверкой sha). Долго (бандлины ptlib/h323plus) — это нормально.
+
+## Запуск сервисом (не --rm!)
+
+```sh
+podman network create mcu-lab   # один раз; именованная сеть с DNS
+podman run -d --name openmcu-ru \
+    --network mcu-lab \
+    --cap-add NET_RAW \
+    --restart=on-failure \
+    -p 1720:1720/tcp -p 1720:1720/udp \
+    -p 1420:1420/tcp \
+    -v "$PWD/docker/openmcu-ru/openmcu.ini:/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini:z" \
+    localhost/openmcu-ru:v3.48.0
+```
+
+`--network mcu-lab` — первичной сетью: со стенда MCU вызывают по DNS-имени
+`openmcu-ru:1720` без IP (`MCU_H323_NET=mcu-lab` в
+`scripts/h323_in_container.sh`, проверено живьём). Hot-plug вторым
+интерфейсом (`network connect`) под rootless не работает: второй pasta
+отказывается («invalid network mode», живой замер), поэтому сеть первичная —
+проброс портов при этом не меняется.
+`--cap-add NET_RAW` — под tshark-захват на плече стенда. SIP (5060) на первом
+этапе не публикуем; широкая RTP-сетка не публикуется осознанно — для H.323
+inter-op с нашим хостом используем тот же netns/проброс, что и остальной
+стенд (см. `docs/DEV_CONTAINERS.md` §8).
+
+Срез за прогон (после вызова со стенда; `tmp/` в `.gitignore`):
+
+```sh
+mkdir -p tmp/openmcu
+podman cp openmcu-ru:/opt/openmcu-ru/share/openmcu-ru/log/trace.txt \
+    tmp/openmcu/trace_<профиль>.txt
+podman logs --since <старт-прогона> openmcu-ru > tmp/openmcu/stdout_<профиль>.txt
+```
+
+## Куда ложится конфиг и трейс (фактические пути, проверено запуском)
+
+* Конфиг — INI (не XML): `/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini`
+  (`SYS_CONFIG_DIR` зашит в бинарь, config.h: `"/opt/openmcu-ru/share/openmcu-ru/config"`).
+  Стартового файла на теге v3.48.0 нет — при первом запуске OpenMCU сам заполнит
+  `[RECEIVE_*]`/`[TRANSMIT_*]` всеми своими возможностями (102 ключа =True).
+  После первого запуска сохраните получившийся файл как артефакт (для воспроизводимости
+  монтируйте поверх: `-v ./openmcu.ini:/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini:z`).
+* Трейс — файл, не stdout: `/opt/openmcu-ru/share/openmcu-ru/log/trace.txt`
+  (`SERVER_LOGS`), уровень берётся из `[Parameters]/Trace level` (для разбора
+  кодеков ставьте 2: там «Codecs (in preference order)» и «OpenLogicalChannel»;
+  в PTLib-обычае `-v` — НЕ уровень трейса, флагом не выставляется, только ini).
+* Правки в ini — только заменой существующей строки: в PTLib 2.0.x повторный ключ
+  в секции склеивается со старым значением через перевод строки (config.cxx), а не
+  перезаписывает. Дубли ключей после правки проверяются `grep -c '^Ключ' секция`.
+* Плагины-кодеки: каталог `/opt/openmcu-ru/lib/ptlib/codecs` (PWLIBPLUGINDIR),
+  настраивается через MCUDIR-раскладку install.
+* stdout печатает их собственную таблицу возможностей и списки
+  `[RECEIVE_SOUND]= …`/`[TRANSMIT_SOUND]= …`/`[RECEIVE_VIDEO]= …` — но это их
+  конфиг-желание (автоген дописывает имена и без .so: G.7231, VP8/H.263/H.264
+  в списке есть, плагинов нет). Ini умеет только сужать: нет .so — нет
+  возможности. «Плагин лёг» проверяется списком .so, живой TCS — трейсом.
+  Снимайте `podman logs openmcu-ru > stdout.txt`, не только в терминал.
+
+## Адресация комнаты и статус-страницы (проверено curl на собранном образе)
+
+* Комната: вызов на `имя_комнаты@адрес_сервера` (E.164/alias); без имени — комната по
+  умолчанию (`room101`, ключ `[Parameters]/Default room` в том же ini).
+* Порт 1420: `/` — оглавление; `/Status` — страницы конференций/участников;
+  `/Select`, `/Invite`, `/Parameters`, `/ReceiveSoundCodecs`,
+  `/TransmitVideoCodecs` — всё 200. Админка пишет тот же ini, перечитывается
+  на старте — после правок через веб нужен `podman restart openmcu-ru`.
+* Разовая ловушка клиентов: если в образе забыт `-fwrapv`, сервер внешне жив
+  (1720 слушает, кодек-таблица в stdout), но на ЛЮБОЙ http-запрос отдаёт
+  «400 Bad Request» без status-строки — это не кривой клиент, а UB в
+  PString::Mid (грабля 11 в Dockerfile).
+
+## Что лежит рядом с этим README
+
+* `openmcu.ini` — эталонный конфиг: чистый самосгенерированный дамп этого образа
+  (первый запуск без монтированного файла, остановка SIGTERM — ini пишется при
+  штатном завершении) + вставленная `Trace level = 2` в пустой `[Parameters]`.
+  Монтируется поверх (см. запуск выше); свои правки — только заменой строк.
+* `created_capabilities.txt` — подпись собранного набора: 20 СОЗДАННЫХ
+  возможностей (18 аудио от 7 .so-семейств + H.261-CIF/QCIF), срез голых имён
+  до `VideoMixConfigurator` из стартового stdout. Дешёвая проверка после любой
+  пересборки/пересъёмки: `podman logs openmcu-ru | awk '/VideoMixConfigurator/{exit}
+  /^[A-Za-z0-9][A-Za-z0-9._-]*(\{sw\})?$/' | sort` и diff с этим файлом.
+  Честнее `[RECEIVE_*]` (те называют и то, чего нет в сборке) и не требует H.245.
+
+## Разбор
+
+* Нестойкость сборки (замер 2026-11-19): heap corruption «realloc(): invalid
+  next size» при добавлении терминала в конференцию — умерло на 6-м входящем
+  вызове за день (16-е «Adding member» в одну long-lived комнату room101, до
+  этого 11 циклов микшерного sleep/wake). Фрейм-жертва —
+  `PAbstractArray::InternalSetSize` ← `H323_RTPChannel::Transmit` (материал:
+  tmp/openmcu/coredump_bt.txt + core). Похоже на семейство UB того же класса,
+  что Mid (-fwrapv лечит арифметику строк, но не всё). Рестарт —
+  `podman restart openmcu-ru`; сервис поднят с `--restart=on-failure`, так что
+  после падения сам оживает за секунды — при замерах живости сверяйте
+  `podman inspect openmcu-ru --format '{{.State.StartedAt}}'` (порты могут
+  вернуться МЕРТВО ЗДОРОВЫМИ после вашего вызова). Правило прогонов:
+  `podman restart openmcu-ru` ПЕРЕД каждым прогоном (подозревается счётчик
+  добавлений, а не время жизни) и/или уникальная комната на вызов.
+
+* Логи хоста стенда и артефакты прогона кладите в `tmp/` репозитория
+  (он в `.gitignore`).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Сборка Flatpak-пакета MCU Client (.flatpak, устанавливается в один клик).
+# Сборка Flatpak-пакета MCU (.flatpak, устанавливается в один клик).
 #
 # Требуется: flatpak, flatpak-builder, runtime org.freedesktop.Platform//23.08
 #   flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
@@ -25,9 +25,9 @@ flatpak-builder --force-clean --repo=build/flatpak-repo \
 
 # 3. Формируем единый файл для распространения
 mkdir -p dist
-flatpak build-bundle build/flatpak-repo dist/MCU-Client.flatpak ru.mcu.McuClient
+flatpak build-bundle build/flatpak-repo dist/MCU.flatpak ru.mcu.McuClient
 
-echo "[+] Готово: dist/MCU-Client.flatpak"
-echo "    Установка:  flatpak install --user dist/MCU-Client.flatpak"
+echo "[+] Готово: dist/MCU.flatpak"
+echo "    Установка:  flatpak install --user dist/MCU.flatpak"
 echo "    Запуск:     flatpak run ru.mcu.McuClient"
 echo "    Удаление:   flatpak uninstall --user ru.mcu.McuClient"

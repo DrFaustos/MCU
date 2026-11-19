@@ -21,7 +21,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from .log import get_logger
 
@@ -31,10 +31,29 @@ DEFAULT_SOCKET = "/tmp/mcu_h323d.sock"
 HOST_BINARY = "mcu_h323d"
 
 # Соответствие событий хоста и событий шины (EventBus).
+# Перечислены ТОЛЬКО события, которые mcu_h323d реально отправляет (см.
+# emit_call_event/emit_error в tools/h323d/main.cpp). call.outgoing появился
+# вместе с командой call.make: хост шлёт его для исходящего соединения.
+# call.media добавлен вместе с PCM-медиа (Этап 1м/3): OpenAudioChannel сообщает
+# согласованный кодек и ЕГО ЧАСТОТУ. Частота — не украшение: G.711 даёт 8 кГц,
+# G.722 — 16 кГц, и без неё микшер сложил бы в один микс каналы разной частоты,
+# а терминал услышал бы замедленный голос без единой ошибки в логе.
 EVENT_MAP: dict[str, str] = {
     "call.incoming": "call.incoming",
+    "call.outgoing": "call.outgoing",
     "call.connected": "call.state",
     "call.disconnected": "call.state",
+    "call.media": "call.media",
+    # Тон/строка, принятые хостом (H.245 UserInputIndication либо in-band
+    # RFC 4733). В шину уходит под СВОИМ именем, а не под "dtmf.digits":
+    # ``dtmf.digits`` — формат журнала комнаты (mcuclient/dtmf.py), и владеть
+    # им обязан владелец журнала (DtmfService). Иначе у панели появляются два
+    # источника одних и тех же тонов с разными наборами полей.
+    "dtmf.in": "h323.dtmf",
+    # video.frame СОЗНАТЕЛЬНО нет: кадры (до 5/с на вызов, base64) в EventBus —
+    # это ровно та нагрузка, ради которой видео отдаётся ВТОРЫМ сокетом, а не
+    # общим JSON (tools/h323d/README.md). Их читает
+    # mcuclient.h323_video_bridge, минуя шину событий.
 }
 
 
@@ -50,6 +69,42 @@ class HostEvent:
     port: int = 0
     reason: Any = ""
     message: str = ""
+    #: адрес вызова для исходящих (поле ``alias``/``ip`` события call.outgoing)
+    address: str = ""
+    #: --- аудио-канал (событие ``call.media``, Этап 1м/3) -------------------
+    #: Частота — не украшение: G.711 даёт 8 кГц, G.722 — 16 кГц, и без неё
+    #: микшер сложил бы в один микс каналы разной частоты.
+    codec: str = ""
+    sample_rate: int = 0
+    direction: str = ""
+    #: --- принятые тоны (событие ``dtmf.in``) --------------------------------
+    #: набранный тон или строка целиком (для H.245 alphanumeric)
+    digits: str = ""
+    #: ``tone`` (H.245 signal либо in-band RFC 4733 — различить в форке нельзя,
+    #: оба стекаются в H323Connection::OnUserInputTone) либо ``string``
+    #: (H.245 alphanumeric). Поле называется via, а не method: см.
+    #: emit_dtmf_event в tools/h323d/main.cpp.
+    via: str = ""
+    #: длительность тона, мс (0 — не передана)
+    duration_ms: int = 0
+    #: --- кодек-профиль (событие ``ready``) ----------------------------------
+    #: Запрошенный лицензионный профиль хоста: royalty-free | compat.
+    audio_profile: str = ""
+    #: ФАКТИЧЕСКИЙ список объявленных аудио-форматов (после снятия по профилю
+    #: и reorder). Именно он, а не запрошенный список, определяет, что
+    #: согласуется: панель и `--doctor` обязаны показывать его.
+    audio_codecs: Tuple[str, ...] = ()
+    #: всего записей в таблице возможностей (диагностика «пустой TCS»)
+    capabilities: int = 0
+    #: --- видеоканал (событие ``call.media`` с kind=video, Этап 4) ------------
+    #: ``audio`` | ``video``. Без него вызов с голосом и вызов с картинкой
+    #: выглядят одинаково: поле codec одно и то же место, а directions тоже.
+    media_kind: str = ""
+    #: размер согласованного кадра (0 — не видео или хост не сообщил)
+    width: int = 0
+    height: int = 0
+    #: потолок частоты кадров, объявленный хостом (--video-fps)
+    fps: int = 0
 
 
 @dataclass
@@ -60,6 +115,12 @@ class HostStatus:
     ready: bool = False
     port: int = 0
     events_seen: int = 0
+    #: лицензионный профиль, который хост сообщил в `ready`
+    audio_profile: str = ""
+    #: фактический объявленный набор аудио-форматов (см. HostEvent.audio_codecs)
+    audio_codecs: Tuple[str, ...] = ()
+    #: всего записей в таблице возможностей хоста
+    capabilities: int = 0
 
 
 def parse_host_event(line: str) -> Optional[HostEvent]:
@@ -85,15 +146,69 @@ def parse_host_event(line: str) -> Optional[HostEvent]:
         port = int(port or 0)
     except (TypeError, ValueError):
         port = 0
+    alias = str(obj.get("alias", "") or "")
+    ip = str(obj.get("ip", "") or "")
+    # Частота канала (call.media). Битое значение — 0, а не исключение: разбор
+    # событий не имеет права ронять читателя IPC.
+    try:
+        sample_rate = int(obj.get("rate", 0) or 0)
+    except (TypeError, ValueError):
+        sample_rate = 0
+    # Длительность тона (dtmf.in). Для H.245 alphanumeric её не бывает вовсе,
+    # поэтому 0 означает «не передана», а не «тон нулевой». Битое значение —
+    # тоже 0: разбор событий не имеет права ронять читателя IPC.
+    try:
+        duration_ms = int(obj.get("duration_ms", 0) or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    # Профиль и фактический набор из `ready`. Хост кладёт список строкой через
+    # запятую (JSON-билдер main.cpp умеет только строки), список тоже принимается:
+    # стендам удобнее отдавать массив. Поле `capabilities` — количество записей
+    # таблицы: «TCS пустой» иначе выглядит как «кодеков нет в дереве плагинов».
+    # Размер и частота видеоканала (call.media, kind=video). Битое значение — 0,
+    # по тому же правилу, что частота аудио: «данных нет», а не исключение.
+    try:
+        width = int(obj.get("width", 0) or 0)
+        height = int(obj.get("height", 0) or 0)
+        fps = int(obj.get("fps", 0) or 0)
+    except (TypeError, ValueError):
+        width = height = fps = 0
+    audio_profile = str(obj.get("audio_profile", "") or "")
+    raw_codecs = obj.get("audio_codecs", "")
+    if isinstance(raw_codecs, str):
+        audio_codecs = tuple(x.strip() for x in raw_codecs.split(",") if x.strip())
+    elif isinstance(raw_codecs, (list, tuple)):
+        audio_codecs = tuple(str(x).strip() for x in raw_codecs if str(x).strip())
+    else:
+        audio_codecs = ()
+    try:
+        capabilities = int(obj.get("capabilities", 0) or 0)
+    except (TypeError, ValueError):
+        capabilities = 0
     return HostEvent(
         kind=kind,
         token=str(obj.get("token", "") or ""),
-        alias=str(obj.get("alias", "") or ""),
-        ip=str(obj.get("ip", "") or ""),
+        alias=alias,
+        ip=ip,
         uri=str(obj.get("uri", "") or ""),
         port=port,
         reason=obj.get("reason", ""),
         message=str(obj.get("message", "") or ""),
+        # Для call.outgoing хост кладёт набранный адрес в alias/ip.
+        address=str(obj.get("address", "") or "") or (alias if not ip else ""),
+        codec=str(obj.get("codec", "") or ""),
+        sample_rate=sample_rate,
+        direction=str(obj.get("direction", "") or ""),
+        digits=str(obj.get("digits", "") or ""),
+        via=str(obj.get("via", "") or ""),
+        duration_ms=duration_ms,
+        audio_profile=audio_profile,
+        audio_codecs=audio_codecs,
+        capabilities=capabilities,
+        media_kind=str(obj.get("kind", "") or ""),
+        width=width,
+        height=height,
+        fps=fps,
     )
 
 
@@ -117,6 +232,35 @@ def event_to_bus_payload(ev: HostEvent) -> dict[str, Any]:
         payload["reason"] = ev.reason
     if ev.message:
         payload["message"] = ev.message
+    # Параметры аудио-канала: без них событие call.media бесполезно и для UI
+    # (кодек в списке участников), и для микшера (частота).
+    if ev.codec:
+        payload["codec"] = ev.codec
+    if ev.sample_rate:
+        payload["rate"] = ev.sample_rate
+    if ev.direction:
+        payload["direction"] = ev.direction
+    # kind и размеры видеоканала (Этап 4). До этого поле kind не доезжало вовсе,
+    # и вызов с голосом отличался от вызова с картинкой только тем, что у одного
+    # есть rate, а у другого width — «проверить» такое в панели невозможно.
+    if ev.media_kind:
+        payload["kind"] = ev.media_kind
+    if ev.width:
+        payload["width"] = ev.width
+    if ev.height:
+        payload["height"] = ev.height
+    if ev.fps:
+        payload["fps"] = ev.fps
+    # Принятые тоны (dtmf.in). Пустые поля опускаем: «тон не набран» обязан
+    # отличаться от «набран тон» (то же правило, что введено для codec).
+    # duration_ms == 0 в payload не едет — у H.245 alphanumeric длительности
+    # не бывает вовсе, 0 здесь означает «данных нет», а не «нулевой тон».
+    if ev.digits:
+        payload["digits"] = ev.digits
+    if ev.via:
+        payload["via"] = ev.via
+    if ev.duration_ms:
+        payload["duration_ms"] = ev.duration_ms
     return payload
 
 
@@ -170,6 +314,9 @@ class H323HostClient:
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._ready_port = 0
+        self._ready_audio_profile = ""
+        self._ready_audio_codecs: Tuple[str, ...] = ()
+        self._ready_capabilities = 0
         self._events_seen = 0
         self._last_error = ""
 
@@ -197,6 +344,9 @@ class H323HostClient:
             ready=self._ready.is_set(),
             port=self._ready_port,
             events_seen=self._events_seen,
+            audio_profile=self._ready_audio_profile,
+            audio_codecs=self._ready_audio_codecs,
+            capabilities=self._ready_capabilities,
         )
 
     def on_event(self, cb: Callable[[HostEvent], None]) -> None:
@@ -329,8 +479,16 @@ class H323HostClient:
         self._events_seen += 1
         if ev.kind == "ready":
             self._ready_port = ev.port or 1720
+            self._ready_audio_profile = ev.audio_profile
+            self._ready_audio_codecs = ev.audio_codecs
+            self._ready_capabilities = ev.capabilities
             self._ready.set()
-            log.info("H.323-хост готов, порт %s", self._ready_port)
+            log.info(
+                "H.323-хост готов, порт %s, профиль %s, аудио %d (%s), "
+                "возможностей %d",
+                self._ready_port, ev.audio_profile or "?", len(ev.audio_codecs),
+                ", ".join(ev.audio_codecs) or "—", ev.capabilities,
+            )
         for cb in list(self._callbacks):
             try:
                 cb(ev)

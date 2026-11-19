@@ -57,9 +57,11 @@ web-конференции: маршрутизация RTP/WebRTC, **симул�
 | POST | `/rooms` | `{}` → `{roomId, rtpCapabilities}` |
 | GET | `/rooms` | → `{rooms:[...]}` |
 | POST | `/rooms/close` | `{roomId}` → `{ok}` |
+| POST | `/rooms/stats` | `{roomId}` → `{room, producers[]}` |
 | POST | `/transports/webrtc` | `{roomId}` → ICE/DTLS-параметры |
 | POST | `/transports/plain` | `{roomId}` → `{ip, port, rtcpPort}` (RTP-мост) |
 | POST | `/transports/connect` | `{roomId, transportId, dtlsParameters}` |
+| POST | `/transports/close` | `{roomId, transportId}` → `{ok}` |
 | POST | `/produce` | `{roomId, transportId, kind, rtpParameters}` → `{producerId}` |
 | POST | `/produce/plain` | то же для RTP-моста |
 | POST | `/consume` | `{roomId, transportId, producerId, rtpCapabilities}` → `{consumerId, rtpParameters}` |

@@ -143,6 +143,20 @@ class MediasoupClient:
             "dtlsParameters": dtls_parameters,
         })
 
+    def close_transport(self, room_id: str, transport_id: str) -> dict:
+        """Закрыть ОДИН транспорт.
+
+        Без этого вызова транспорт освобождается только вместе с комнатой, а
+        RTP-мост пересоздаёт PlainTransport при каждой повторной попытке
+        (сайдкар поднимается секунды после старта). Каждый висящий транспорт
+        держит UDP-порт из ``rtc_min..rtc_max`` (по умолчанию 101 порт),
+        поэтому ретрай без закрытия — утечка ресурсов, а не починка. Замерено
+        пробом живьём: 5 циклов start()/stop() -> transports 0 -> 5.
+        """
+        return self.call("POST", "/transports/close", {
+            "roomId": room_id, "transportId": transport_id,
+        })
+
     # -- producer/consumer -------------------------------------------------
     def produce(self, room_id: str, transport_id: str, kind: str,
                 rtp_parameters: dict, app_data: Optional[dict] = None) -> dict:

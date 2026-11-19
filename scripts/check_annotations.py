@@ -22,6 +22,12 @@ STRICT_MODULES = (
     "mcuclient/config.py",
     "mcuclient/pjsip_adapter.py",
     "mcuclient/adaptive_bitrate.py",
+    "mcuclient/qt_platform.py",
+    # Шире strict-набора mypy на один модуль: h323_audio_bridge объявлен
+    # типизированным (AST-проверка проходит), но disallow_untyped_defs ему в
+    # mypy.ini пока не включён — mypy проверяет транзитивные импорты, а в
+    # webrtc_sfu/audio_mixer остались 3 предсуществующие ndarray-ошибки.
+    "mcuclient/h323_audio_bridge.py",
 )
 
 

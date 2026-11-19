@@ -14,3 +14,4 @@ recordings/
 .github/
 config.json
 packaging/mcu-client.ico
+packaging/mcu.ico

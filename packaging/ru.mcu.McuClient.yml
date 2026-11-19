@@ -1,4 +1,4 @@
-# Flatpak-манифест для MCU Client.
+# Flatpak-манифест для MCU.
 #
 # Сборка требует предварительно собранного бинарника PyInstaller
 # (см. packaging/build_flatpak.sh). Запускать из корня репозитория:
@@ -8,7 +8,7 @@ app-id: ru.mcu.McuClient
 runtime: org.freedesktop.Platform
 runtime-version: '23.08'
 sdk: org.freedesktop.Sdk
-command: MCU-Client
+command: MCU
 
 finish-args:
   - --share=ipc
@@ -20,13 +20,13 @@ finish-args:
   - --filesystem=home        # config.json и записи конференций
 
 modules:
-  - name: mcu-client
+  - name: mcu
     buildsystem: simple
     build-commands:
-      - install -Dm755 dist/MCU-Client /app/bin/MCU-Client
-      - install -Dm644 packaging/mcu-client.desktop
+      - install -Dm755 dist/MCU /app/bin/MCU
+      - install -Dm644 packaging/mcu.desktop
         /app/share/applications/ru.mcu.McuClient.desktop
-      - install -Dm644 packaging/mcu-client.svg
+      - install -Dm644 packaging/mcu.svg
         /app/share/icons/hicolor/scalable/apps/ru.mcu.McuClient.svg
     sources:
       - type: dir

@@ -215,7 +215,7 @@ def run_doctor(config=None) -> int:
     checks += check_ffmpeg()
 
     log.info("=" * 60)
-    log.info("MCU Client — диагностика (--doctor)")
+    log.info("MCU — диагностика (--doctor)")
     log.info("=" * 60)
     fails = 0
     for level, title, detail in checks:

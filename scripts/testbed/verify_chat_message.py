@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from mcuclient.config import load_config  # noqa: E402
 from mcuclient.sip_engine import PJSIP_AVAILABLE, SipEngine  # noqa: E402
+from scripts.testbed.lib.pump import pump  # noqa: E402
 
 ASTERISK_URI = "sip:600@127.0.0.1:15080"
 
@@ -47,19 +47,18 @@ def main() -> int:
     events = []
     engine.events.subscribe(lambda n, p: events.append((n, dict(p))))
     engine.start()
-    time.sleep(2)
+    pump(engine, 2)  # см. lib/pump.py: без libHandleEvents() события не идут
 
     call_id = engine.call(ASTERISK_URI)
     if call_id is None:
         engine.stop()
         return _finish(report, "FAIL", "вызов не инициирован")
 
-    confirmed = False
-    for _ in range(10):
-        time.sleep(1)
-        if any(n == "call.state" and p.get("state") == "CONFIRMED" for n, p in events):
-            confirmed = True
-            break
+    confirmed = pump(
+        engine, 10,
+        lambda: any(n == "call.state" and p.get("state") == "CONFIRMED"
+                    for n, p in events),
+    )
     if not confirmed:
         engine.stop()
         return _finish(report, "FAIL", "вызов не подтверждён")
@@ -71,13 +70,13 @@ def main() -> int:
         engine.stop()
         return _finish(report, "FAIL", "send_message вернул False")
 
-    delivered = False
-    for _ in range(8):
-        time.sleep(1)
+    def _settled() -> bool:
         hist = engine.chat_history
-        if hist and hist[-1].status in ("delivered", "failed"):
-            delivered = hist[-1].status == "delivered"
-            break
+        return bool(hist and hist[-1].status in ("delivered", "failed"))
+
+    pump(engine, 8, _settled)
+    hist = engine.chat_history
+    delivered = bool(hist and hist[-1].status == "delivered")
     history = [m.as_dict() for m in engine.chat_history]
     report["history"] = history
     engine.stop()
