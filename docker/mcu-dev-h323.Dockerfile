@@ -53,7 +53,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
         libsdl2-dev libavcodec-dev libavformat-dev libavutil-dev \
         libswscale-dev libx264-dev libx265-dev libvpx-dev \
         python3 python3-venv python3-pip python3-pytest \
-        ffmpeg iproute2 tcpdump \
+        ffmpeg iproute2 tcpdump tshark \
     && rm -rf /var/lib/apt/lists/*
 
 # PTLib -> H323Plus -> plugin-кодеки (порядок строго такой; версии из ARG,

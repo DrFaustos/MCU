@@ -202,10 +202,16 @@ podman network create mcu-lab
 # mode», живой замер), наш стенд ходит к нему: MCU_H323_NET=mcu-lab +
 # --remote-h323 openmcu-ru:1720
 podman run -d --name openmcu-ru --network mcu-lab --cap-add NET_RAW \
+    --restart=on-failure \
     -p 1720:1720/tcp -p 1720:1720/udp -p 1420:1420 \
     -v "$PWD/docker/openmcu-ru/openmcu.ini:/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini:z" \
     localhost/openmcu-ru:v3.48.0
 ```
+
+Каноническое имя стендового сервиса — единственное `openmcu-ru`. Контейнеры
+вида `openmcu-dev*` — сборочно-отладочные слепки среды (архив, остановлены);
+артефакты снято брать только с `openmcu-ru`, иначе «честный отчёт про чужой
+процесс» гарантирован.
 
 Эталонный `docker/openmcu-ru/openmcu.ini` — самосгенерированный на теге дамп
 (первый запуск без монтированного файла, остановка SIGTERM — ini пишется при
@@ -252,3 +258,13 @@ H.261-vic, G.722/G.726/G.729/iLBC/Speex/SILK/OPUS; H.263-1998/H.264/VP8/G.7231
 `/ReceiveSoundCodecs`/`/TransmitVideoCodecs` (корень `/` — оглавление).
 Веб-админка правит тот же ini и требует перезапуска контейнера — таблицы
 конференций строятся на старте.
+
+Нестойкость (замер 2026-11-19, дефект их сборки): heap corruption
+«realloc(): invalid next size» в `PAbstractArray::InternalSetSize` ←
+`H323_RTPChannel::Transmit` на добавлении участника — смерть на 6-м входящем
+вызове за день (16-е «Adding member» в одну комнату после 11 микшерных
+sleep/wake; core+фрейм: tmp/openmcu/coredump_bt.txt). Рестарт —
+`podman restart openmcu-ru`; сервис поднят с `--restart=on-failure` и оживает
+сам, живость в замерах проверяйте по `.State.StartedAt`. Обход: уникальная
+комната на вызов. Это не UB-арифметика Mid (-fwrapv в образе есть), а другой
+баг того же семейства «2012-й код против современных рантаймов».

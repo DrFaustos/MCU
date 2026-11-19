@@ -34,6 +34,7 @@ podman network create mcu-lab   # один раз; именованная сет
 podman run -d --name openmcu-ru \
     --network mcu-lab \
     --cap-add NET_RAW \
+    --restart=on-failure \
     -p 1720:1720/tcp -p 1720:1720/udp \
     -p 1420:1420/tcp \
     -v "$PWD/docker/openmcu-ru/openmcu.ini:/opt/openmcu-ru/share/openmcu-ru/config/openmcu.ini:z" \
@@ -111,6 +112,19 @@ podman logs --since <старт-прогона> openmcu-ru > tmp/openmcu/stdout_
   Честнее `[RECEIVE_*]` (те называют и то, чего нет в сборке) и не требует H.245.
 
 ## Разбор
+
+* Нестойкость сборки (замер 2026-11-19): heap corruption «realloc(): invalid
+  next size» при добавлении терминала в конференцию — умерло на 6-м входящем
+  вызове за день (16-е «Adding member» в одну long-lived комнату room101, до
+  этого 11 циклов микшерного sleep/wake). Фрейм-жертва —
+  `PAbstractArray::InternalSetSize` ← `H323_RTPChannel::Transmit` (материал:
+  tmp/openmcu/coredump_bt.txt + core). Похоже на семейство UB того же класса,
+  что Mid (-fwrapv лечит арифметику строк, но не всё). Рестарт —
+  `podman restart openmcu-ru`; сервис поднят с `--restart=on-failure`, так что
+  после падения сам оживает за секунды — при замерах живости сверяйте
+  `podman inspect openmcu-ru --format '{{.State.StartedAt}}'` (порты могут
+  вернуться МЕРТВО ЗДОРОВЫМИ после вашего вызова). Обход для прогонов:
+  уникальная комната на вызов (чистый микшер, без churn) — обсудите с env.
 
 * Логи хоста стенда и артефакты прогона кладите в `tmp/` репозитория
   (он в `.gitignore`).
