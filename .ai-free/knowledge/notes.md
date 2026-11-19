@@ -608,7 +608,7 @@ DTMF-стенд.
   проходил бы как целое. Значения не сверяются намеренно:
   features.recording_path в шаблоне — операторский «./recordings», а не
   XDG-путь из дефолтов.
-- **Кейсы:** `tests/test_doc_values.py` (11), `tests/test_config_validation.py` (16),
+- **Кейсы:** `tests/test_doc_values.py` (11), `tests/test_config_validation.py` (21),
   `tests/test_mediasoup_supervisor.py` (10).
 - **Линтеры в этом окружении:** ruff/mypy в боевом python3 ОТСУТСТВУЮТ
   (`No module named`; pip блокирует PEP 668). Поднимать в scratch-venv:
