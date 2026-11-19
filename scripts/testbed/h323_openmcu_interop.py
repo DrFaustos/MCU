@@ -81,6 +81,24 @@ from mcuclient.h323_host import find_host_binary  # noqa: E402
 from mcuclient.h323_video_bridge import video_socket_path, yuv420p_to_rgb  # noqa: E402
 from mcuclient.h323d_client import H323dClient  # noqa: E402
 
+#: Кандидаты адреса их админки, если ни один не задан явно. Это НЕ знание об их
+#: вёрстке, а измеряемый список: что ответило — видно в отчёте и в дампах, и это
+#: замер, а не догадка (lead просил зафиксировать сработавший в DEV_CONTAINERS §8).
+#: Порт 1420 взят из docker/openmcu-ru.Dockerfile: EXPOSE 1420/tcp.
+DEFAULT_STATUS_URLS = ("http://127.0.0.1:1420/", "http://127.0.0.1:1420/Status",
+                       "http://127.0.0.1:1420/status",
+                       "http://127.0.0.1:1420/index.html")
+
+
+def status_urls(args: argparse.Namespace) -> List[str]:
+    """Какие URL их статуса снимать в этом прогоне."""
+    if args.status_url:
+        return list(args.status_url)
+    if args.self_check:
+        return []          # подставная админка назначается внутри самопроверки
+    return list(DEFAULT_STATUS_URLS)
+
+
 #: Опознавательные имена, которые стенд ищет в их статус-странице. Это НЕ парсер
 #: таблицы: мы не утверждаем, где именно имя кодека напечатано, — мы сравниваем
 #: МНОЖЕСТВО найденных токенов до и после вызова.
@@ -666,9 +684,11 @@ def main() -> int:
             if args.dial:
                 print(f"[i] строка набора переопределена: {args.dial} "
                       f"(адрес для статуса/справок: {remote_addr})", flush=True)
-        if not args.status_url:
-            print("[i] статус-страница не задана: доказательство приёма на их "
-                  "стороне сводится к pcap и логам; добавь --status-url", flush=True)
+        args.status_url = status_urls(args)
+        if args.status_url and not args.self_check:
+            print(f"[i] кандидаты их статус-страницы ({len(args.status_url)}): "
+                  f"{args.status_url} — что ответит, видно в отчёте и в дампах",
+                  flush=True)
 
         # --- 1. наш хост и вызов ----------------------------------------------
         local = start_host(binary, "L", args.local_port, work, dump)

@@ -295,6 +295,30 @@ def test_selfcheck_does_not_waste_time_on_room_forms():
                                  "127.0.0.1:1722") == ["127.0.0.1:1722"]
 
 
+def test_status_candidates_are_measured_not_assumed():
+    """Первый прогон сам выясняет адрес админки: список кандидатов записан в коде.
+
+    Порт взят из EXPOSE их Dockerfile, пути — предположения. Ценность не в том, что
+    список угадал, а в том, что прогон печатает, что ответило, и кладёт сырой HTML:
+    сработавший адрес после этого — замер, а не чья-то память.
+    """
+    urls = stand.status_urls(_args(status_url=[], self_check=False))
+    assert urls == list(stand.DEFAULT_STATUS_URLS)
+    assert all(u.startswith("http://127.0.0.1:1420") for u in urls), urls
+    assert len(urls) >= 2, "один кандидат — это не измерение, а ставка"
+
+
+def test_explicit_status_url_wins_over_defaults():
+    urls = stand.status_urls(_args(status_url=["http://mcu:88/"],
+                                   self_check=False))
+    assert urls == ["http://mcu:88/"]
+
+
+def test_selfcheck_does_not_probe_real_admin():
+    """В самопроверке внешний адрес не трогаем: там своя подставная страница."""
+    assert stand.status_urls(_args(status_url=[], self_check=True)) == []
+
+
 # --- матрица (план codecs) ----------------------------------------------------
 
 def test_matrix_covers_exactly_the_agreed_four_profiles():
