@@ -776,3 +776,27 @@ def test_license_of_capability_answers_the_operators_question():
         if name in select_advertised(
                 LIVE_AUDIO, deny=ROYALTY_FREE_AUDIO_DENY).keep:
             assert is_royalty_free_capability(name), name
+
+
+def test_substring_direction_is_the_interop_mine():
+    """Направление подстроки — это риск интеропа, а не деталь реализации.
+
+    И наш `Remove`, и `H323Capabilities::FindCapability` в форке матчат так: паттерн
+    должен быть ПОДСТРОКОЙ имени в таблице (h323caps.cxx:3552). У OpenMCU-ru на
+    master выбор исходящего канала идёт по именам из их `[TRANSMIT_*]` этим же
+    матчером, а их конфиг-ключ для H.261 — «H.261{sw}». Наше имя — «H.261-CIF{sw}»,
+    значит их ключ в нашу таблицу не попадает и канал не открывается вовсе. Кейс
+    держит направление: форма без суффикса попадает, форма с суффиксом — нет. Это
+    предсказание, а не факт стенда; проверяется прогоном (docs/CODECS.md §8.1).
+    """
+    assert not matches_pattern("H.261-CIF{sw}", ("H.261{sw}",))
+    assert not matches_pattern("H.261-QCIF{sw}", ("H.261{sw}",))
+    assert matches_pattern("H.261-CIF{sw}", ("H.261",))
+    assert matches_pattern("H.261-CIF{sw}", ("H.261*",))
+    # Аудио-ключи их конфига в нашу таблицу попадают буквально — поэтому звук в
+    # интеропе поедет даже там, где видео нет, и это надо помнить при разборе:
+    # «слышно, но не видно» не означает, что сломано согласование как таковое.
+    for their_key, our_name in (("G.711-ALaw-64k", "G.711-ALaw-64k"),
+                                ("G.722-64k{sw}", "G.722-64k{sw}"),
+                                ("iLBC-13k3{sw}", "iLBC-13k3{sw}")):
+        assert matches_pattern(our_name, (their_key,))
