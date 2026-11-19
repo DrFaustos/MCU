@@ -12,7 +12,7 @@
 (`ROYALTY_FREE_AUDIO_DENY`, `select_advertised`, `host_codec_args`), механика
 таблицы возможностей — в `tools/h323d/main.cpp` (`apply_codec_profile`,
 `ReorderCapabilities`), замок от расхождения языков и правил —
-`tests/test_codec_profile.py` — 37 кейсов.
+`tests/test_codec_profile.py` — 38 кейсов.
 
 ## 1. Чем этот документ не является
 
