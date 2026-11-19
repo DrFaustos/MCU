@@ -434,15 +434,34 @@ THEIR_IO_LINE = re.compile(r"\[(RECEIVE|TRANSMIT)_([A-Z]+)\]\s*(.*)", re.IGNOREC
 THEIR_CAP_LINE = re.compile(r"capabilit\w+\s*:\s*(.*)", re.IGNORECASE)
 
 
+#: Их списки ПЕРЕДАЧИ на теге v3.48.0 доезжают только до stdout: tsCaps/tvCaps
+#: читаются их SIP-кодом (openmcu-ru/sip.cxx:55-56) и нигде больше не участвуют,
+#: H.323 у них остаётся на штатном выборе по дескрипторам. Печатать их рядом с
+#: нашими именами без этой подписи — значит дать прочитать отчёт как «они нам это
+#: не отдают», чего они не делали (данные codecs, docs/CODECS.md §8.1).
+THEIR_TRANSMIT_CAVEAT = (
+    "их SIP-набор и отладочный вывод (v3.48.0), не ограничение нашего H.323-интеропа")
+
+
 def parse_their_stdout(text: str) -> Dict[str, Any]:
-    """Списки приём/передача из их stdout, сгруппированные по виду среды."""
+    """Списки приём/передача из их stdout — с разделением, у кого какой вес.
+
+    Приём (`[RECEIVE_*]`) — это то, чем они ОБЪЯВЛЯЮТ свой TCS, то есть реальная
+    их таблица. Передача (`[TRANSMIT_*]`) на этом теге — только напечатанный
+    SIP-набор (см. THEIR_TRANSMIT_CAVEAT). Смешивать их в одну проверку нельзя:
+    зелёная «передача есть» означала бы, что мы чего-то дождались.
+    """
     kinds: Dict[str, List[str]] = {}
     for match in THEIR_IO_LINE.finditer(text):
         direction, medium, rest = match.group(1).upper(), match.group(2).upper(), \
             match.group(3).strip()
         kinds.setdefault(f"{direction.lower()}_{medium.lower()}", []).append(rest)
     caps = [m.group(1).strip() for m in THEIR_CAP_LINE.finditer(text)]
-    return {"kinds": kinds, "capabilities": caps,
+    receive = {k: v for k, v in kinds.items() if k.startswith("receive_")}
+    transmit = {k: v for k, v in kinds.items() if k.startswith("transmit_")}
+    return {"kinds": kinds, "receive": receive, "transmit": transmit,
+            "caveat": THEIR_TRANSMIT_CAVEAT if transmit else "",
+            "capabilities": caps,
             "video_tokens": sorted({t.upper() for t in CODEC_TOKENS.findall(text)})}
 
 
@@ -479,26 +498,69 @@ def parse_their_trace(text: str) -> Dict[str, Any]:
             "video_tokens": sorted({t.upper() for t in CODEC_TOKENS.findall(text)})}
 
 
-def parse_their_ini(text: str) -> Dict[str, List[str]]:
+#: Как у них правильно ограничивать кодеки (рецепт первого зелёного, от lead и
+#: codecs): ВИДЕО — per-терминальным списком в админке (честный рычаг), АУДИО —
+#: правкой УЖЕ СУЩЕСТВУЮЩЕГО ключа в ini. И ловушка: у G.711-рычага админки есть
+#: костыль с обрезкой ulaw/alaw, которым можно «оглушить» терминал по их же вине.
+#: Значит «аудио нет» при включённом в ini ключе — сначала подозревай этот рычаг,
+#: а не наше согласование.
+THEIR_LEVERS_NOTE = (
+    "видео ограничивают per-терминальным списком в админке, аудио — правкой "
+    "существующего ключа ini; у G.711-рычага админки костыль с обрезкой "
+    "ulaw/alaw, «аудио нет» при включённом ключе сначала объясняется им")
+
+TRUTHY = ("1", "true", "yes", "on")
+
+
+def parse_their_ini(text: str) -> Dict[str, Any]:
     """Их ini: что включено в приём и передачу (только чтение, ничего не правим).
 
-    Рецепт codecs «после автогенерации оставить G.711+H.261, остальное False» —
-    про этот файл. Стенд его НЕ пишет: он его читает и печатает, какой конфиг у
-    прогона, чтобы красный результат было с чем сопоставить.
+    Форму стенд НЕ знает заранее и различает обе возможные: секции
+    `[RECEIVE_SOUND]` со списком кодеков внутри и ключи с префиксом
+    `RECEIVE_G711=1`. Возвращает `shape` — что из двух встретилось; если ни одна
+    форма не опознана, честный ответ «не распознано», а не пустой список: пустой
+    список в отчёте прочитался бы как «у них всё выключено».
+
+    Дубли ключей считаются отдельно и не решают «last wins»: конфиг у них читает
+    бандлина PTLib 2.0.x, где повторный ключ в секции склеивается со значением
+    (ptlib/src/ptlib/unix/config.cxx:395), то есть последнее значение — не
+    действительное, а первое из двух правок (данные codecs, §8.1).
     """
-    out: Dict[str, List[str]] = {"receive": [], "transmit": [], "off": []}
+    out: Dict[str, Any] = {"shape": "", "receive": [], "transmit": [], "off": [],
+                           "duplicates": [], "sections": []}
+    section = ""
+    seen: Dict[str, int] = {}
     for line in text.splitlines():
-        key, sep, value = line.partition("=")
-        if not sep:
+        stripped = line.strip()
+        if not stripped or stripped.startswith((";", "#")):
             continue
-        key = key.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip().upper()
+            if section.startswith(("RECEIVE_", "TRANSMIT_")):
+                out["sections"].append(section)
+                out["shape"] = "sections"
+            continue
+        key, sep, value = stripped.partition("=")
+        if not sep:
+            continue                      # продолжение значения: ключ уже учтён
+        key = key.strip().upper()
         value = value.strip()
-        if key.upper().startswith(("RECEIVE_", "TRANSMIT_")):
-            if value.lower() in ("false", "0", "no", "off", ""):
-                out["off"].append(key.upper())
-            else:
-                out["receive" if key.upper().startswith("RECEIVE_")
-                    else "transmit"].append(key.upper())
+        if key in seen:
+            out["duplicates"].append(key)
+        seen[key] = seen.get(key, 0) + 1
+        in_prefix = key.startswith(("RECEIVE_", "TRANSMIT_"))
+        if not (in_prefix or section.startswith(("RECEIVE_", "TRANSMIT_"))):
+            continue
+        if not in_prefix:
+            out["shape"] = out["shape"] or "sections"
+        else:
+            out["shape"] = "prefixed-keys"
+        target = ("receive" if (key.startswith("RECEIVE_")
+                                or section.startswith("RECEIVE_")) else "transmit")
+        if value.strip().lower() in TRUTHY:
+            out[target].append(key if in_prefix else f"{section}:{key}")
+        else:
+            out["off"].append(key if in_prefix else f"{section}:{key}")
     return out
 
 
@@ -563,6 +625,61 @@ class _FakeAdmin(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_args: Any) -> None:
         pass  # тихая подставка: её визиты не должны засорять отчёт стенда
+
+
+# Шаблонные «их» файлы для самопроверки. Это НЕ образец их формата: их формат
+# выясняется живым прогоном. Задача шаблона — чтобы парсеры (приём/передача,
+# порядок предпочтений, OLC, обе формы ini) исполнялись на каждом офлайн-прогоне,
+# а не ждали первого контейнера. Файлы пишутся до вызова, а «реакция на вызов»
+# дописывается после установления — ровно как с настоящей админкой.
+THEIR_STDOUT_TEMPLATE = (
+    "OpenMCU-ru 3.48.0 starting\n"
+    "capabilities: 14 entries\n"
+    "[RECEIVE_SOUND] G.711-alaw 64000\n"
+    "[RECEIVE_SOUND] G.722 64000\n"
+    "[RECEIVE_VIDEO] H.261-CIF 352x288\n"
+    "[TRANSMIT_SOUND] G.711-alaw 64000\n")
+
+THEIR_STDOUT_AFTER_CALL = (
+    "Terminal ours registered in room room101\n"
+    "[RECEIVE_VIDEO] H.261-CIF 352x288\n")
+
+THEIR_TRACE_TEMPLATE = (
+    "2026/10/22 11:00:00.001  OpenMCU-ru trace, level 2\n"
+    "2026/10/22 11:00:00.002  Codecs (in preference order)\n"
+    "2026/10/22 11:00:00.002   H.261-CIF\n"
+    "2026/10/22 11:00:00.002   G.711-alaw\n"
+    "\n"
+    "2026/10/22 11:00:00.003   (пустая строка закрывает секцию)\n")
+
+THEIR_TRACE_AFTER_CALL = (
+    "2026/10/22 11:00:05.010  OnOpenLogicalChannel: 16 (capability 3 H.261-CIF)\n"
+    "2026/10/22 11:00:05.020  OnOpenLogicalChannel: 18 (capability 1 G.711)\n")
+
+THEIR_INI_TEMPLATE = (
+    "[Parameters]\n"
+    "Trace level = 2\n"
+    "Default room = room101\n"
+    "\n"
+    "[RECEIVE_SOUND]\n"
+    "G711_A = 1\n"
+    "G722 = 1\n"
+    "G729 = 0\n"
+    "\n"
+    "[RECEIVE_VIDEO]\n"
+    "H261_1 = 1\n"
+    "H263_1 = 0\n")
+
+
+def write_their_templates(dump: Path) -> Dict[str, Path]:
+    """Создать шаблонные «их» файлы и вернуть пути для --their-*."""
+    paths = {"log": dump / "their_stdout_template.txt",
+             "trace": dump / "their_trace_template.txt",
+             "ini": dump / "openmcu_template.ini"}
+    paths["log"].write_text(THEIR_STDOUT_TEMPLATE, encoding="utf-8")
+    paths["trace"].write_text(THEIR_TRACE_TEMPLATE, encoding="utf-8")
+    paths["ini"].write_text(THEIR_INI_TEMPLATE, encoding="utf-8")
+    return paths
 
 
 def start_fake_admin(port: int) -> Tuple[http.server.HTTPServer, threading.Thread]:
@@ -656,6 +773,16 @@ def main() -> int:
             fake, _thr = start_fake_admin(fake_port)
             _FakeAdmin.marker.unlink(missing_ok=True)
             args.status_url = [f"http://127.0.0.1:{fake_port}/"]
+            # Их доказательства тоже шаблонные: иначе парсеры stdin/trace/ini не
+            # исполняются ни разу, пока не приедет контейнер.
+            if not (args.their_log and args.their_trace and args.their_ini):
+                tpl = write_their_templates(dump)
+                args.their_log = args.their_log or str(tpl["log"])
+                args.their_trace = args.their_trace or str(tpl["trace"])
+                args.their_ini = args.their_ini or str(tpl["ini"])
+                print("[i] САМОПРОВЕРКА: их stdout/trace/ini — НАШИ шаблоны "
+                      "(формат OpenMCU выясняется живым прогоном; парсеры "
+                      "исполняются здесь, а не там впервые)", flush=True)
             remote = start_host(binary, "R", args.local_port + 1, work, dump,
                                 auto_answer=True)
             procs["R"] = remote
@@ -728,6 +855,14 @@ def main() -> int:
 
         if args.self_check:
             _FakeAdmin.marker.write_text("1", encoding="utf-8")
+            # Их логи растут во время вызова — имитируем это, иначе срезы будут
+            # пустыми и проверки «их stdout объявляет приём» краснеют не по делу.
+            if args.their_log and "template" in Path(args.their_log).name:
+                with open(args.their_log, "a", encoding="utf-8") as fh:
+                    fh.write(THEIR_STDOUT_AFTER_CALL)
+            if args.their_trace and "template" in Path(args.their_trace).name:
+                with open(args.their_trace, "a", encoding="utf-8") as fh:
+                    fh.write(THEIR_TRACE_AFTER_CALL)
 
         attempts = dial_candidates(args, remote_addr)
         token = ""
@@ -800,15 +935,19 @@ def main() -> int:
                                                        encoding="utf-8")
         if stdout_text:
             parsed = parse_their_stdout(stdout_text)
-            kinds = {k: len(v) for k, v in sorted(parsed["kinds"].items())}
-            print(f"[i] их stdout за прогон: списки {kinds or '—'}, "
-                  f"токены {parsed['video_tokens'][:8] or '—'}", flush=True)
-            ck.check(bool(parsed["kinds"]),
-                     "их stdout подтверждает списки приём/передача",
+            recv = {k: len(v) for k, v in sorted(parsed["receive"].items())}
+            sent = {k: len(v) for k, v in sorted(parsed["transmit"].items())}
+            print(f"[i] их stdout за прогон: приём {recv or '—'}, передача "
+                  f"{sent or '—'}, токены {parsed['video_tokens'][:8] or '—'}",
+                  flush=True)
+            if sent:
+                print("[i] (списки ПЕРЕДАЧИ — " + parsed["caveat"] + ")", flush=True)
+            ck.check(bool(parsed["receive"]),
+                     "их stdout объявляет приём [RECEIVE_*] — это их TCS",
                      f"строк {len(stdout_text.splitlines())}; если пусто — "
                      f"скорее всего указан не тот файл (--their-log)")
         elif their_log_path is not None:
-            ck.check(False, "их stdout подтверждает списки приём/передача",
+            ck.check(False, "их stdout объявляет приём [RECEIVE_*]",
                      f"{their_log_path} не вырос за прогон")
         if trace_text:
             traced = parse_their_trace(trace_text)
@@ -827,8 +966,20 @@ def main() -> int:
             try:
                 ini = parse_their_ini(Path(args.their_ini).read_text(
                     encoding="utf-8", errors="replace"))
-                print(f"[i] их ini: приём {ini['receive'] or '—'}, передача "
-                      f"{ini['transmit'] or '—'}, выключено {len(ini['off'])}",
+                print(f"[i] их ini (форма: {ini['shape'] or 'не распознано'}): "
+                      f"приём {ini['receive'][:8] or '—'}, передача "
+                      f"{ini['transmit'][:8] or '—'}, выключено {len(ini['off'])}",
+                      flush=True)
+                if ini["duplicates"]:
+                    print("[i] в их ini повторные ключи: "
+                          f"{sorted(set(ini['duplicates']))[:6]} — их PTLib 2.0.x "
+                          "склеивает в одно значение, поэтому «побеждает последнее» "
+                          "тут неверно", flush=True)
+                if not ini["shape"]:
+                    print("[i] форму их ini стенд не опознал (ждал секции "
+                          "[RECEIVE_*] или ключи RECEIVE_*=1) — это НЕ «всё "
+                          "выключено», это невыученная форма", flush=True)
+                print("[i] (как у них ограничивать: " + THEIR_LEVERS_NOTE + ")",
                       flush=True)
                 print("[i] (это контекст, не проверка: рецепт codecs — оставить "
                       "G.711+H.261, остальное False; стенд их ini не правит)",

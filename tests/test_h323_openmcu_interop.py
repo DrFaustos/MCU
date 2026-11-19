@@ -421,12 +421,34 @@ TRANSMIT_H264 = 0
 
 def test_their_stdout_parser_groups_receive_and_transmit_by_medium():
     parsed = stand.parse_their_stdout(_THEIR_STDOUT)
-    assert sorted(parsed["kinds"]["receive_sound"]) == ["G.711-alaw 64000",
-                                                        "G.722 64000"]
-    assert parsed["kinds"]["receive_video"] == ["H.261-CIF 352x288"]
+    assert sorted(parsed["receive"]["receive_sound"]) == ["G.711-alaw 64000",
+                                                          "G.722 64000"]
+    assert parsed["receive"]["receive_video"] == ["H.261-CIF 352x288"]
     assert parsed["kinds"]["transmit_sound"] == ["G.711-alaw 64000"]
     assert "H.261-CIF" in parsed["video_tokens"]
     assert parsed["capabilities"] == ["12 entries"]
+
+
+def test_transmit_lists_carry_their_label_and_are_not_our_evidence():
+    """[TRANSMIT_*] на v3.48.0 — декорация: их SIP-код печатает, H.323 не использует.
+
+    Без подписи строка «у них в списке есть H.261» читается как «MCU не хочет нам
+    H.261», чего он не говорил. Доказательством их таблицы является ПРИЁМ
+    ([RECEIVE_*]), поэтому в `receive` списки передачи не попадают.
+    """
+    parsed = stand.parse_their_stdout(_THEIR_STDOUT)
+    assert "receive_video" in parsed["receive"]
+    assert "transmit_video" not in parsed["receive"]
+    assert parsed["caveat"]
+    assert "SIP" in parsed["caveat"] and "не ограничение" in parsed["caveat"]
+
+
+def test_transmit_only_stdout_is_honestly_not_a_their_table():
+    parsed = stand.parse_their_stdout("[TRANSMIT_VIDEO] H.261-CIF\n"
+                                      "[TRANSMIT_SOUND] G.711\n")
+    assert parsed["receive"] == {}
+    assert parsed["transmit"], parsed
+    assert parsed["caveat"]
 
 
 def test_their_stdout_parser_stays_empty_on_unrecognised_markers():
@@ -450,9 +472,67 @@ def test_their_trace_parser_reads_preference_order_and_channels():
 
 def test_their_ini_parser_separates_enabled_from_disabled():
     ini = stand.parse_their_ini(_THEIR_INI)
+    assert ini["shape"] == "prefixed-keys"
     assert ini["receive"] == ["RECEIVE_G711", "RECEIVE_G722"]
     assert ini["transmit"] == ["TRANSMIT_G711", "TRANSMIT_H261"]
     assert sorted(ini["off"]) == ["RECEIVE_H263", "TRANSMIT_H264"]
+
+
+_THEIR_INI_SECTIONS = """
+[Parameters]
+Trace level = 2
+
+[RECEIVE_SOUND]
+G711_U = 1
+G722 = 1
+G729 = 0
+
+[RECEIVE_VIDEO]
+H261_1 = 1
+H263_1 = 0
+"""
+
+
+def test_ini_parser_recognises_section_shape_too():
+    """Их ini может быть секционным ([RECEIVE_SOUND] со списком внутри).
+
+    Форму стенд не знает заранее: различает обе и говорит, какую увидел. Пустой
+    список при неизвестной форме выглядел бы как «у них всё выключено».
+    """
+    ini = stand.parse_their_ini(_THEIR_INI_SECTIONS)
+    assert ini["shape"] == "sections"
+    assert ini["receive"] == ["RECEIVE_SOUND:G711_U", "RECEIVE_SOUND:G722",
+                              "RECEIVE_VIDEO:H261_1"], ini["receive"]
+    assert ini["off"] == ["RECEIVE_SOUND:G729", "RECEIVE_VIDEO:H263_1"]
+
+
+def test_ini_unknown_shape_is_reported_as_unknown_not_as_disabled():
+    ini = stand.parse_their_ini("[Parameters]\nRoom = room101\nTrace level = 2\n")
+    assert ini["shape"] == ""
+    assert ini["receive"] == [] and ini["transmit"] == []
+    assert ini["off"] == []          # «не поняли» ≠ «выключено»
+
+
+def test_ini_duplicate_keys_are_reported_not_resolved_last_wins():
+    """Их PTLib 2.0.x склеивает повторный ключ в одно значение, а не побеждает последний.
+
+    Наивный last-wins прочитал бы отредактированный вручную ini не так, как его
+    прочитает сам OpenMCU, — и разбор ушёл бы искать не туда.
+    """
+    ini = stand.parse_their_ini("[RECEIVE_VIDEO]\nH261_1 = 1\nH261_1 = 0\n")
+    assert ini["duplicates"] == ["H261_1"], ini["duplicates"]
+
+
+def test_levers_note_names_the_right_suspect_for_missing_audio():
+    """«Аудио нет» при включённом ключе — сначала рычаг админки, потом всё остальное.
+
+    У их G.711-рычага в админке есть костыль с обрезкой ulaw/alaw: им можно заглушить
+    терминал собственными руками. Стенд обязан подкинуть эту гипотезу первой, иначе
+    первый же красный прогон уйдёт в разбор нашего согласования.
+    """
+    assert "админк" in stand.THEIR_LEVERS_NOTE
+    assert "ulaw" in stand.THEIR_LEVERS_NOTE
+    assert "существующ" in stand.THEIR_LEVERS_NOTE, "аудио — правкой существующего ключа, не созданием"
 
 
 # --- tshark как арбитр --------------------------------------------------------
