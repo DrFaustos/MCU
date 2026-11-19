@@ -108,6 +108,12 @@ SIP/H.323-движка (в GUI или в `--headless`) оно может под�
   см. §7.
 * Живое обновление: REST-опрос раз в 3 с + **SSE** (`/api/events`) на события
   шины движка (`call.*`, `chat.*`, `layout.*`, `engine.*`).
+* **Страница администратора** `/admin` (в духе OpenMCU-ru `/Status`):
+  цельный серверный HTML со списком SIP/H.323-терминалов — адрес,
+  длительность, согласованные кодеки по направлениям (in — терминал->МСУ,
+  out — МСУ->терминал), mute-состояния и рычаг мута; та же таблица для
+  машин — `GET /api/admin/terminals`, сводка — `GET /api/admin/status`
+  (подробные строки в таблице §3).
 
 Страница — один файл `mcuclient/webui/index.html` (без внешних CDN и сборки),
 работает и из собранного PyInstaller-бинарника (см. `build.py`, `--add-data`).
@@ -138,6 +144,9 @@ GET:
 | `/api/webrtc/sessions` | `{sessions:[...], available:bool}` — живые WebRTC-сессии панели. Каждая сессия: `id`, `state`, `role`, счётчики кадров и **`participant`** — id участника конференции, которому она принадлежит, либо `null` для анонимного offer'а. Поле сознательно **не** взято из `publish_id` релея: у анонима тот равен id сессии (`webrtc-<N>`), и отдать его наружу означало бы показать «участника», которого нет в реестре, — выдворение с таким id вернуло бы штатное `{"ok": false}` (те же пространства имён id, что разведены в `/api/webrtc/offer`). Раньше вместо этого отдавалось поле `remote`, которое не присваивалось ни разу за всю историю модуля: наружу оно уходило вечно пустой строкой, т.е. «адрес неизвестен» выглядело штатным значением. Заперто `tests/test_webrtc_ingest.py` |
 | `/api/web_recording` | статус записи веб-конференции (`{recording, video, audio, frames}`): `video` и `audio` — пути к файлам, пока запись не идёт — оба `null`; `frames` — счётчик записанных кадров. Одиночной клавиши `file` в ответе нет: запись пишет видео и аудио раздельно |
 | `/api/mediasoup` | `{available, stats}` — состояние SFU-sidecar (`null`-статистика, если не поднят) |
+| `/admin` | HTML-страница администратора в духе OpenMCU-ru `/Status`: таблица терминалов (id/имя, адрес, длительность, Audio in/out с частотой, Video in/out с размером, RTP, mute-состояния) + шапка с версией-вариантом (`version_string()`), аптаймом панели и комнатой. Server-rendered, inline CSS, авто-refresh `<meta http-equiv="refresh" content="10">`, без JS и внешних ресурсов (офлайн-стиль); рычаг мута — обычный `form POST` (urlencoded). Данные — те же словари, что у `GET /api/admin/terminals` (одна реализация таблицы для глаз и для машин). Гейтится токеном, как API: страница несёт серверные данные, в отличие от статики индекса. Заперто `tests/test_admin_page.py` |
+| `/api/admin/terminals` | `{terminals:[{id,name,address,protocol,state,duration_s,duration_source,audio_in,audio_in_rate,audio_out,audio_out_rate,audio_codec_source,video_in,video_in_size,video_out,video_out_size,video_codec_source,video_present,rtp_port,muted_audio,muted_video,speaking,rx_kbps,tx_kbps}], version, uptime_s}` — строки терминалов (SIP и H.323 в одном ряду: H.323-вызовы регистрирует `H323Endpoint` через общий реестр движка). Направления: **in** — терминал->МСУ (канал decoder), **out** — МСУ->терминал (encoder); берутся из сырых событий хоста `call.media` (панель — второй подписчик на тот же `H323dClient`), `audio_codec_source`/`video_codec_source`: `host-event` (направления раздельные), `engine` (движок отдаёт ОДИН согласованный кодек — он в обеих колонках) либо `""` (данных нет). `duration_s` — время **в сведении панели** (`duration_source="observed"`: ни движок, ни хост протокольной отметки соединения не отдают, врать числом нельзя); `rtp_port` — движок и хост RTP-порты по терминалам НЕ публикуют (у хоста `port` — сигнальный H.225/1720) — поле всегда `null`, честная пустота вместо выдуманного числа. Синтетические каналы шины (`mix`, `sip-<слот>`) терминалами не являются и в ряд не попадают (заперто `tests/test_admin_page.py`) |
+| `/api/admin/status` | `{version,variant,uptime_s,room,terminals_total,terminals_active,web_participants,h323,counters}` — сводка админ-панели: `version` — полная строка с вариантом (`mcuclient.version_string()`, напр. `0.2.34-h323`), `variant` — вариант протокола, `uptime_s` — аптайм панели (web-сессии), `h323` — `{configured, available, port, socket, note}` (порт хоста — сигнальный), `counters.video_frames` — кадры FrameHub. Панель жива и без H.323-хоста: `configured:false`, `port:0` (деградация заперта `tests/test_admin_page.py`) |
 
 POST (тело — JSON):
 
@@ -176,8 +185,10 @@ POST (тело — JSON):
 | `/api/mediasoup/join` | `{participant}` | войти в комнату SFU-sidecar (mediasoup) |
 | `/api/mediasoup/leave` | `{participant}` | выйти из комнаты SFU; закрывает `WebRtcTransport` на сайдкаре (панель зовёт его и при закрытии вкладки — `sendBeacon`, токен в `?token=`) |
 | `/api/mediasoup/signal` | `{action, participant, ...}` | сигнализация SFU (`createWebRtcTransport`, `connect`, `publish`, `subscribe` и т.п.) |
+| `/api/admin/terminal/mute` | `{id, muted}` | **мут аудио терминала — рычаг, который движок делает по-настоящему**: SIP — pjsua2 `setMute`, H.323 — команды мута у `mcu_h323d` нет, но `h323_audio_bridge` читает флаг `is_muted` до завода PCM в микшер, и заглушенный терминал в микс не попадает. Тело принимает и JSON, и `application/x-www-form-urlencoded` (кнопка страницы работает без JS); нет такого id — 404. Каждый поворот уходит в журнал аудит-строкой `ADMIN:` (заперто `tests/test_admin_page.py`) |
+| `/api/admin/terminal/video` | `{id, direction?, muted}` | видео in/out по терминалу: **честный 501 с полем `reason`** — движок в текущей сборке не перекрывает видеоканал: `mute_participant_video` лишь выставляет флаг `is_video_muted` (его читает только Qt-отрисовка, медиа-путь — никогда), команды у хоста нет. Имитации рычага нет по договору: на отказе не применяется НИЧЕГО. `direction`: `in` (терминал->МСУ, decoder), `out` (МСУ->терминал, encoder), `both`. Реализует движок `apply_video_gate(id, direction, muted)` — рычаг активится сам, перекрывает медиа движок, а не этот слой (заперто в `tests/test_admin_page.py`: честный код отказа с `reason` сейчас и ответ с `ok` под движком с хуком) |
 
-Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500).
+Ошибки: `{"ok": false, "error": "..."}` с HTTP-кодом (400/401/404/409/413/500/501). У отказа «движок не поддерживает» (`501`) в теле есть отдельное машинно-читаемое поле `reason` — вдобавок к человекочитаемому `error`.
 
 Логические поля тела (`enabled`, `save`, `audio`, `video`) разбираются по смыслу, а не приведением строки к истине: `true`, `yes`, `on`, `1` — истина; `false`, `no`, `off`, `0` и пустая строка — ложь; любое другое значение — 400 с причиной, а не молчаливое «стало истина». Панель шлёт JSON-литералы и разницы не видит; строки приходят из curl, shell-переменных и ENV автоматизации — именно у тех путей, которые выключают запись, эфир и демонстрацию экрана.
 

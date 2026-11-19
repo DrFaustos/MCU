@@ -31,9 +31,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from html import escape as _html_escape
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
                     Optional, Tuple, Union)
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .log import get_logger
 from .video_stream import FrameHub
@@ -230,11 +231,19 @@ class EngineDispatcher:
 
 
 class ApiError(Exception):
-    """Ошибка API с HTTP-кодом."""
+    """Ошибка API с HTTP-кодом.
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    ``reason`` — машинно-читаемая причина отказа, уходит в тело ответа
+    отдельным полем (в дополнение к ``error``). Нужна для честных 501:
+    админ-рычаги, которые движок не поддерживает, обязаны отдавать причину,
+    а не только человекочитаемое сообщение (см. :meth:`WebSession.admin_video_gate`).
+    """
+
+    def __init__(self, message: str, status: int = 400,
+                 reason: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
+        self.reason = reason
 
 
 class _EventHub:
@@ -282,6 +291,10 @@ class _EventHub:
 #: каждая попытка создаёт PlainTransport. Значит повтор обязан БЫТЬ и обязан
 #: быть ограниченным по частоте.
 MS_RETRY_INTERVAL = 10.0
+
+#: Интервал автообновления админ-страницы (meta refresh), сек. Как в
+#: OpenMCU-ru: страница перечитывается сама, без JS-каркаса.
+ADMIN_REFRESH_SECONDS = 10
 
 
 class WebSession:
@@ -374,6 +387,24 @@ class WebSession:
         self._ms_rtp_retry_at: float = 0.0
         # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
         self._sip_bridge_service = None
+        # --- админ-страница (в духе OpenMCU /Status) -----------------------
+        # Наблюдаемые таблицы СЛОЯ ПАНЕЛИ: движок ни времени жизни вызова,
+        # ни направлений кодеков не хранит (у H.323-хоста направления есть в
+        # событии, но H323Endpoint их сворачивает в один кодек), поэтому
+        # панель ведёт собственные наблюдатели — ровно как OpenMCU показывает
+        # «свои счётчики приёма». Формулировки честные: duration_source —
+        # "observed" (наблюдение панели, не протокол), направления — из
+        # сырых событий хоста, пока подписка жива.
+        self._admin_started = time.monotonic()
+        self._admin_lock = threading.Lock()
+        #: pid -> monotonic первого наблюдения в confirmed
+        self._admin_first_seen: Dict[int, float] = {}
+        #: pid -> направления медиа из сырых событий хоста
+        #: ({"audio_in": "G.722", "audio_in_rate": 16000, "video_out": "H.261",
+        #:    "video_out_size": "352x288", ...})
+        self._admin_media: Dict[int, Dict[str, Any]] = {}
+        #: подписка на события хоста уже выполнена (повтор не нужен)
+        self._admin_h323_attached = False
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -408,6 +439,20 @@ class WebSession:
                 self.conference.leave(p["id"])
         except Exception:  # noqa: BLE001
             log.debug("Очистка веб-участников с ошибкой", exc_info=True)
+        try:
+            # Колбэк наблюдателя админ-страницы живёт в списке колбэков
+            # клиента хоста, а клиент переживает рестарт панели. Без отписки
+            # закрытая сессия продолжала бы получать события mcu_h323d и
+            # писать в свои словари — та же утечка «колбэк после смерти»,
+            # что закрыта для SSE-подписчиков.
+            if self._admin_h323_attached:
+                client = getattr(self._admin_h323_endpoint(), "client", None)
+                off = getattr(client, "unsubscribe_event", None)
+                if callable(off):
+                    off(self._on_h323_admin_event)
+                self._admin_h323_attached = False
+        except Exception:  # noqa: BLE001
+            log.debug("Отписка админ-наблюдателя с ошибкой", exc_info=True)
         self.detach_frame_listener()
         self._dispatcher.stop()
 
@@ -1391,6 +1436,385 @@ class WebSession:
             raise ApiError("Не указан id сессии")
         return {"ok": self.webrtc.close_session(str(sid))}
 
+    # -- админ-страница: реестр терминалов в духе OpenMCU /Status ----------
+    def admin_uptime(self) -> int:
+        """Аптайм панели (web-сессии), сек. Не аптайм движка: сессия
+        переживает рестарты HTTP-сервера, но создаётся вместе с панелью."""
+        return max(0, int(time.monotonic() - self._admin_started))
+
+    def _admin_h323_endpoint(self) -> Any:
+        """H.323-эндпоинт с поиском по токену или None.
+
+        run.py передаёт панели ``H323Gateway`` (устаревший путь через
+        chan_ooh323), а нативный эндпоинт доезжает до движка через
+        ``set_h323_native`` — читаем оба места. Эндпоинт узнаём по методу
+        ``find_by_token``, а не по типу: тестовые заглушки и будущие
+        реализации тогда работают без импорта реального класса.
+        """
+        for cand in (self._h323, getattr(self._engine, "_h323_native", None)):
+            if cand is not None and callable(getattr(cand, "find_by_token", None)):
+                return cand
+        return None
+
+    def _admin_attach_h323(self) -> None:
+        """Подписаться на СЫРЫЕ события хоста (call.media с направлением).
+
+        Направления («encoder» = МСУ->терминал, «decoder» = терминал->МСУ,
+        см. emit_media_event в tools/h323d/main.cpp) доживает до Python в
+        событии ``call.media``, но :class:`H323Endpoint` их сворачивает в
+        один ``audio_codec`` на оба направления. Модуль эндпоинта я не
+        трогаю — подписываюсь вторым читателем на тот же клиент
+        (``on_event`` поддерживает несколько колбэков), как это уже делает
+        видео-мост. Клиент поднимается в ``endpoint.start()`` — если его
+        ещё нет, подписка повторится при следующем запросе.
+        """
+        if self._admin_h323_attached:
+            return
+        ep = self._admin_h323_endpoint()
+        client = getattr(ep, "client", None)
+        on_event = getattr(client, "on_event", None)
+        if not callable(on_event):
+            return
+        try:
+            on_event(self._on_h323_admin_event)
+            self._admin_h323_attached = True
+            log.debug("Админ-панель: подписка на события хоста mcu_h323d")
+        except Exception:  # noqa: BLE001 — панель не имеет права падать
+            log.debug("Админ-панель: подписка на события хоста не удалась",
+                      exc_info=True)
+
+    def _admin_token_to_pid(self, token: str) -> Optional[int]:
+        ep = self._admin_h323_endpoint()
+        find = getattr(ep, "find_by_token", None)
+        if not callable(find) or not token:
+            return None
+        try:
+            p = find(token)
+        except Exception:  # noqa: BLE001
+            return None
+        pid = getattr(p, "id", None)
+        return pid if isinstance(pid, int) else None
+
+    def _on_h323_admin_event(self, event: Any) -> None:
+        """Наблюдатель направлений медиа: call.media -> строка терминала.
+
+        Вызывается из потока читателя IPC: только словарь под локапом, без
+        движка и без исключений наружу (колбэки клиента общие для всех
+        подписчиков, и чужой подписчик не имеет права видеть мой трейсбек).
+        """
+        try:
+            if isinstance(event, dict):
+                name = str(event.get("event", "") or "")
+                data = event
+            else:
+                name = str(getattr(event, "event", "") or "")
+                data = getattr(event, "fields", None) or {}
+            if name == "call.disconnected":
+                pid = self._admin_token_to_pid(str(data.get("token", "") or ""))
+                if pid is not None:
+                    with self._admin_lock:
+                        self._admin_media.pop(pid, None)
+                        self._admin_first_seen.pop(pid, None)
+                return
+            if name != "call.media":
+                return
+            pid = self._admin_token_to_pid(str(data.get("token", "") or ""))
+            if pid is None:
+                return  # токен ещё не зарегистрирован (или это не наш)
+            codec = str(data.get("codec", "") or "")
+            if not codec:
+                return  # то же правило, что в H323Endpoint: нет данных ≠ кодек пропал
+            kind = str(data.get("kind", "") or "").lower()
+            direction = str(data.get("direction", "") or "").lower()
+            # «decoder» — канал, откуда МСУ БЕРЁТ звук терминала (in);
+            # «encoder» — куда МСУ КЛАДЁТ микс (out). Направление нераспознано
+            # — поля не заполняем: лучше «нет данных», чем угаданное.
+            if direction.startswith("decode"):
+                side = "in"
+            elif direction.startswith("encode"):
+                side = "out"
+            else:
+                return
+            with self._admin_lock:
+                row = self._admin_media.setdefault(pid, {})
+                if kind == "audio":
+                    row["audio_" + side] = codec
+                    try:
+                        rate = int(data.get("rate") or 0)
+                    except (TypeError, ValueError):
+                        rate = 0
+                    if rate:
+                        row["audio_" + side + "_rate"] = rate
+                elif kind == "video":
+                    row["video_" + side] = codec
+                    try:
+                        width = int(data.get("width") or 0)
+                        height = int(data.get("height") or 0)
+                    except (TypeError, ValueError):
+                        width = height = 0
+                    if width and height:
+                        row["video_" + side + "_size"] = "%dx%d" % (width, height)
+        except Exception:  # noqa: BLE001
+            log.debug("Админ-наблюдатель: событие хоста обработано с ошибкой",
+                      exc_info=True)
+
+    def admin_terminals(self) -> List[Dict[str, Any]]:
+        """Ряды терминалов для админ-страницы (схема стабильна, ключи ниже).
+
+        Строится из ОБЩЕГО реестра движка (в нём SIP и H.323 в одном ряду:
+        H.323-вызовы регистрирует ``H323Endpoint`` через ``engine.registry``)
+        плюс собственные наблюдатели панели. Синтетические каналы шины медиа
+        (``mix``, ``sip-<слот>``) терминалами НЕ являются и в реестре не
+        живут — в таблицу они попасть не могут по построению.
+
+        Ключи ряда (заперто ``tests/test_admin_page.py``; их же рисует
+        HTML ``GET /admin``):
+
+        ``id``              — id участника в общем реестре движка;
+        ``name``            — алиас (для ``h323:``) или user (для ``sip:``)
+                              без схемы; при пустом URI — «#id»;
+        ``address``         — remote URI как есть (``h323:ALIAS``/``sip:u@h``);
+        ``protocol``        — ``h323`` | ``sip`` | ``other``;
+        ``state``           — значение CallState (``incoming``/``confirmed``/…);
+        ``duration_s``      — длительность в СВЕДЕНИИ ПАНЕЛИ (int, с первой
+                              минуты наблюдения в confirmed) или None, пока
+                              терминал не подтверждён;
+        ``duration_source`` — ``observed`` (панель видит вызов с момента
+                              первого подтверждения: ни движок, ни хост
+                              протокольной отметки соединения не отдают)
+                              или ``""`` — не считалась;
+        ``audio_in`` / ``audio_out`` — согласованные аудио-кодеки по
+                              направлениям: in = терминал->МСУ (decoder),
+                              out = МСУ->терминал (encoder);
+        ``audio_in_rate`` / ``audio_out_rate`` — частота канала, Гц,
+                              None — не сообщалась;
+        ``audio_codec_source`` — ``host-event`` (из ``call.media`` хоста,
+                              направления раздельные) | ``engine`` (движок
+                              отдаёт ОДИН согласованный кодек — он в обеих
+                              колонках) | ``""`` — данных нет;
+        ``video_in`` / ``video_out`` — видеокодеки по направлениям;
+        ``video_in_size`` / ``video_out_size`` — «WxH» или None;
+        ``video_codec_source`` — та же семантика, что у аудио;
+        ``video_present``   — есть ли видеоканал хотя бы в одну сторону;
+        ``rtp_port``        — RTP-порт терминала: движок и хост его НЕ
+                              публикуют (у хоста ``port`` — сигнальный
+                              H.225/1720) — всегда None, честная пустота
+                              вместо выдуманного числа;
+        ``muted_audio``     — мут аудио (рычаг поддержан: SIP — pjsua2
+                              setMute, H.323 — h323_audio_bridge режет PCM
+                              до микса по этому флагу);
+        ``muted_video``     — ФЛАГ видео-мута движка: медиа-путь его не
+                              читает, рабочий рычаг — 501 (см.
+                              :meth:`admin_video_gate`);
+        ``speaking``        — признак голосовой активности;
+        ``rx_kbps`` / ``tx_kbps`` — битрейт или None (в текущей сборке
+                              не измеряется — 0 означало бы «медиа нет»).
+        """
+        self._admin_attach_h323()
+
+        def _snap() -> List[Dict[str, Any]]:
+            return [_participant_to_dict(p)
+                    for p in _participants(getattr(self._engine, "room", None))]
+
+        snap = self._call(_snap)
+        now = time.monotonic()
+        rows: List[Dict[str, Any]] = []
+        live = {p.get("id") for p in snap}
+        with self._admin_lock:
+            for pid in list(self._admin_first_seen):
+                if pid not in live:
+                    self._admin_first_seen.pop(pid, None)
+            for pid in list(self._admin_media):
+                if pid not in live:
+                    self._admin_media.pop(pid, None)
+        for p in snap:
+            pid = p.get("id")
+            uri = str(p.get("uri") or "")
+            protocol = ("h323" if uri.startswith("h323")
+                        else "sip" if uri.startswith("sip") else "other")
+            name = uri.split(":", 1)[1] if ":" in uri else uri
+            if not name:
+                name = "#%s" % pid
+            confirmed = p.get("state") == "confirmed"
+            duration_s: Optional[int] = None
+            duration_source = ""
+            media: Dict[str, Any] = {}
+            if isinstance(pid, int):
+                with self._admin_lock:
+                    if confirmed and pid not in self._admin_first_seen:
+                        self._admin_first_seen[pid] = now
+                    ts = self._admin_first_seen.get(pid)
+                    media = dict(self._admin_media.get(pid, {}))
+                if confirmed and ts is not None:
+                    duration_s = max(0, int(now - ts))
+                    duration_source = "observed"
+            engine_audio = p.get("audio_codec") or None
+            engine_video = p.get("video_codec") or None
+            audio_in = media.get("audio_in") or engine_audio
+            audio_out = media.get("audio_out") or engine_audio
+            video_in = media.get("video_in") or engine_video
+            video_out = media.get("video_out") or engine_video
+            a_source = ("host-event" if ("audio_in" in media or "audio_out" in media)
+                        else "engine" if engine_audio else "")
+            v_source = ("host-event" if ("video_in" in media or "video_out" in media)
+                        else "engine" if engine_video else "")
+            rows.append({
+                "id": pid,
+                "name": name,
+                "address": uri,
+                "protocol": protocol,
+                "state": str(p.get("state") or ""),
+                "duration_s": duration_s,
+                "duration_source": duration_source,
+                "audio_in": audio_in,
+                "audio_in_rate": media.get("audio_in_rate"),
+                "audio_out": audio_out,
+                "audio_out_rate": media.get("audio_out_rate"),
+                "audio_codec_source": a_source,
+                "video_in": video_in,
+                "video_in_size": media.get("video_in_size"),
+                "video_out": video_out,
+                "video_out_size": media.get("video_out_size"),
+                "video_codec_source": v_source,
+                "video_present": bool(video_in or video_out),
+                "rtp_port": None,
+                "muted_audio": bool(p.get("muted")),
+                "muted_video": bool(p.get("video_muted")),
+                "speaking": bool(p.get("speaking")),
+                "rx_kbps": p.get("rx_kbps"),
+                "tx_kbps": p.get("tx_kbps"),
+            })
+        rows.sort(key=lambda r: (str(r["id"])))
+        return rows
+
+    def admin_summary(self) -> Dict[str, Any]:
+        """Сводка для ``GET /api/admin/status``.
+
+        Ключи ответа (стабильны): ``version`` (полная строка с вариантом,
+        ``mcuclient.version_string()``), ``variant`` (например ``h323``),
+        ``uptime_s`` (аптайм панели), ``room`` (имя комнаты движка),
+        ``terminals_total`` / ``terminals_active`` (терминалы реестра:
+        все / в разговоре), ``web_participants`` (веб-участники панели),
+        ``h323`` ({configured, available, port, socket, note} — порт хоста
+        это сигнальный H.225, не RTP), ``counters`` ({video_frames} — кадры
+        FrameHub панели).
+        """
+        terminals = self.admin_terminals()
+        room = self._call(lambda: str(
+            getattr(getattr(self._engine, "room", None), "name", "") or ""))
+        try:
+            from . import PROTOCOL_VARIANT
+            variant = str(PROTOCOL_VARIANT)
+        except Exception:  # noqa: BLE001
+            variant = ""
+        ep = self._admin_h323_endpoint()
+        h323_info = {
+            "configured": ep is not None,
+            "available": bool(_prop(ep, "available", False)),
+            "port": int(_prop(ep, "port", 0) or 0),
+            "socket": str(_prop(ep, "socket_path", "") or ""),
+            "note": ("порт хоста — сигнальный H.225 (1720); "
+                     "RTP-порты по терминалам хост не публикует"),
+        }
+        return {
+            "version": _version(),
+            "variant": variant,
+            "uptime_s": self.admin_uptime(),
+            "room": room,
+            "terminals_total": len(terminals),
+            "terminals_active": sum(
+                1 for t in terminals if t["state"] == "confirmed"),
+            "web_participants": self.conference.count(),
+            "h323": h323_info,
+            "counters": {"video_frames": int(self.frame_hub.frames)},
+        }
+
+    def admin_page(self, token: str = "") -> str:
+        """HTML ``GET /admin``: та же таблица, что ``admin_terminals``.
+
+        Без JS и внешних ресурсов: inline CSS, авто-refresh meta-тегом
+        (:data:`ADMIN_REFRESH_SECONDS`), рычаги — обычные form POST
+        (движок понимает и urlencoded тело именно у админ-роутов).
+        """
+        summary = self.admin_summary()
+        return render_admin_page(summary=summary,
+                                 terminals=self.admin_terminals(),
+                                 token=token)
+
+    def admin_audio_mute(self, pid: Any, muted: bool) -> Dict[str, Any]:
+        """Мут аудио терминала — рычаг, который движок ДЕЙСТВИТЕЛЬНО делает.
+
+        SIP: pjsua2 ``setMute`` на живом вызове. H.323: команды мута у
+        ``mcu_h323d`` нет, но ``h323_audio_bridge`` читает флаг
+        ``is_muted`` до завода PCM в микшер — заглушенный терминал в микс
+        не попадает. Оба пути реальные; каждый поворот уходит в журнал
+        аудит-строкой с префиксом ``ADMIN``.
+        """
+        pid_int = self._require_pid(pid)
+        apply_mute = getattr(self._engine, "mute_participant", None)
+        if not callable(apply_mute):
+            reason = "у движка нет метода mute_participant"
+            log.warning("ADMIN: отказ терминалу %s в муте аудио (501): %s",
+                        pid_int, reason)
+            raise ApiError("Движок не поддерживает мут аудио", status=501,
+                           reason=reason)
+
+        def _apply() -> Optional[Tuple[bool, str]]:
+            for p in _participants(getattr(self._engine, "room", None)):
+                if getattr(p, "id", None) == pid_int:
+                    apply_mute(pid_int, bool(muted))
+                    return bool(getattr(p, "is_muted", False)), str(
+                        getattr(p, "remote_uri", "") or "")
+            return None
+
+        applied = self._call(_apply)
+        if applied is None:
+            raise ApiError("Терминала %s нет в комнате" % pid_int, status=404)
+        state, uri = applied
+        log.info("ADMIN: терминал %s (%s): мут аудио := %s (web-панель)",
+                 pid_int, uri or "?", "включён" if state else "снят")
+        return {"ok": True, "id": pid_int, "audio_muted": state,
+                "participant": uri}
+
+    def admin_video_gate(self, pid: Any, direction: str = "both",
+                         muted: Optional[bool] = None) -> Dict[str, Any]:
+        """Видео-рычаг in/out по терминалу — честный ответ, без имитации.
+
+        Движок в текущей сборке НЕ умеет перекрывать видеоканал
+        терминала: ``mute_participant_video`` лишь выставляет флаг
+        ``is_video_muted`` (его читает только Qt-отрисовка, медиа-путь не
+        читает никогда — проверено поиском по кодовой базе), а у хоста
+        ``mcu_h323d`` такой команды нет. Поэтому без capability-хука
+        движка рычаг отвечает 501 с полем ``reason``; реализует движок
+        ``apply_video_gate(id, direction, muted)`` — рычаг включится сам,
+        логику перекрытия делает движок, а не этот слой.
+        """
+        pid_int = self._require_pid(pid)
+        direction = str(direction or "both").strip().lower()
+        if direction not in ("in", "out", "both"):
+            raise ApiError("direction должен быть in|out|both")
+        if muted is None:
+            raise ApiError("Укажите muted (true/false)")
+        gate = getattr(self._engine, "apply_video_gate", None)
+        if callable(gate):
+            ok = self._call(lambda: bool(gate(pid_int, direction, bool(muted))))
+            if not ok:
+                raise ApiError(
+                    "Движок не применил видео-рычаг для %s" % pid_int,
+                    status=409)
+            log.info("ADMIN: терминал %s: видео %s := %s (web-панель)",
+                     pid_int, direction, "заглушено" if muted else "открыто")
+            return {"ok": True, "id": pid_int, "direction": direction,
+                    "video_muted": bool(muted)}
+        reason = ("движок не перекрывает видеоканал по терминалу: "
+                  "mute_participant_video только выставляет флаг, который "
+                  "медиа-путь не читает, и у хоста mcu_h323d такой команды "
+                  "нет; рычаг активен после реализации движком "
+                  "apply_video_gate(id, direction, muted)")
+        log.warning("ADMIN: отказ терминалу %s в видео-рычаге (501): %s",
+                    pid_int, reason)
+        raise ApiError(reason, status=501, reason=reason)
+
     # -- внутреннее --------------------------------------------------------
     def _require_pid(self, pid: Any) -> int:
         try:
@@ -1538,6 +1962,147 @@ def _jsonable(value: Any) -> Any:
         return str(value)
 
 
+# --- админ-страница: HTML для глаз (OpenMCU-ru /Status, но своя) ------------
+
+_ADMIN_CSS = """
+body { background:#14171c; color:#d8dee6; font:14px/1.45 system-ui,sans-serif;
+       margin:1.2rem; }
+h1 { font-size:1.15rem; margin:0 0 .3rem; }
+.head { color:#8ea0b5; margin-bottom:.8rem; }
+.head b { color:#d8dee6; }
+table { border-collapse:collapse; width:100%; }
+th,td { border:1px solid #2c333d; padding:.32rem .5rem; text-align:left;
+        vertical-align:top; white-space:nowrap; }
+th { background:#1d222a; font-weight:600; }
+tr.confirmed td { }
+tr.incoming  td { color:#9aa6b4; }
+.muted { color:#e5b04c; }
+.codec { color:#9fd08a; }
+button { background:#263041; color:#d8dee6; border:1px solid #3a4657;
+         border-radius:4px; padding:.15rem .5rem; cursor:pointer; }
+form { margin:0; display:inline; }
+.foot { color:#77869a; margin-top:.8rem; font-size:.85rem; }
+.foot div { margin-top:.15rem; }
+"""
+
+
+def _fmt_duration(seconds: Optional[float]) -> str:
+    """Длительность как в OpenMCU: MM:SS или H:MM:SS; None — длинное тире."""
+    if seconds is None:
+        return "—"
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return "%d:%02d:%02d" % (hours, minutes, secs)
+    return "%02d:%02d" % (minutes, secs)
+
+
+def _admin_codec_cell(codec: Any, extra: Any = None) -> str:
+    """Ячейка кодека: «G.722-64k@16000Hz» / «H.261@352x288» или тире."""
+    if not codec:
+        return "—"
+    esc = _html_escape(str(codec))
+    if extra:
+        esc += "@%s" % _html_escape(str(extra))
+    return '<span class="codec">%s</span>' % esc
+
+
+def render_admin_page(*, summary: Dict[str, Any],
+                      terminals: List[Dict[str, Any]],
+                      token: str = "") -> str:
+    """Собрать HTML админ-страницы. Без JS, без внешних ресурсов, офлайн.
+
+    Данные — ровно те же словари, что отдают ``/api/admin/*`` (одна
+    реализация таблицы для глаз и для машин). Все значения экранируются:
+    алиасы терминалов приходят из сети.
+    """
+    query = ("?token=" + quote(token, safe="")) if token else ""
+    h323 = summary.get("h323") or {}
+    rows = []
+    for t in terminals:
+        pid = t.get("id")
+        muted = bool(t.get("muted_audio"))
+        state = str(t.get("state") or "")
+        mute_cell = (
+            '<form method="post" action="/api/admin/terminal/mute%s">'
+            '<input type="hidden" name="id" value="%s">'
+            '<input type="hidden" name="muted" value="%s">'
+            '<button type="submit">%s</button></form>'
+            % (_html_escape(query),
+               _html_escape(str(pid)),
+               "0" if muted else "1",
+               "снять" if muted else "заглушить"))
+        rows.append(
+            '<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td class="%s">%s%s</td></tr>'
+            % (
+                _html_escape(state),
+                _html_escape(str(pid)),
+                _html_escape(str(t.get("name") or "")),
+                _html_escape(str(t.get("address") or "")) or "—",
+                _html_escape(_fmt_duration(t.get("duration_s"))),
+                _admin_codec_cell(t.get("audio_in"), t.get("audio_in_rate")),
+                _admin_codec_cell(t.get("audio_out"), t.get("audio_out_rate")),
+                _admin_codec_cell(t.get("video_in"), t.get("video_in_size")),
+                _admin_codec_cell(t.get("video_out"), t.get("video_out_size")),
+                _html_escape(str(t.get("rtp_port") or "—")),
+                "muted" if (muted or t.get("muted_video")) else "",
+                ("аудио выкл" if muted else "")
+                + (" видео-флаг" if t.get("muted_video") else ""),
+                mute_cell,
+            ))
+    if not rows:
+        rows.append('<tr><td colspan="11">Терминалов нет: позвоните на МСУ '
+                    "(H.323 на порт %s, SIP — как обычно) или подождите "
+                    "входящий.</td></tr>"
+                    % _html_escape(str(h323.get("port") or "?")))
+    uptime = _fmt_duration(summary.get("uptime_s"))
+    head_bits = [
+        "версия <b>%s</b>" % _html_escape(str(summary.get("version") or "?")),
+        "аптайм панели <b>%s</b>" % _html_escape(uptime),
+        "комната <b>%s</b>" % (_html_escape(str(summary.get("room") or "")) or "—"),
+        "терминалов <b>%s</b> (в разговоре <b>%s</b>)" % (
+            summary.get("terminals_total", 0),
+            summary.get("terminals_active", 0)),
+    ]
+    if h323.get("configured"):
+        head_bits.append(
+            "H.323: %s, порт <b>%s</b>" % (
+                "слушает" if h323.get("available") else "не готов",
+                _html_escape(str(h323.get("port") or "?"))))
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="ru"><head><meta charset="utf-8">'
+        '<meta http-equiv="refresh" content="%d">'
+        "<title>МСУ — терминалы</title>"
+        "<style>%s</style></head><body>"
+        "<h1>Пульт МСУ — терминалы (как /Status в OpenMCU)</h1>"
+        '<div class="head">%s</div>'
+        "<table><tr><th>ID</th><th>Имя</th><th>Адрес</th><th>Длит.</th>"
+        "<th>Audio&nbsp;in</th><th>Audio&nbsp;out</th>"
+        "<th>Video&nbsp;in</th><th>Video&nbsp;out</th><th>RTP</th>"
+        "<th>Mute</th><th>Рычаг</th></tr>"
+        "%s</table>"
+        '<div class="foot">'
+        "<div>Направления: <b>in</b> — терминал-&gt;МСУ (decoder), "
+        "<b>out</b> — МСУ-&gt;терминал (encoder); источник — события хоста "
+        "call.media, при их отсутствии — согласованный кодек движка в обе "
+        "колонки.</div>"
+        "<div>Длительность — время в сведении панели (наблюдение с первого "
+        "подтверждения), протокольных отметок движок не отдаёт.</div>"
+        "<div>RTP-порты по терминалам движок/хост не публикует — колонка "
+        "честно пустая (rtp_port=null в JSON).</div>"
+        "<div>Видео-рычаг in/out: 501 без поддержки движком (apply_video_gate); "
+        "имитации нет — «флаг видео-мута» показывается как флаг.</div>"
+        "</div>"
+        "</body></html>\n"
+        % (ADMIN_REFRESH_SECONDS, _ADMIN_CSS, " · ".join(head_bits),
+           "\n".join(rows))
+    )
+
+
 # --- HTTP ------------------------------------------------------------------
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1574,8 +2139,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error_json(self, message: str, status: int) -> None:
-        self._send_json({"ok": False, "error": message}, status)
+    def _send_error_json(self, message: str, status: int,
+                         reason: Optional[str] = None) -> None:
+        body: Dict[str, Any] = {"ok": False, "error": message}
+        if reason:
+            body["reason"] = reason
+        self._send_json(body, status)
 
     def _read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -1591,6 +2160,24 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ApiError("Тело запроса должно быть объектом JSON")
         return data
+
+    def _read_body(self) -> Dict[str, Any]:
+        """Тело POST: JSON или urlencoded-форма.
+
+        Форму понимают только админ-роуты: там она нужна, чтобы рычаг
+        дёргался ОБЫЧНОЙ кнопкой страницы (form POST) без единой строки JS.
+        Остальные роуты форма не трогает — прежний JSON-договор в силе.
+        """
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if "application/x-www-form-urlencoded" in ctype:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            if length > 1_000_000:
+                raise ApiError("Тело запроса слишком велико", status=413)
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            return {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+        return self._read_json()
 
     def _serve_static(self, rel: str) -> None:
         # Защита от выхода за пределы каталога webui.
@@ -1608,6 +2195,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _MIME.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_admin_page(self) -> None:
+        """GET /admin — HTML-страница терминалов (авто-refresh, без JS)."""
+        qs = parse_qs(urlparse(self.path).query)
+        token = (qs.get("token") or [""])[0]
+        try:
+            body = self.session.admin_page(token=token).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001 — 500 вместо обрыва соединения
+            log.exception("Админ-страница не отрендерилась")
+            self._send_error_json(f"Страница не отрендерилась: {exc}", 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1632,6 +2236,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._handle_api_get(path)
             return
+        if path == "/admin":
+            # Серверный HTML несёт данные — гейтится как API, а не как
+            # статика индекса (индекс — пустой каркас, страница — сводка).
+            if not self._authorized():
+                self._send_error_json("Требуется авторизация", 401)
+                return
+            self._serve_admin_page()
+            return
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         self._serve_static(rel)
 
@@ -1644,11 +2256,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error_json("Требуется авторизация", 401)
             return
         try:
-            data = self._read_json()
+            if path.startswith("/api/admin/"):
+                data = self._read_body()
+            else:
+                data = self._read_json()
             result = self._handle_api_post(path, data)
             self._send_json(result)
         except ApiError as exc:
-            self._send_error_json(str(exc), exc.status)
+            self._send_error_json(str(exc), exc.status,
+                                  getattr(exc, "reason", None))
         except Exception as exc:  # noqa: BLE001 — API не должно ронять сервер
             log.exception("Ошибка API %s", path)
             self._send_error_json(f"Внутренняя ошибка: {exc}", 500)
@@ -1688,6 +2304,12 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/webrtc/sessions":
                 self._send_json({"sessions": s.webrtc_sessions(),
                                  "available": s.webrtc.available})
+            elif path == "/api/admin/terminals":
+                self._send_json({"terminals": s.admin_terminals(),
+                                 "version": _version(),
+                                 "uptime_s": s.admin_uptime()})
+            elif path == "/api/admin/status":
+                self._send_json(s.admin_summary())
             else:
                 self._send_error_json("Не найдено", 404)
         except ApiError as exc:
@@ -1775,6 +2397,19 @@ class _Handler(BaseHTTPRequestHandler):
             return s.conference_media(str(data.get("id", "")),
                                       video=_opt_bool(data.get("video")),
                                       audio=_opt_bool(data.get("audio")))
+        # --- админ-рычаги: ровно там, где движок реально поддерживает -----
+        if path == "/api/admin/terminal/mute":
+            muted = _opt_bool(data.get("muted"))
+            if muted is None:
+                raise ApiError("Укажите muted (true/false)")
+            return s.admin_audio_mute(data.get("id"), muted)
+        if path == "/api/admin/terminal/video":
+            # direction: in (терминал->МСУ, decoder) | out (МСУ->терминал,
+            # encoder) | both. Ответ 501 с reason, пока у движка нет
+            # apply_video_gate — имитации рычага здесь нет и не будет.
+            return s.admin_video_gate(data.get("id"),
+                                      str(data.get("direction", "both")),
+                                      _opt_bool(data.get("muted")))
         raise ApiError("Не найдено", status=404)
 
     def _serve_frame(self, as_jpeg: bool) -> None:
