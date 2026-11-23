@@ -1,0 +1,21 @@
+[Nov 23 19:47:12] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+  == Spawn extension (testbed, 6001, 1) exited non-zero on 'PJSIP/echo-anon-00000002'
+[Nov 23 19:48:13] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+  == Spawn extension (testbed, 6001, 1) exited non-zero on 'PJSIP/echo-anon-00000004'
+[Nov 23 19:48:40] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+[Nov 23 19:49:02] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+  == Spawn extension (testbed, 6001, 1) exited non-zero on 'PJSIP/echo-anon-00000008'
+[Nov 23 19:49:39] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+  == Spawn extension (testbed, 6001, 1) exited non-zero on 'PJSIP/echo-anon-0000000a'
+[Nov 23 19:50:13] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+[Nov 23 19:50:14] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+[Nov 23 19:50:15] WARNING[30]: pjproject: <?>: 	       sip_transport.c Dropping 108 bytes packet from UDP 10.222.8.30:15092 : PJSIP syntax error exception when parsing '' header on line 2 col 1: PJSIP syntax error exception when parsing '01234567890123456789012345678901234567890123456789012345678901234567890' header on line 3 col 0
+
+  == Spawn extension (testbed, 6001, 1) exited non-zero on 'PJSIP/echo-anon-0000000c'

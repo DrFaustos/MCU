@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- Звонок в зал 6001 ЧЕРЕЗ Asterisk с НАСТОЯЩЕЙ RTP-медией (доказательство
+     аудио-потока для interop-прогона 2026-11-23; softlab).
+
+     Чем отличается от uac_mcu_via_asterisk.xml: там медиа нет вовсе — вызов
+     стоит в CONFIRMED, но по RTP не летит ни байта, и «аудио-поток» на таком
+     сценарии не доказывается вообще. Здесь после ACK шлём 150 пакетов PCMU по
+     20 мс (3 с) и держим вызов 5 с: pcap-сайдка МСУ обязана увидеть RTP
+     в обе стороны (asterisk<->МСУ) раньше, чем прилетит BYE.
+
+     offer — PCMU только: это Н И Ж Н И Й общий кодек стенда (у МСУ ответ
+     ушёл в OPUS/48000 при offer без OPUS — отдельное наблюдение в отчёте;
+     Asterisk при этом честно мостит транскодером). -->
+<scenario name="uac-mcu-rtp-6001">
+  <send retrans="500">
+    <![CDATA[
+      INVITE sip:6001@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-1;rport
+      From: "RTP Terminal" <sip:rtpterm@[local_ip]:[local_port]>;tag=1
+      To: <sip:6001@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=sipp 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-15
+    ]]>
+  </send>
+
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+  <!-- sdp="remote_sdp": без метки sipp не запоминает media-адресата и шлёт
+       0 RTP-пакетов при media="true" («Total RTP pckts sent 0» — живой замер). -->
+  <recv response="200" rtd="true" rta="true" sdp="remote_sdp"/>
+
+  <!-- 150 × 20 мс = 3 с RTP. media="true" без CDATA: sipp синтезирует RTP из
+       кодека, согласованного SDP (PCMU), адресат — media-порт из 200 OK
+       (Asterisk), дальше мост на канал МСУ. -->
+  <!-- 150 × 20 мс = 3 с RTP. Формат media-CDATA для sipp 3.8-TLS-PCAP: парсер
+       этого билда требует SIP-подобную первую строку даже в медиа-сехах
+       («can not use a keyword for the METHOD» на чистый payload — живой замер,
+       medmin.xml рядом), payload — ниже пустой строки. Адресат — media-порт
+       из 200 OK (Asterisk), дальше мост на канал МСУ. -->
+  <send media="true" num="150" interval="0.02"><![CDATA[
+INFO sip:mcu@10.222.8.3 SIP/2.0
+
+01234567890123456789012345678901234567890123456789012345678901234567890
+]]></send>
+
+  <pause milliseconds="2000"/>
+
+  <send>
+    <![CDATA[
+      BYE sip:6001@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/UDP [local_ip]:[local_port];branch=z9hG4bK-2;rport
+      From: "RTP Terminal" <sip:rtpterm@[local_ip]:[local_port]>;tag=1
+      To: <sip:6001@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:sipp@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <recv response="200" cr="true"/>
+</scenario>

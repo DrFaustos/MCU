@@ -1,0 +1,14 @@
+19:42:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:16 INFO    mcuclient.sip: Авто-ответ на вызов от "Polycom Test" <sip:polycom@10.222.8.2>
+19:42:16 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:42:16 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:42:16 INFO    mcuclient.call: Вызов 1: состояние CONNECTING
+19:42:16 INFO    mcuclient.call: Вызов принят: "Polycom Test" <sip:polycom@10.222.8.2>
+19:42:16 INFO    mcuclient.call: Вызов 1: состояние CONFIRMED
+19:42:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:19 INFO    mcuclient.call: Вызов 1: состояние DISCONNECTED
+19:42:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:42:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False

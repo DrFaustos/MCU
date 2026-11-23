@@ -1,0 +1,23 @@
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.222.8.2:15080;rport=15080;received=10.222.8.2;branch=z9hG4bKPj36a621d7-2e89-412f-8b20-8a9403996cec
+Call-ID: fe3f072c-5ff0-4cd7-b3c0-079b0c843c45
+From: "Anonymous" <sip:anonymous@anonymous.invalid>;tag=741d9b88-9276-4b97-a309-5c4e3d9e2f5d
+To: <sip:6001@10.222.8.4;ob>;tag=da14b6ad-f714-4412-a589-76cc79efa8d9
+CSeq: 31917 INVITE
+Contact: <sip:6001@10.222.8.4:5060;ob>;+sip.ice
+Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
+Supported: replaces, 100rel, timer, siprec, norefersub
+Session-Expires: 1800;refresher=uac
+Require: timer
+Content-Type: application/sdp
+Content-Length:   310
+
+v=0
+o=- 4004452434 4004452435 IN IP4 10.222.8.4
+s=pjmedia
+b=AS:117
+t=0 0
+a=X-nat:0
+m=audio 4035 RTP/AVP 0 101
+c=IN IP4 10.222.8.4
+b=TIAS:96000
