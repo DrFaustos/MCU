@@ -757,14 +757,19 @@ def test_set_capture_device_fails_when_all_paths_raise():
             self.modes.append(mode)
             raise RuntimeError("PJMEDIA_EAUD_SYSERR")
 
-    mgr = SickMgr()
+    # setSndDevMode(1) теперь тоже в цепочке (отсрочка) — SickMgr валит и его,
+    # иначе тест проверял бы не «все пути мертвы», а отсрочку.
+    class SickerMgr(SickMgr):
+        audioDevUpdateConfig = None
+
+    mgr = SickerMgr()
     orig_log = media_devices.log
     media_devices.log = log
     try:
         assert _mgr_with(mgr).set_capture_device(5) is False
     finally:
         media_devices.log = orig_log
-    assert mgr.updates == 1 and mgr.modes == [0]
+    assert mgr.modes == [0, 1]
     assert any("Ни один путь перезапуска" in m for m in msgs)
 
 
@@ -897,3 +902,58 @@ def test_pa_descriptions_empty_without_utils():
     finally:
         media_devices.shutil.which = orig_which
         media_devices._run = orig_run
+
+
+def test_set_capture_device_deferred_when_immediate_fails(tmp_path=None):
+    # Живой док v0.3.6: немедленный setSndDevMode(0) может отказать, когда
+    # устройство занято/закрыто; setSndDevMode(1) (NO_IMMEDIATE_OPEN) при
+    # этом честно переконфигурирует на следующее открытие — успех, но в
+    # логе обязано быть слово «отсрочка» и причина немедленного отказа.
+    msgs = []
+
+    def _rec(fmt, *a, **k):
+        msgs.append(fmt % a if a else fmt)
+
+    log = type("L", (), {"warning": staticmethod(_rec),
+                         "info": staticmethod(_rec),
+                         "debug": staticmethod(_rec)})()
+
+    class BusyNowMgr(_FakeMgr):
+        audioDevUpdateConfig = None
+
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+            if mode == 0:
+                exc = RuntimeError("")
+                exc.title = "pjsua_set_snd_dev2(&param)"
+                exc.reason = "Sound device is busy (PJMEDIA_EAUD_BUSY)"
+                raise exc
+
+    mgr = BusyNowMgr()
+    orig_log = media_devices.log
+    media_devices.log = log
+    try:
+        assert _mgr_with(mgr).set_capture_device(11) is True
+    finally:
+        media_devices.log = orig_log
+    assert mgr.modes == [0, 1]
+    assert any("отсрочка" in m for m in msgs)
+    assert any("PJMEDIA_EAUD_BUSY" in m for m in msgs)
+
+
+def test_exc_brief_survives_empty_swig_str():
+    # pjsua2.Error из SWIG: str() пустой — _exc_brief обязан дотянуться до
+    # title/reason, иначе лог дока снова покажет «не вышел: » и пустоту.
+    class _SwigErr(Exception):
+        def __str__(self):
+            return ""
+        title = "pjsua_set_snd_dev2(&param)"
+        reason = "Unable to find default audio device (PJMEDIA_EAUD_NODEFDEV)"
+
+    text = media_devices._exc_brief(_SwigErr())
+    assert "pjsua_set_snd_dev2" in text
+    assert "PJMEDIA_EAUD_NODEFDEV" in text
