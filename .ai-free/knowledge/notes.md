@@ -806,7 +806,7 @@ shellcheck в нём не вызывается (на машине прогона
     → остаётся камерой, `""` → не камера. Постатейный разбор в
     `_v4l2_device_name`, `_pactl_sources`, `_arecord_cards` → `(out or
     "")`, иначе `None` дал бы `AttributeError` вместо fallback.
-  - **Страж.** `tests/test_media_devices.py` (31): 5 кейсов,
+  - **Страж.** `tests/test_media_devices.py` (36): 5 кейсов,
     включая сквозной «занятая камера остаётся в списке». RED на HEAD:
     4 из 5.
   - **Грабли проверки этого репозитория.** Итог pytest нельзя читать из

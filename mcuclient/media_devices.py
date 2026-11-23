@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import platform
@@ -30,7 +31,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .log import get_logger
 
@@ -207,6 +208,9 @@ def _pactl_sources() -> List[DeviceInfo]:
     if not shutil.which("pactl"):
         return mics
     out = _run(["pactl", "list", "short", "sources"])
+    # NAME из short-формы — технический идентификатор; человеку показываем
+    # description из длинной формы (там же, где системные настройки).
+    descs = _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
     for line in (out or "").splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -215,8 +219,123 @@ def _pactl_sources() -> List[DeviceInfo]:
         # *.monitor — это петля вывода, не микрофон.
         if name.endswith(".monitor"):
             continue
-        mics.append(DeviceInfo(id=src_id, name=name, kind="microphone", driver="pulse"))
+        human = descs.get(name) or name
+        if _is_service_audio_name(name):
+            human = f"{human} (служебное)"
+        mics.append(DeviceInfo(id=src_id, name=human, kind="microphone", driver="pulse"))
     return mics
+
+
+def _parse_pactl_sources_long(text: str) -> Dict[str, str]:
+    """Разобрать ``pactl list sources`` (длинная форма): NAME -> description.
+
+    Приоритет — свойство ``device.description`` (то же видит пользователь в
+    системных настройках), затем поле ``Description:``. Источник без описания
+    в карту не попадает — вызывающийся честно откатится на сырое NAME.
+    """
+    result: Dict[str, str] = {}
+    name = field_desc = prop_desc = ""
+
+    def flush() -> None:
+        if name:
+            human = prop_desc or field_desc
+            if human and human != name:
+                result[name] = human
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("Source #"):
+            flush()
+            name = field_desc = prop_desc = ""
+        elif s.startswith("Name:"):
+            name = s.split(":", 1)[1].strip()
+        elif s.startswith("Description:"):
+            field_desc = s.split(":", 1)[1].strip()
+        elif s.startswith("device.description"):
+            prop_desc = s.split("=", 1)[1].strip().strip('"')
+    flush()
+    return result
+
+
+def _parse_pw_dump_sources(text: str) -> Dict[str, str]:
+    """Разобрать ``pw-dump`` (JSON): node.name -> node.description.
+
+    Только источники захвата: ``Audio/Source`` (PipeWire) и
+    ``Media/Audio/Source`` (legacy-класс поверх PA-модулей); составные
+    ``Audio/Source/Sink`` — это выходы с петлёй, не микрофон.
+    """
+    if not text.strip():
+        return {}
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    result: Dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        props = ((item.get("info") or {}).get("props")) or {}
+        if props.get("media.class") not in ("Audio/Source", "Media/Audio/Source"):
+            continue
+        name = props.get("node.name") or props.get("media.name")
+        desc = props.get("node.description") or props.get("media.name")
+        if name and desc and desc != name:
+            result[str(name)] = str(desc)
+    return result
+
+
+def _pa_descriptions() -> Dict[str, str]:
+    """Имена микрофонов «как в системе»: PA/PW-имя источника -> описание.
+
+    Человек в системных настройках видит ``device.description``
+    («Built-in Audio Microphone…»), а PJSIP/pass-through списки носят
+    технический NAME (``alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source``).
+    pactl (длинная форма), при его отсутствии — pw-dump; утилита не найдена
+    или ответ пуст — пустая карта, и UI остаётся на сырых именах (как было).
+    """
+    if shutil.which("pactl"):
+        return _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
+    if shutil.which("pw-dump"):
+        return _parse_pw_dump_sources(_run(["pw-dump"]))
+    return {}
+
+
+# Служебные «устройства» в списке захвата: null/echo-источники PJSIP/PW и
+# мониторы вывода. Это не микрофоны, но они занимают места в выпадающем
+# списке (на живой машине — 11 из 13 пунктов при двух реальных микрофонах).
+_SERVICE_AUDIO_TOKENS = frozenset({"null", "echo"})
+
+
+def _is_service_audio_name(name: str) -> bool:
+    low = (name or "").lower()
+    if low.endswith(".monitor"):
+        return True
+    return any(tok in _SERVICE_AUDIO_TOKENS for tok in re.split(r"[^a-z0-9]+", low))
+
+
+def _humanize_audio_name(pjsip_name: str, descs: Dict[str, str]) -> str:
+    """Имя устройства PJSIP -> «как в системе» + пометка служебных.
+
+    PJSIP поверх PulseAudio/PipeWire носит в имени технический PA-NAME —
+    ищем его подстрокой (самое длинное совпадение выигрывает: у мониторов
+    имя содержит имя стока) и подставляем description. Не нашли — обычный
+    _friendly_audio_name (ALSA hw:-имена). Служебные null/echo/мониторы не
+    прячем (числовой id-контракт и порядок индексов — неприкосновенны), а
+    помечаем: выбор «служебного» устройства объясняет молчание монитора.
+    """
+    raw = pjsip_name or ""
+    display = ""
+    hit = ""
+    for src_name, human in descs.items():
+        if src_name and src_name in raw and len(src_name) > len(hit):
+            hit, display = src_name, human
+    if not display:
+        display = _friendly_audio_name(raw)
+    if _is_service_audio_name(raw) or _is_service_audio_name(display):
+        display = f"{display} (служебное)"
+    return display
 
 
 def _arecord_cards() -> List[DeviceInfo]:
@@ -515,11 +634,13 @@ class MediaManager:
         devices: List[dict] = []
         try:
             mgr = self.aud_mgr()
+            descs = _pa_descriptions()
             for i, info in enumerate(self.enum_devices(mgr)):
+                raw = getattr(info, "name", f"dev{i}")
                 devices.append({
                     "id": i,
-                    "name": _friendly_audio_name(getattr(info, "name", f"dev{i}")),
-                    "raw_name": getattr(info, "name", f"dev{i}"),
+                    "name": _humanize_audio_name(raw, descs),
+                    "raw_name": raw,
                     "driver": getattr(info, "driver", "?"),
                     "inputs": getattr(info, "inputCount", 0),
                     "outputs": getattr(info, "outputCount", 0),
