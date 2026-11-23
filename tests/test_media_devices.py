@@ -540,6 +540,83 @@ def test_skipped_capture_node_logged_once():
     assert len(spam) == 1
 
 
+# --- v0.3.5: смена микрофона обязана применяться к живому потоку ---
+
+
+class _FakeMgr:
+    def __init__(self, update=None):
+        self.captureDev = 0
+        self.playbackDev = 0
+        self.setCaptureDev_calls = []
+        self.updates = 0
+        self._update = update
+
+    def setCaptureDev(self, v):
+        self.setCaptureDev_calls.append(v)
+
+    def audioDevUpdateConfig(self):
+        self.updates += 1
+        if self._update:
+            self._update()
+
+
+def _mgr_with(mgr):
+    class EP:
+        def audDevManager(self):
+            return mgr
+
+    return media_devices.MediaManager(object(), EP())
+
+
+def test_set_capture_device_applies_audio_dev_update():
+    # setCaptureDev без audioDevUpdateConfig декоративен: pjsua продолжает
+    # читать старый порт (живой док 2026-11-24). Успех переключения теперь
+    # невозможен без применения конфига к потоку.
+    mgr = _FakeMgr()
+    assert _mgr_with(mgr).set_capture_device(7) is True
+    assert mgr.captureDev == 7
+    assert mgr.updates == 1
+
+
+def test_set_capture_device_fails_when_update_raises():
+    def boom():
+        raise RuntimeError("PJMEDIA_EAUD")
+
+    mgr = _FakeMgr(update=boom)
+    orig_log = media_devices.log
+    media_devices.log = type("L", (), {"warning": staticmethod(lambda *a, **k: None),
+                                       "info": staticmethod(lambda *a, **k: None),
+                                       "debug": staticmethod(lambda *a, **k: None)})()
+    try:
+        assert _mgr_with(mgr).set_capture_device(3) is False
+    finally:
+        media_devices.log = orig_log
+
+
+def test_set_capture_device_without_update_method_degrades_honestly():
+    # Связка pjsua2 без audioDevUpdateConfig: прежняя деградация (считаем
+    # успех), но предупреждением в лог — «успех» без применения к потоку.
+    msgs = []
+    class L:
+        @staticmethod
+        def warning(fmt, *a):
+            msgs.append(fmt % a if a else fmt)
+        info = debug = warning
+
+    class Legacy(_FakeMgr):
+        audioDevUpdateConfig = None  # нет метода в связке (getattr → None)
+
+    mgr = Legacy()
+    orig_log = media_devices.log
+    media_devices.log = L()
+    try:
+        assert _mgr_with(mgr).set_capture_device(2) is True
+    finally:
+        media_devices.log = orig_log
+    assert mgr.updates == 0
+    assert any("audioDevUpdateConfig" in m for m in msgs)
+
+
 # --- v0.3.2: монитор микрофона самодостаточен; карта имён — с диагностикой ---
 
 

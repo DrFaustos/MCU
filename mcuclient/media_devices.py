@@ -634,16 +634,21 @@ class MediaManager:
             return
         cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
         play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
+        changed = False
         if play < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "outputCount", 0) > 0:
                     self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                    changed = True
                     break
         if cap < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "inputCount", 0) > 0:
                     self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                    changed = True
                     break
+        if changed:
+            self._audio_dev_update(mgr)
         # В headless/контейнерных окружениях устройства могут присутствовать
         # в списке, но быть нерабочими. Тогда makeCall() падает с
         # PJMEDIA_EAUD_SYSERR — включаем null-устройство.
@@ -694,10 +699,35 @@ class MediaManager:
             if not ok:
                 raise RuntimeError("setCaptureDev недоступен")
             self._null_audio_active = False
-            return True
+            return self._audio_dev_update(mgr)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось переключить микрофон: %s", exc)
             return False
+
+    def _audio_dev_update(self, mgr) -> bool:  # pragma: no cover
+        """Применить выбранные индексы устройств к ЖИВОМУ звуковому потоку.
+
+        setCaptureDev/setPlaybackDev меняют только конфиг: pjsua заново не
+        открывает захват/вывод без audioDevUpdateConfig. Без этого шага
+        переключение микрофона декоративное — UI и монитор честно рапортуют
+        ВЫБРАННЫЙ порт, а pjsua молча продолжает читать старый (живой док
+        2026-11-24: тон 440 Гц не двигал монитор ни на одном из 12 индексов
+        при системном пике 32768). Нет метода в связке — предупреждаем и
+        считаем успех прежним (деградация как было); отказ обновления —
+        False: врать про применённое устройство нельзя.
+        """
+        upd = getattr(mgr, "audioDevUpdateConfig", None)
+        if upd is None:
+            log.warning("pjsua2 без audioDevUpdateConfig — смена устройства "
+                        "не применится к живому потоку")
+            return True
+        try:
+            upd()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audioDevUpdateConfig после смены устройства не вышел: %s",
+                        exc)
+            return False
+        return True
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
         """Подготовить тракт захвата для визуального теста микрофона.
@@ -726,8 +756,10 @@ class MediaManager:
             except Exception:  # noqa: BLE001
                 pass
             mgr = self.aud_mgr()
+            changed = False
             if dev_id is not None:
                 self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+                changed = True
             # Playback НЕ трогаем. Раньше монитор ставил выбранный микрофон
             # ЕЩЁ И динамиками (setPlaybackDev := микрофон). Микрофон не
             # умеет играть, а у звуковых бэкендов (PortAudio/ALSA-дуплекс)
@@ -738,7 +770,12 @@ class MediaManager:
                 for i, info in enumerate(self.enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                        changed = True
                         break
+            if changed:
+                # Выбранный индекс без audioDevUpdateConfig — только бумажка:
+                # монитор читал бы старый порт (см. _audio_dev_update).
+                self._audio_dev_update(mgr)
             if self._null_audio_active:
                 # Без живого звука монитор бессилен: pjsua крутит null-
                 # порт, capture-media отдаёт вечный нуль. Пробуем вернуть
