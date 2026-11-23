@@ -1417,7 +1417,12 @@ class SipEngine:
                 from .codec_negotiation import answer_codecs  # noqa: PLC0415
                 agreed = answer_codecs(answer)
                 for kind in ("audio", "video"):
-                    if not codecs.get(kind) and agreed.get(kind):
+                    # Answer-SDP — достоверный источник: согласован то,
+                    # что подтвердил пир. Локальный список активных
+                    # кодеков — лишь предпочтения, по нему лог врал
+                    # «OPUS/48000», когда по проводу в answer шёл PCMU
+                    # (стенд asterisk, 2026-11-23).
+                    if agreed.get(kind):
                         codecs[kind] = agreed[kind]
             log.info(
                 "Согласованные кодеки вызова: аудио=%s, видео=%s",
