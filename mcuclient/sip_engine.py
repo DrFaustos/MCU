@@ -670,6 +670,13 @@ class SipEngine:
             ep_cfg.uaConfig.threadCnt = 0
         if hasattr(ep_cfg.medConfig, "noVad"):
             ep_cfg.medConfig.noVad = False
+        # Автостаптывание звука по таймауту (default 1 с после звонка)
+        # отключаем: с ним монитор микрофона и переключение на холостом
+        # ходу читают ЗАКРЫТОЕ устройство — вечный нуль без единой ошибки
+        # (док v0.3.5: уровень 0.000 на всех 12 индексах при живом тоне).
+        # -1 = never auto-close (MediaConfig.sndAutoCloseTime, pjsua 2.16).
+        if hasattr(ep_cfg.medConfig, "sndAutoCloseTime"):
+            ep_cfg.medConfig.sndAutoCloseTime = -1
         self._configure_nat(ep_cfg)
         ep.libCreate()
         ep.libInit(ep_cfg)

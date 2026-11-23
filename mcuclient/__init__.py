@@ -8,7 +8,7 @@
 # котором на самом деле h323-код, и никакое имя артефакта не спасёт.
 PROTOCOL_VARIANT = "h323"
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 
 def version_string() -> str:

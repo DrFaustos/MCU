@@ -707,8 +707,9 @@ class MediaManager:
     def _audio_dev_update(self, mgr) -> bool:  # pragma: no cover
         """Применить выбранные индексы устройств к ЖИВОМУ звуковому потоку.
 
-        setCaptureDev/setPlaybackDev меняют только конфиг: pjsua заново не
-        открывает захват/вывод без audioDevUpdateConfig. Без этого шага
+        setCaptureDev/setPlaybackDev меняют только конфиг (дока binding
+        прямиком: «не меняет состояние звукового устройства»): pjsua заново
+        не открывает захват/вывод без перезапуска. Без этого шага
         переключение микрофона декоративное — UI и монитор честно рапортуют
         ВЫБРАННЫЙ порт, а pjsua молча продолжает читать старый (живой док
         2026-11-24: тон 440 Гц не двигал монитор ни на одном из 12 индексов
@@ -716,17 +717,44 @@ class MediaManager:
         считаем успех прежним (деградация как было); отказ обновления —
         False: врать про применённое устройство нельзя.
         """
-        upd = getattr(mgr, "audioDevUpdateConfig", None)
-        if upd is None:
-            log.warning("pjsua2 без audioDevUpdateConfig — смена устройства "
-                        "не применится к живому потоку")
+        # Путь перезапуска ищем ЦЕПОЧКОЙ: набор экспортов SWIG-связки
+        # зависит от сборки (живой док v0.3.5: в CI-бинде audioDevUpdateConfig
+        # НЕТ, а setSndDevMode — есть). Порядок от точного к живучему;
+        # прошлый путь пишется в лог («применено через …») — живой док
+        # проверит по строке, каким механизмом воспользовались.
+        # * audioDevUpdateConfig — точечное применение конфига (есть не везде);
+        # * setSndDevMode(0) — по доке binding: «откроет звуковое устройство,
+        #   используя текущие активные ID, выставленные setCaptureDev()/
+        #   setPlaybackDev()», т.е. классический apply с перезаходом;
+        # * audioDevInit — полный рестарт звукового драйвера.
+        applied = None
+        last: Optional[Exception] = None
+        # setDev в цепочку НЕ включаем: в проверенной CI-связке (dir()
+        # pjsua2 2.16 SWIG) его нет, а у Python-двойников mgr он часто
+        # существует «в наследство» и проглатывает цепочку молча.
+        for name, args in (("audioDevUpdateConfig", ()), ("setSndDevMode", (0,)),
+                           ("audioDevInit", ())):
+            m = getattr(mgr, name, None)
+            if m is None:
+                continue
+            try:
+                m(*args)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                log.debug("Путь применения звука %s не вышел: %s", name, exc)
+                continue
+            applied = name
+            break
+        if applied is not None:
+            log.info("Звуковой поток перезапущен: применено через %s", applied)
             return True
-        try:
-            upd()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("audioDevUpdateConfig после смены устройства не вышел: %s",
-                        exc)
+        if last is not None:
+            # Метод нашёлся, но отказал — врать про применённое нельзя.
+            log.warning("Ни один путь перезапуска звука не вышел (последняя: "
+                        "%s) — смена устройства могла не примениться", last)
             return False
+        log.warning("pjsua2 без audioDevUpdateConfig/setSndDevMode — смена "
+                    "устройства не применится к живому потоку")
         return True
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
@@ -772,24 +800,43 @@ class MediaManager:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
                         changed = True
                         break
-            if changed:
-                # Выбранный индекс без audioDevUpdateConfig — только бумажка:
-                # монитор читал бы старый порт (см. _audio_dev_update).
-                self._audio_dev_update(mgr)
+            unmute_done = False
             if self._null_audio_active:
                 # Без живого звука монитор бессилен: pjsua крутит null-
                 # порт, capture-media отдаёт вечный нуль. Пробуем вернуть
                 # реальный звуковой device (нет метода/отказ — честная
                 # запись в лог, монитор продолжит с нулём).
-                unmute = getattr(mgr, "setNullSound", None)
-                if callable(unmute):
+                # setNullSound есть не во всех сборках (в CI-бинде его нет);
+                # setSndDevMode(0) — тот же результат через перезаход на
+                # реальные ID (дока: открывает устройство текущими ID).
+                done = False
+                for name, args in (("setNullSound", (False,)),
+                                   ("setSndDevMode", (0,))):
+                    m = getattr(mgr, name, None)
+                    if not callable(m):
+                        continue
                     try:
-                        unmute(False)
-                        self._null_audio_active = False
-                        log.info("Микрофон-монитор: null-аудио снято, звук реальный")
+                        m(*args)
                     except Exception as exc:  # noqa: BLE001
-                        log.warning("Микрофон-монитор: null-аудио не снять: %s",
-                                      exc)
+                        log.debug("Снять null-аудио через %s не вышло: %s",
+                                  name, exc)
+                        continue
+                    self._null_audio_active = False
+                    log.info("Микрофон-монитор: null-аудио снято (%s), "
+                             "звук реальный", name)
+                    done = True
+                    unmute_done = True
+                    break
+                if not done:
+                    log.warning("Микрофон-монитор: null-аудио не снять "
+                                "(ни setNullSound, ни setSndDevMode) — "
+                                "монитор останется с нулём")
+            if changed and not unmute_done:
+                # Выбранный индекс без применения к потоку — только бумажка:
+                # монитор читал бы старый порт (см. _audio_dev_update).
+                # Если снятие null уже перезаходило на реальные ID, второй
+                # перезаход не нужен.
+                self._audio_dev_update(mgr)
             cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
             port_name = "?"
             for i, info in enumerate(self.enum_devices(mgr)):

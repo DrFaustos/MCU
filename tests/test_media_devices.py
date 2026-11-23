@@ -593,9 +593,94 @@ def test_set_capture_device_fails_when_update_raises():
         media_devices.log = orig_log
 
 
+def test_set_capture_device_falls_back_to_snd_dev_mode():
+    # CI-сборка pjsua2 (док v0.3.5): audioDevUpdateConfig в связке НЕТ,
+    # зато есть setSndDevMode — цепочка обязана применить через него и
+    # назвать в логе прошедший путь (живой док ищет строку «применено через»).
+    msgs = []
+
+    def _rec(fmt, *a, **k):
+        msgs.append(fmt % a if a else fmt)
+
+    log = type("L", (), {"warning": staticmethod(_rec),
+                         "info": staticmethod(_rec),
+                         "debug": staticmethod(_rec)})()
+
+    class ModeMgr(_FakeMgr):
+        audioDevUpdateConfig = None  # нет метода в CI-связке
+
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = ModeMgr()
+    orig_log = media_devices.log
+    media_devices.log = log
+    try:
+        assert _mgr_with(mgr).set_capture_device(9) is True
+    finally:
+        media_devices.log = orig_log
+    assert mgr.modes == [0]
+    assert any("применено через setSndDevMode" in m for m in msgs)
+
+
+def test_set_capture_device_prefers_exact_update_over_modes():
+    # Порядок цепочки: точечный audioDevUpdateConfig важнее тотального
+    # перезахода setSndDevMode — лишний restart звука без нужды не нужен.
+    class BothMgr(_FakeMgr):
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = BothMgr()
+    assert _mgr_with(mgr).set_capture_device(4) is True
+    assert mgr.updates == 1
+    assert mgr.modes == []
+
+
+def test_set_capture_device_fails_when_all_paths_raise():
+    # Все найденные пути отказали — честный False: «успех» без применения
+    # к живому потоку ровно и стоил владельцу трёх кругов отладки.
+    msgs = []
+    log = type("L", (), {
+        "warning": staticmethod(lambda f, *a, **k: msgs.append(f % a if a else f)),
+        "debug": staticmethod(lambda f, *a, **k: None),
+        "info": staticmethod(lambda f, *a, **k: None)})()
+
+    class SickMgr(_FakeMgr):
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def audioDevUpdateConfig(self):
+            self.updates += 1
+            raise RuntimeError("PJMEDIA_EAUD")
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+            raise RuntimeError("PJMEDIA_EAUD_SYSERR")
+
+    mgr = SickMgr()
+    orig_log = media_devices.log
+    media_devices.log = log
+    try:
+        assert _mgr_with(mgr).set_capture_device(5) is False
+    finally:
+        media_devices.log = orig_log
+    assert mgr.updates == 1 and mgr.modes == [0]
+    assert any("Ни один путь перезапуска" in m for m in msgs)
+
+
 def test_set_capture_device_without_update_method_degrades_honestly():
-    # Связка pjsua2 без audioDevUpdateConfig: прежняя деградация (считаем
-    # успех), но предупреждением в лог — «успех» без применения к потоку.
+    # Связка pjsua2 без audioDevUpdateConfig и без setSndDevMode: прежняя
+    # деградация (считаем успех), но предупреждением в лог — «успех» без
+    # применения к потоку.
     msgs = []
     class L:
         @staticmethod
@@ -647,6 +732,26 @@ def test_open_mic_monitor_survives_without_setnullsound():
     mm._null_audio_active = True
     assert mm.open_mic_monitor(3) is True
     assert mm._null_audio_active is True
+
+
+def test_open_mic_monitor_unmutes_via_snd_dev_mode():
+    # CI-связка (док v0.3.5): setNullSound там нет, есть setSndDevMode —
+    # снятие null идёт через перезаход на реальные ID.
+
+    class ModeMgr(_AudioMgr):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = ModeMgr(capture_dev=2)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mgr.modes == [0]
+    assert mm._null_audio_active is False
 
 
 def test_level_probe_reports_about_once_per_second():

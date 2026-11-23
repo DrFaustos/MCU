@@ -821,18 +821,25 @@ def main() -> int:
         def get_watcher_mics(timeout: float = 24.0) -> list[str]:
             deadline = time.time() + timeout
             out: list[str] = []
+            seen = fails = 0
+            last_err = ""
             while time.time() < deadline:
                 for line in reversed(lg.since(mark_boot).splitlines()):
                     if "event: media.devices" in line and "payload=" in line:
+                        seen += 1
                         try:
                             d0 = _ast.literal_eval(
                                 line[line.index("payload=") + len("payload="):])
                             out = [m["name"] for m in d0.get("microphones", [])]
                             if out:
                                 return out
-                        except Exception:  # noqa: BLE001
+                        except Exception as exc:  # noqa: BLE001
+                            fails += 1
+                            last_err = f"{type(exc).__name__}: {str(exc)[:60]}"
                             continue
                 time.sleep(1.0)
+            V.info(f"(в) эталон: таймаут; device-строк найдено {seen}, "
+                   f"ошибок парсинга {fails}, последняя: {last_err!r}")
             return out
 
         watcher_mics = get_watcher_mics()
