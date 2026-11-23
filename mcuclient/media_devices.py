@@ -210,7 +210,7 @@ def _pactl_sources() -> List[DeviceInfo]:
     out = _run(["pactl", "list", "short", "sources"])
     # NAME из short-формы — технический идентификатор; человеку показываем
     # description из длинной формы (там же, где системные настройки).
-    descs = _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
+    descs = _parse_pactl_sources_long(_run(["pactl", "list", "sources"]) or "")
     for line in (out or "").splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -296,9 +296,9 @@ def _pa_descriptions() -> Dict[str, str]:
     или ответ пуст — пустая карта, и UI остаётся на сырых именах (как было).
     """
     if shutil.which("pactl"):
-        return _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
+        return _parse_pactl_sources_long(_run(["pactl", "list", "sources"]) or "")
     if shutil.which("pw-dump"):
-        return _parse_pw_dump_sources(_run(["pw-dump"]))
+        return _parse_pw_dump_sources(_run(["pw-dump"]) or "")
     return {}
 
 
