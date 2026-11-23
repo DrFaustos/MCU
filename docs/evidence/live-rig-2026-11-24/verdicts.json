@@ -1,10 +1,10 @@
 {
-  "run_at": "2026-11-24 03:22:10 +0400",
+  "run_at": "2026-11-24 03:44:13 +0400",
   "verdicts": [
     {
       "name": "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
       "ok": true,
-      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
+      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 41.0, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 41.0, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
     },
     {
       "name": "(б) повторный запуск превью",
@@ -18,8 +18,8 @@
     },
     {
       "name": "(в1) переключение микрофона сработало",
-      "ok": true,
-      "detail": "успешно переключено 5 индексов (до №13), на всех нулевой уровень"
+      "ok": false,
+      "detail": "успешно переключено 0 индексов (до №13), на всех нулевой уровень"
     },
     {
       "name": "(в) тон 440 Гц двигает монитор на двух микрофонах",
@@ -28,13 +28,13 @@
     },
     {
       "name": "(г) имена микрофонов человеческие",
-      "ok": true,
-      "detail": "приложение: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']; система(pactl): ['alsa_output.pci-0000_c2_00.6.HiFi__Speaker__sink.monitor', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic2__source', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source']; технических имён в списке: 0; humanize через pw-dump есть в репозитории — ждёт релиза"
+      "ok": false,
+      "detail": "приложение: []; система(pactl): ['alsa_output.pci-0000_c2_00.6.HiFi__Speaker__sink.monitor', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic2__source', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source']; технических имён в списке: 0; humanize через pw-dump есть в репозитории — ждёт релиза"
     },
     {
       "name": "избегание: экран/звонок/запись не тронуты",
       "ok": true,
-      "detail": "GUI-классы за прогон: ['media.devices']; запрещённых: нет"
+      "detail": "GUI-классы за прогон: []; запрещённых: нет"
     },
     {
       "name": "уборка: за собой чисто",

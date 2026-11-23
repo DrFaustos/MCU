@@ -81,9 +81,11 @@ SANDBOX = RIG / "sandbox"
 CONTAINERFILE = Path(__file__).resolve().parent / "rig-x" / "Containerfile"
 XSOCK_DIR = Path("/run/user/1000") / "mcu-rig-x11"
 RELEASE_URL = ("https://github.com/DrFaustos/MCU/releases/download/"
-               "v0.3.6-h323/MCU-h323-debug")   # запаска, если API недоступен
+               "v0.3.7-h323/MCU-h323-debug")   # запаска, если API недоступен
 RELEASE_LIST = "https://api.github.com/repos/DrFaustos/MCU/releases?per_page=1"
-EXPECTED_VERSION = "0.3.6-h323"   # заголовок окна обязан совпасть
+EXPECTED_VERSION = os.environ.get("RIG_EXPECTED_VERSION", "0.3.6-h323")
+                 # заголовок окна обязан совпасть; вотчер передаёт
+                 # RIG_EXPECTED_VERSION=<тег без v>
 
 
 def latest_release_url() -> str:
@@ -683,8 +685,12 @@ def main() -> int:
         lg = LogFile(LOG_PATH)
 
         # ── запуск и базовые кадры ──
-        mark_boot = lg.mark()
         app.start()
+        # журнал пересоздаётся при каждом старте пилона (unlink в start), а
+        # mark() ДО start давал бы offset несуществующего файла: since()
+        # попадала за EOF нового журнала и возвращала "" — молчаливые пустые
+        # эталоны (в)/(г) на больших предыдущих логах. Новый файл = 0.
+        mark_boot = 0
         shot0 = x.grab_win(app.win)
         shot0.save(EVIDENCE / "01_window.png")
 
@@ -880,6 +886,13 @@ def main() -> int:
                 got = mic_event_id(lg.since(mark))
                 if got is not None:
                     return got
+                # в v0.3.6 pjsua-применение может честно упасть (цепочка
+                # restart-методов не вышла) — события media.mic_device тогда
+                # НЕТ, но переключение предпринималось: помечаем -2, скан
+                # померит уровень и на таком индексе
+                s2 = lg.since(mark)
+                if "Ни один путь перезапуска" in s2 or "Не удалось переключить" in s2:
+                    return -2
             return None
 
         # Кнопка монитора (row 5 панели) требовала расширенного вьюпорта —

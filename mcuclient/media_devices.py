@@ -515,6 +515,18 @@ def _is_synthetic_video(driver: str, name: str) -> bool:
     return d in {"sdl", "colorbar"} or "colorbar" in n
 
 
+def _exc_brief(exc: BaseException) -> str:
+    """Непустое описание исключения: у pjsua2.Error из SWIG str() пустой,
+    данные живут в title/reason — без них отказ не разобрать (док v0.3.6:
+    «не вышел: » и пустота)."""
+    parts = [str(exc).strip() or exc.__class__.__name__]
+    for attr in ("title", "reason"):
+        v = str(getattr(exc, attr, "") or "").strip()
+        if v and v not in parts:
+            parts.append(f"{attr}={v}")
+    return " | ".join(parts)
+
+
 class MediaManager:
     """Обёртка над pjsua2 для перечисления и переключения устройств.
 
@@ -727,12 +739,22 @@ class MediaManager:
         #   используя текущие активные ID, выставленные setCaptureDev()/
         #   setPlaybackDev()», т.е. классический apply с перезаходом;
         # * audioDevInit — полный рестарт звукового драйвера.
-        applied = None
-        last: Optional[Exception] = None
         # setDev в цепочку НЕ включаем: в проверенной CI-связке (dir()
         # pjsua2 2.16 SWIG) его нет, а у Python-двойников mgr он часто
         # существует «в наследство» и проглатывает цепочку молча.
-        for name, args in (("audioDevUpdateConfig", ()), ("setSndDevMode", (0,)),
+        # setSndDevMode аргумент — БИТМАСКА pjsua_snd_dev_mode, не «применить»:
+        # 0 = полный дуплекс, открыть немедленно (настоящий apply);
+        # 1 = NO_IMMEDIATE_OPEN — переконфигурировать, открыть при первом
+        #     же употреблении (честная отсрочка);
+        # 2 = SPEAKER_ONLY — захват убивает, для микрофона НЕприменим.
+        # Пробы живой связкой (rig-app контейнер): обёртка зовёт
+        # pjsua_set_snd_dev2(&param), отказ — pjsua2.Error с непустыми
+        # title/reason при пустом str().
+        applied = None
+        deferred = False
+        last: Optional[Exception] = None
+        for name, args in (("audioDevUpdateConfig", ()),
+                           ("setSndDevMode", (0,)), ("setSndDevMode", (1,)),
                            ("audioDevInit", ())):
             m = getattr(mgr, name, None)
             if m is None:
@@ -741,17 +763,31 @@ class MediaManager:
                 m(*args)
             except Exception as exc:  # noqa: BLE001
                 last = exc
-                log.debug("Путь применения звука %s не вышел: %s", name, exc)
+                log.debug("Путь применения звука %s%s не вышел: %s",
+                          name, args or "", _exc_brief(exc))
                 continue
-            applied = name
+            if name == "setSndDevMode" and args == (1,):
+                deferred = True
+            applied = (name, args)
             break
         if applied is not None:
-            log.info("Звуковой поток перезапущен: применено через %s", applied)
+            name, args = applied
+            tag = f"{name}{args[0]}" if name == "setSndDevMode" else name
+            if deferred:
+                # setSndDevMode(1) не открывает устройство — новые индексы
+                # подхватятся при следующем открытии. Сказать честно.
+                log.info("Звук применён через %s (отсрочка: устр-во "
+                         "перезапустится при следующем открытии); немедленный "
+                         "перезаход не вышел: %s", tag,
+                         _exc_brief(last) if last is not None else "—")
+            else:
+                log.info("Звуковой поток перезапущен: применено через %s", tag)
             return True
         if last is not None:
             # Метод нашёлся, но отказал — врать про применённое нельзя.
             log.warning("Ни один путь перезапуска звука не вышел (последняя: "
-                        "%s) — смена устройства могла не примениться", last)
+                        "%s) — смена устройства могла не примениться",
+                        _exc_brief(last))
             return False
         log.warning("pjsua2 без audioDevUpdateConfig/setSndDevMode — смена "
                     "устройства не применится к живому потоку")
@@ -818,8 +854,8 @@ class MediaManager:
                     try:
                         m(*args)
                     except Exception as exc:  # noqa: BLE001
-                        log.debug("Снять null-аудио через %s не вышло: %s",
-                                  name, exc)
+                        log.debug("Снять null-аудио через %s%s не вышло: %s",
+                                  name, args or "", _exc_brief(exc))
                         continue
                     self._null_audio_active = False
                     log.info("Микрофон-монитор: null-аудио снято (%s), "
