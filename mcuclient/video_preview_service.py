@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable, Optional
 
 from . import video_embed
@@ -20,10 +21,35 @@ from .log import get_logger
 
 log = get_logger("vpreview")
 
+# Пауза перед единственным повтором нативного start(): дать pjsua
+# добить освобождение устройства после release.
+_RETRY_DELAY_S = 0.3
+
+
+class PreviewStartFailed(RuntimeError):
+    """Нативный start превью не взлетел даже после одного повтора."""
+
 
 def _err_text(exc: BaseException) -> str:
-    """Непустое описание ошибки (у pjsua2.Error из SWIG str() пустой)."""
-    return str(exc).strip() or exc.__class__.__name__
+    """Непустое, ИНФОРМАТИВНОЕ описание ошибки.
+
+    У pjsua2.Error из SWIG str() пустой — лог и событие с текстом
+    «Error» ничего не рассказывают (репорт владельца на v0.3.1:
+    трейсбек pjsua2.Error без title бесполезен). У C++-объекта Error
+    есть поля title/reason/code — забираем непустые: это данные, а
+    не догадки, и они доезжают до пользователя в событии media.preview.
+    """
+    parts = [str(exc).strip() or exc.__class__.__name__]
+    title = str(getattr(exc, "title", "") or "").strip()
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    code = getattr(exc, "code", None)
+    if title:
+        parts.append(f"title={title}")
+    if reason and reason != title:
+        parts.append(f"reason={reason}")
+    if code:
+        parts.append(f"code={code}")
+    return " | ".join(parts)
 
 
 class VideoPreviewService:
@@ -103,6 +129,14 @@ class VideoPreviewService:
                     return False
                 target = devices[0]["id"]
             target = int(target)
+            # Диагностика вместо догадок (репорт v0.3.1: native start при
+            # «идеальном» состоянии): какое состояние видит сервис ПЕРЕД
+            # решением — guard, release или новый объект.
+            log.info(
+                "preview.start: obj=%s dev=%s started=%s -> target=%s show=%s",
+                id(self._preview), self._preview_dev,
+                self._preview_started, target, bool(show_window),
+            )
             if self._set_video_device is not None:
                 self._set_video_device(target)
             # VideoPreview(dev) привязывает устройство при создании: при смене
@@ -128,7 +162,33 @@ class VideoPreviewService:
             # show=False: PJSIP не показывает окно сам, встраиваем через X11.
             # show=True: фолбэк — отдельное нативное окно (Wayland и пр.).
             prm.show = bool(show_window)
-            self._preview.start(prm)
+            try:
+                self._preview.start(prm)
+            except Exception as exc1:  # noqa: BLE001
+                first = _err_text(exc1)
+                # Самолечение: чаще всего объект «сгорел» нативно (либу
+                # пересоздали / устройство переназначили за спиной сервиса,
+                # а Python-состояние об этом не знает) — отпускаем и ровно
+                # ОДИН раз пробуем новым объектом. Не циклом: мёртвое
+                # устройство не должен долбить бесконечный ретрай (репорт
+                # v0.3.1: error -> stop -> rebuild -> start -> error, раз в
+                # секунду).
+                log.warning(
+                    "Превью: нативный start не взлетел (%s) — отпускаю и "
+                    "повторяю через %dмс",
+                    first, int(_RETRY_DELAY_S * 1000),
+                )
+                self._release_preview()
+                time.sleep(_RETRY_DELAY_S)
+                try:
+                    self._make_preview(target)
+                    prm = self._pj.VideoPreviewOpParam()
+                    prm.show = bool(show_window)
+                    self._preview.start(prm)
+                except Exception as exc2:  # noqa: BLE001
+                    raise PreviewStartFailed(
+                        f"{first} | повтор: {_err_text(exc2)}") from exc2
+                log.info("Превью запущено с одного повтора (dev=%s)", target)
             self._preview_started = True
             log.info(
                 "Локальное превью камеры запущено (dev=%s, show=%s)",
@@ -139,19 +199,41 @@ class VideoPreviewService:
         except Exception as exc:  # noqa: BLE001
             # log.exception, а не warning: у pjsua2.Error str(exc) пустой,
             # и без трассировки причина не видна.
-            log.exception("Не удалось запустить превью камеры")
+            log.exception("Не удалось запустить превью камеры: %s",
+                          _err_text(exc))
+            # Объект, ни разу не стартовавший, нативно не открыт: держать
+            # его — значит active=True враньём и будущий stop по нему
+            # («stop бросает Error» после фейла, репорт v0.3.1).
+            if self._preview is not None and not self._preview_started:
+                self._preview = None
             self._events.emit("media.preview", active=False, error=_err_text(exc))
             return False
 
     def _release_preview(self) -> None:
-        """Остановить и отпустить текущий VideoPreview (best-effort)."""
+        """Остановить и отпустить текущий VideoPreview (best-effort).
+
+        Объект сбрасывается ВСЕГДА, даже если pv.stop() упал: держать
+        «полузакрытый» объект — значит вечные «stop бросает Error» и
+        мёртвые старты дальше (репорт v0.3.1). Ошибка остановки — INFO
+        с title: это данных больше, чем у прежнего молчаливого debug.
+        """
         pv, self._preview = self._preview, None
+        started = self._preview_started
         self._preview_started = False
         if pv is not None:
+            log.info("preview.release: obj=%s dev=%s started=%s",
+                       id(pv), self._preview_dev, started)
+            if not started:
+                # Ни одного успешного start: нативного потока/окна нет,
+                # stop по такому объекту сам бросает pjsua2.Error — ровно
+                # тот каскад «stop Error после фейла» из репорта v0.3.1.
+                # Сбрасываем ссылку молча (состояние уже залогировано).
+                return
             try:  # pragma: no cover
                 pv.stop()
             except Exception as exc:  # noqa: BLE001
-                log.debug("Ошибка остановки превью: %s", _err_text(exc))
+                log.info("Ошибка остановки превью (obj=%s): %s",
+                         id(pv), _err_text(exc))
         self._preview_xid = None
         self._preview_dev = -1
         self._native_window = False

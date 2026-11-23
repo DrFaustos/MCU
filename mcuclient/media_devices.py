@@ -25,6 +25,7 @@ import os
 import pathlib
 import platform
 import re
+import time
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -260,26 +261,74 @@ def _parse_pw_dump_sources(text: str) -> Dict[str, str]:
     return result
 
 
+# Диагностика карты имён пишется один раз на процесс (вызывается на
+# каждое перечисление устройств, а данные нужны ровно один раз).
+_pa_diag_done = False
+
+
 def _pa_descriptions() -> Dict[str, str]:
     """Имена микрофонов «как в системе»: PA/PW-имя источника -> описание.
 
     Человек в системных настройках видит ``device.description``
     («Built-in Audio Microphone…»), а PJSIP/pass-through списки носят
     технический NAME (``alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source``).
-    pactl (длинная форма), при его отсутствии — pw-dump; утилита не найдена
-    или ответ пуст — пустая карта, и UI остаётся на сырых именах (как было).
+    pactl (длинная форма); если pactl есть, но карту не дал (другой
+    формат вывода — live-отчёт v0.3.1: имена остались техническими),
+    или pactl нет — pw-dump. Пустая карта — UI на сырых именах (как
+    было), но ОДИН INFO-разговор о том, почему: утилиты, размер карты,
+    первые строки ответа (в DEBUG — это данные для разбора формата).
     """
-    if shutil.which("pactl"):
-        return _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
-    if shutil.which("pw-dump"):
-        return _parse_pw_dump_sources(_run(["pw-dump"]))
-    return {}
+    global _pa_diag_done
+    has_pactl = bool(shutil.which("pactl"))
+    has_pwdump = bool(shutil.which("pw-dump"))
+    descs: Dict[str, str] = {}
+    head = ""
+    if has_pactl:
+        raw = _run(["pactl", "list", "sources"])
+        descs = _parse_pactl_sources_long(raw)
+        if not descs:
+            head = "\n".join(raw.splitlines()[:6])
+    if not descs and has_pwdump:
+        raw = _run(["pw-dump"])
+        descs = _parse_pw_dump_sources(raw)
+        if not descs and not head:
+            head = "\n".join(raw.splitlines()[:6])
+    if not _pa_diag_done:
+        _pa_diag_done = True
+        log.info("Имена аудио: pactl=%s pw-dump=%s карта=%d",
+                 has_pactl, has_pwdump, len(descs))
+        if not descs and (has_pactl or has_pwdump):
+            log.debug("Имена аудио: карта пуста, начало ответа: %r", head)
+    return descs
 
 
 # Служебные «устройства» в списке захвата: null/echo-источники PJSIP/PW и
 # мониторы вывода. Это не микрофоны, но они занимают места в выпадающем
 # списке (на живой машине — 11 из 13 пунктов при двух реальных микрофонах).
 _SERVICE_AUDIO_TOKENS = frozenset({"null", "echo"})
+
+
+class LevelProbe:
+    """Rate-limited наблюдатель значения уровня: ~раз в секунду — «да».
+
+    Монитор дёргает read_mic_level на 20 Гц: разовая запись ничего не
+    доказывает, а лог на 20 Гц — мусор. sample(level) возвращает значение
+    не чаще раза в period_s (первый вызов — сразу) и None в остальное
+    время: «уровень действительно течёт» становится видно в логе, пока
+    окно монитора открыто (репорт v0.3.1: ноль строк о мониторе).
+    """
+
+    def __init__(self, period_s: float = 1.0, clock=time.monotonic) -> None:
+        self._period = float(period_s)
+        self._clock = clock
+        self._last = float("-inf")
+
+    def sample(self, level: float) -> Optional[float]:
+        now = self._clock()
+        if now - self._last >= self._period:
+            self._last = now
+            return level
+        return None
 
 
 def _is_service_audio_name(name: str) -> bool:
@@ -638,6 +687,24 @@ class MediaManager:
             return False
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
+        """Подготовить тракт захвата для визуального теста микрофона.
+
+        Поведение (данные с живого отчёта: монитор молчал без единой
+        строки в логе):
+        * выбирает capture-устройство, если выбранное НЕ трогает
+          playback — вывод на capture-only порт роняет дуплекс;
+        * самодостаточен: если ранее включилось null-аудио (headless-
+          старт, старт без устройств), монитор снимает заглушку
+          (setNullSound(False)) — иначе read_mic_level читает мёртвый
+          порт и «уровень мёртв на всех устройствах» неотличим от
+          тихо-молчащего монитора;
+        * рапортует ОДНОЙ INFO-строкой весь путь: индекс открытого
+          звукового устройства, имя capture-порта, наличие getTxLevel
+          в сборке bindings и режим звука. Значение уровня далее
+          пишет UI-монитор ~раз в секунду (LevelProbe).
+        Деградация честная: нет порта/getTxLevel — нуль на мониторе и
+        соотв. строка в логе, а не молчаливая имитация тишины.
+        """
         if not self.available:
             return False
         try:
@@ -659,7 +726,40 @@ class MediaManager:
                     if getattr(info, "inputCount", 0) > 0:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
                         break
-            return self.dev_int(mgr, "captureDev", "getCaptureDev") >= 0
+            if self._null_audio_active:
+                # Без живого звука монитор бессилен: pjsua крутит null-
+                # порт, capture-media отдаёт вечный нуль. Пробуем вернуть
+                # реальный звуковой device (нет метода/отказ — честная
+                # запись в лог, монитор продолжит с нулём).
+                unmute = getattr(mgr, "setNullSound", None)
+                if callable(unmute):
+                    try:
+                        unmute(False)
+                        self._null_audio_active = False
+                        log.info("Микрофон-монитор: null-аудио снято, звук реальный")
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Микрофон-монитор: null-аудио не снять: %s",
+                                      exc)
+            cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
+            port_name = "?"
+            for i, info in enumerate(self.enum_devices(mgr)):
+                if i == cap:
+                    port_name = getattr(info, "name", "?")
+                    break
+            media = getattr(mgr, "captureDevMedia", None)
+            if media is None:
+                media = getattr(mgr, "getCaptureDevMedia", None)
+            try:
+                capm = media() if callable(media) else media
+            except Exception:  # noqa: BLE001
+                capm = None
+            has_tx = bool(capm is not None and hasattr(capm, "getTxLevel"))
+            log.info(
+                "Микрофон-монитор: capture=%s порт=%r getTxLevel=%s звук=%s",
+                cap, port_name, has_tx,
+                "null" if self._null_audio_active else "реальный",
+            )
+            return cap >= 0
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось открыть микрофон для монитора: %s", exc)
             return False

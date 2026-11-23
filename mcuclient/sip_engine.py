@@ -678,6 +678,21 @@ class SipEngine:
         self._init_audio_devices(ep)
         self._video_supported = self._detect_video_support(ep)
         log.info("PJSIP: видео %s", "поддерживается" if self._video_supported else "НЕ поддерживается")
+        # Семантика getTxLevel/getRxLevel и формат ошибок привязаны к
+        # версии PJSIP: без строки версии в логе отчёт с живого бинаря
+        # нечем проверить (какой бандл собран — неизвестно).
+        try:
+            ver = _pj.libVersion()
+            simple = str(getattr(ver, "simpleVersion", "") or "").strip()
+            if simple:
+                ver_text = simple
+            else:
+                ver_text = "%s.%s%s%s" % (
+                    getattr(ver, "major", "?"), getattr(ver, "minor", "?"),
+                    getattr(ver, "rev", ""), getattr(ver, "suffix", ""))
+        except Exception as exc:  # noqa: BLE001
+            ver_text = f"не прочитана ({exc})"
+        log.info("PJSIP бандл: версия %s", ver_text)
         self._configure_codecs(ep)
         self._start_account(ep)
 

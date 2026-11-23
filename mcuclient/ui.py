@@ -43,6 +43,7 @@ from .config import LAYOUT_LABELS, Config
 from .dtmf import DTMF_DIGITS, MAX_DIGITS_PER_SEND
 from .h323_gateway import H323Gateway
 from .log import get_logger
+from .media_devices import LevelProbe
 from .sip_engine import CallState, Participant, SipEngine
 
 log = get_logger("ui")
@@ -377,6 +378,7 @@ if QT_AVAILABLE:
             self.resize(560, 260)
             self._build_ui()
             self._opened = engine.open_mic_monitor(dev_id)
+            self._probe = LevelProbe()
             # Имя тестируемого устройства показано явно: список PJSIP
             # (ALSA/PortAudio) отличается от привычных имён PipeWire в
             # системных настройках — без подписи пользователь не понимает,
@@ -420,6 +422,12 @@ if QT_AVAILABLE:
 
         def _tick(self) -> None:
             level = self.engine.read_mic_level() if self._opened else 0.0
+            shown = self._probe.sample(level)
+            if shown is not None:
+                # Значение в логе ~раз в секунду, пока окно открыто:
+                # «вечный ноль» и «тишина в комнате» различимы постфактум
+                # без живого просмотра (репорт v0.3.1).
+                log.info("mic-monitor: level=%.3f opened=%s", shown, self._opened)
             self._levels.append(level)
             self._levels.pop(0)
             self._peak = max(self._peak * 0.98, level)
@@ -1582,6 +1590,10 @@ if QT_AVAILABLE:
         def _on_mic_monitor(self) -> None:
             dev_id = self.mic_combo.currentData()
             dev_name = self.mic_combo.currentText() if dev_id is not None else None
+            # Нажатие видно в логе: «монитор молчит» без этой строки —
+            # значит кнопка не нажималась/не доходит (репорт v0.3.1).
+            log.info("Монитор микрофона: открытие окна (dev=%r, имя=%r)",
+                     dev_id, dev_name)
             if dev_id is not None and dev_id < 0:
                 dev_id = None
             self._mic_window = MicMonitorWindow(self.engine, dev_id, self,

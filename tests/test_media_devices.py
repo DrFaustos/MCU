@@ -460,3 +460,89 @@ def test_pactl_sources_prefer_descriptions_and_mark_service():
     # Монитор вывода — не микрофон; служебный null остаётся в списке
     # (id-контракт), но помечен; реальный вход показан человеком именем.
     assert names == ["Built-in Mic", "null (служебное)"]
+
+
+# --- v0.3.2: монитор микрофона самодостаточен; карта имён — с диагностикой ---
+
+
+def test_open_mic_monitor_unmutes_null_audio():
+    """Без живого звука монитор читает мёртвый null-порт (репорт: «уровень
+    мёртв на всех устройствах»). Монитор обязан снять null-заглушку."""
+
+    class _NullMgr(_AudioMgr):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.null_calls: list = []
+
+        def setNullSound(self, flag):  # noqa: N802
+            self.null_calls.append(flag)
+
+    mgr = _NullMgr(capture_dev=2)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mgr.null_calls == [False]
+    assert mm._null_audio_active is False
+
+
+def test_open_mic_monitor_survives_without_setnullsound():
+    # Другая сборка bindings без setNullSound: не падает, флаг честно жив.
+    mgr = _AudioMgr(capture_dev=3)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mm._null_audio_active is True
+
+
+def test_level_probe_reports_about_once_per_second():
+    t = {"now": 0.0}
+    probe = media_devices.LevelProbe(period_s=1.0, clock=lambda: t["now"])
+    assert probe.sample(0.1) == 0.1       # первый сэмпл — сразу
+    t["now"] = 0.5
+    assert probe.sample(0.2) is None      # 20 Гц молчат
+    t["now"] = 1.05
+    assert probe.sample(0.3) == 0.3       # ~раз в секунду — значение
+    t["now"] = 1.4
+    assert probe.sample(0.4) is None
+
+
+def test_level_probe_period_scales():
+    t = {"now": 10.0}
+    probe = media_devices.LevelProbe(period_s=0.5, clock=lambda: t["now"])
+    assert probe.sample(1) == 1
+    t["now"] = 10.4
+    assert probe.sample(2) is None
+    t["now"] = 10.5
+    assert probe.sample(3) == 3
+
+
+def test_pa_descriptions_falls_back_to_pw_dump():
+    """pactl есть, но его вывод парсер не узнал (live-отчёт: имена остались
+    техническими) — карта берётся из pw-dump, а не остаётся пустой."""
+    good = ('[{"info": {"props": {"media.class": "Audio/Source", '
+            '"node.name": "mic0", "node.description": "Headset Mic"}}}]')
+
+    def fake_run(cmd):
+        return good if cmd[0] == "pw-dump" else "какой-то другой формат\nстрока 2"
+
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    media_devices._run = fake_run
+    media_devices.shutil.which = lambda name: f"/usr/bin/{name}"
+    try:
+        assert media_devices._pa_descriptions() == {"mic0": "Headset Mic"}
+    finally:
+        media_devices._run = orig_run
+        media_devices.shutil.which = orig_which
+
+
+def test_pa_descriptions_empty_without_utils():
+    orig_which = media_devices.shutil.which
+    orig_run = media_devices._run
+    media_devices.shutil.which = lambda name: None
+    media_devices._run = lambda cmd: ""
+    try:
+        assert media_devices._pa_descriptions() == {}
+    finally:
+        media_devices.shutil.which = orig_which
+        media_devices._run = orig_run
