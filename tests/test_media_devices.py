@@ -6,6 +6,7 @@ arecord) подменяются, поэтому тесты одинаково п
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -460,6 +461,83 @@ def test_pactl_sources_prefer_descriptions_and_mark_service():
     # Монитор вывода — не микрофон; служебный null остаётся в списке
     # (id-контракт), но помечен; реальный вход показан человеком именем.
     assert names == ["Built-in Mic", "null (служебное)"]
+
+
+def test_pactl_sources_uses_pw_dump_map_when_pactl_long_unparsable():
+    """Fedora/PipeWire-кейс live-дока v0.3.3: short-форма есть, длинную
+    форму парсер не узнаёт — имена всё равно человеческие, карта из
+    pw-dump (раньше watcher-путь обходил фолбэк и показывал техимена)."""
+    short = "58\talsa_input.pci.Mic1\t4\t0\tRUNNING\n"
+    dump = json.dumps([
+        {"info": {"props": {
+            "media.class": "Audio/Source",
+            "node.name": "alsa_input.pci.Mic1",
+            "node.description": "Built-in Audio Microphone",
+        }}},
+    ])
+
+    def fake_run(cmd):
+        if "short" in cmd:
+            return short
+        if cmd[0] == "pw-dump":
+            return dump
+        return "непонятный формат\nещё строки\n"
+
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    orig_diag = media_devices._pa_diag_done
+    media_devices._run = fake_run
+    media_devices.shutil.which = lambda name: "/usr/bin/" + name
+    media_devices._pa_diag_done = False
+    try:
+        mics = media_devices._pactl_sources()
+    finally:
+        media_devices._run = orig_run
+        media_devices.shutil.which = orig_which
+        media_devices._pa_diag_done = orig_diag
+    assert [m.name for m in mics] == ["Built-in Audio Microphone"]
+
+
+def test_skipped_capture_node_logged_once():
+    """Watcher дёргает камеры каждые 2 с — «Пропускаю /dev/videoN»
+    должен прозвучать один раз на ноду, а не тысячестрочным спамом.
+
+    Перехват — подменой log-объекта модуля (не caplog): под полным
+    раннером боевой лог-конфиг перехватывает "mcuclient*" до caplog-
+    хендлера, и standalone/runner расходились бы (тот же приём, что в
+    тестах video_source).
+    """
+    msgs: list = []
+
+    class FakeLog:
+        def debug(self, fmt, *args):
+            msgs.append(fmt % args if args else fmt)
+
+        def info(self, *a, **k):
+            pass
+
+        warning = error = info
+
+    orig_nodes = media_devices._v4l2_capture_nodes
+    orig_cap = media_devices._is_capture_capable
+    orig_log = media_devices.log
+    orig_skipped = set(media_devices._skipped_capture_nodes)
+    media_devices._skipped_capture_nodes.clear()
+    media_devices._v4l2_capture_nodes = lambda: ["/dev/video9"]
+    media_devices._is_capture_capable = lambda dev: False
+    media_devices.log = FakeLog()
+    try:
+        media_devices._list_linux_cameras()
+        media_devices._list_linux_cameras()
+        media_devices._list_linux_cameras()
+    finally:
+        media_devices._v4l2_capture_nodes = orig_nodes
+        media_devices._is_capture_capable = orig_cap
+        media_devices.log = orig_log
+        media_devices._skipped_capture_nodes.clear()
+        media_devices._skipped_capture_nodes.update(orig_skipped)
+    spam = [m for m in msgs if "Пропускаю /dev/video9" in m]
+    assert len(spam) == 1
 
 
 # --- v0.3.2: монитор микрофона самодостаточен; карта имён — с диагностикой ---

@@ -135,6 +135,11 @@ def _is_capture_capable(dev: str) -> bool:
     return "Video Capture" in out
 
 
+# Ноды без Video Capture, о которых мы уже сказали в логе (см.
+# _list_linux_cameras): watcher дёргает перечисление каждые 2 секунды.
+_skipped_capture_nodes: set = set()
+
+
 def _list_linux_cameras() -> List[DeviceInfo]:
     """Реальные камеры Linux с именами; фильтр по Video Capture.
 
@@ -150,7 +155,12 @@ def _list_linux_cameras() -> List[DeviceInfo]:
     cameras: List[DeviceInfo] = []
     for dev in candidates:
         if not _is_capture_capable(dev):
-            log.debug("Пропускаю %s: нет Video Capture", dev)
+            # Watcher опрашивает камеры каждые 2 с: повторный «Пропускаю»
+            # на ту же ноду — спам на тысячи строк в час (live-док). Один
+            # раз на ноду на процесс — и довольно.
+            if dev not in _skipped_capture_nodes:
+                _skipped_capture_nodes.add(dev)
+                log.debug("Пропускаю %s: нет Video Capture", dev)
             continue
         name, driver = _v4l2_device_name(dev)
         if not name:
@@ -184,8 +194,11 @@ def _pactl_sources() -> List[DeviceInfo]:
         return mics
     out = _run(["pactl", "list", "short", "sources"])
     # NAME из short-формы — технический идентификатор; человеку показываем
-    # description из длинной формы (там же, где системные настройки).
-    descs = _parse_pactl_sources_long(_run(["pactl", "list", "sources"]))
+    # description. Карту берём из _pa_descriptions(), а не из длинной формы
+    # напрямую: на Fedora/ PipeWire pactl-long может не распознаваться
+    # парсером, и тогда без pw-dump-фолбэка список остаётся техническим
+    # (live-док v0.3.3: «карта=2» в GUI-пути, сырые имена в watcher-списке).
+    descs = _pa_descriptions()
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 2:

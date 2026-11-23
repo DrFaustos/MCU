@@ -1090,6 +1090,13 @@ if QT_AVAILABLE:
             появляется не сразу — пробуем несколько раз с интервалом.
             """
             def _try() -> None:
+                # Тумблер уже выключил превью (hide) — цикл обязан умереть:
+                # иначе отложенная попытка достраивает встраивание и уходит в
+                # фолбэк restart_local_preview_window(), который ПОКАЗЫВАЕТ
+                # скрытое превью — выключенная камера «восстаёт» через
+                # секунду (поймано живым ригом 2026-11-24, раунд off).
+                if not self.engine.local_preview_active:
+                    return
                 done = False
                 for tile in self._tiles.values():
                     if getattr(tile, "_is_local", False):

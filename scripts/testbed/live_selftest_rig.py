@@ -82,7 +82,23 @@ SANDBOX = RIG / "sandbox"
 CONTAINERFILE = Path(__file__).resolve().parent / "rig-x" / "Containerfile"
 XSOCK_DIR = Path("/run/user/1000") / "mcu-rig-x11"
 RELEASE_URL = ("https://github.com/DrFaustos/MCU/releases/download/"
-               "v0.3.2-h323/MCU-h323-debug")
+               "v0.3.3-h323/MCU-h323-debug")   # запаска, если API недоступен
+RELEASE_API = "https://api.github.com/repos/DrFaustos/MCU/releases/latest"
+
+
+def latest_release_url() -> str:
+    """Свежий self-contained бинарь релиза — риг обязан тестировать ТОТ ЖЕ
+    файл, что скачивает владелец, а не застывшую константу."""
+    try:
+        import json as _j
+        r = sh(["curl", "-fsSL", "--max-time", "30", RELEASE_API])
+        data = _j.loads(r.stdout.decode("utf-8", "replace"))
+        for a in data.get("assets", []):
+            if str(a.get("name", "")).startswith("MCU-h323"):
+                return a["browser_download_url"]
+    except Exception:  # noqa: BLE001
+        pass
+    return RELEASE_URL
 TODAY = time.strftime("%Y-%m-%d")
 EVIDENCE = REPO / "docs" / "evidence" / f"live-rig-{TODAY}"
 
@@ -94,7 +110,7 @@ MONITOR_NAME = "Тест микрофона"
 # («кнопка там, где надо»): без изменения пикселей под курсором клик не считается
 # действием, а риг краснеет честным «раскладка уехала», а не молчаливым промахом.
 BTN_CAMERA = (596, 486)             # «Тест камеры»
-BTN_MICMON = (596, 662)             # «Открыть монитор микрофона»
+BTN_MICMON = (780, 732)   # «Открыть монитор микрофона» — замер GUI репы на :98             # «Открыть монитор микрофона»
 COMBO_MIC = (700, 606)              # селектор микрофона (строка «Микрофон:»)
 COMBO_CAMERA = (700, 452)           # селектор камеры
 PREVIEW_REGION = (36, 100, 610, 640)   # x, y, w, h: сетка видео (превью)
@@ -210,30 +226,44 @@ class X:
                 pass
         return False
 
-    def child_window_by_last_embed(self, embed_xid: int):
-        """Окно превью встраивается ДОЧЕРНИМ X-окном (xid из строки
-        «embed(x11): child=… parent=…»): на бескомпозиционном Xvfb пиксели
-        родителя его НЕ содержат — захватывать надо сам child. Ищем в дереве
-        на глубину до 3."""
-        def walk(win, depth):
-            try:
-                kids = win.query_tree().children
-            except Exception:
-                return None
-            for k in kids:
-                try:
-                    if k.id == embed_xid:
-                        g = k.get_geometry()
-                        if g and g.width > 16 and g.height > 16:
-                            return k
-                except Exception:
-                    continue
-                if depth > 0:
-                    hit = walk(k, depth - 1)
-                    if hit is not None:
-                        return hit
+    def window_by_xid(self, xid: int):
+        """Окно ПРЯМО по xid (из лога embed), без обхода дерева: эмпирика
+        2026-11-24 — child живёт в ветке Qt-контейнера (отдельный top-level
+        «MCU»), недосягаемой из обхода root, а create_resource_object бьёт
+        точно."""
+        try:
+            w = self.d.create_resource_object("window", int(xid))
+            g = w.get_geometry()
+            if g and g.width > 16 and g.height > 16:
+                return w
+        except Exception:
             return None
-        return walk(self.root, 3)
+        return None
+
+    def screen_rect(self, win):
+        """(x, y, w, h) окна в экранных координатах."""
+        t = win.translate_coords(self.root, 0, 0)
+        g = win.get_geometry()
+        return t.x, t.y, g.width, g.height
+
+    def grab_screen(self, x: int, y: int, w: int, h: int):
+        """XGetImage КОРНЕВОГО окна — ровно то, что видит пользователь.
+        Пиксемы окон-родителей на бескомпозиционном Xvfb чужие child-окна
+        НЕ содержат (встроенное превью живёт в другом top-level Qt-контейнера
+        — его pixmap пуст), корневой фреймбуфер — единственный честный
+        измеритель «картинки в тайле»."""
+        from PIL import Image
+        img = self.root.get_image(x, y, w, h, self.X.ZPixmap, 0xFFFFFFFF)
+        raw = bytearray(bytes(img.data))
+        if len(raw) >= 4 * w * h:
+            raw = raw[:4 * w * h]
+            raw[0::4], raw[2::4] = raw[2::4], raw[0::4]   # BGRX -> RGBX
+            return Image.frombytes("RGBX", (w, h), bytes(raw)).convert("RGB")
+        return Image.frombytes("RGB", (w, h), bytes(img.data)).convert("RGB")
+
+    def child_window_by_last_embed(self, embed_xid: int):
+        """См. window_by_xid: дерево не обходим — Qt-контейнер недосягаем."""
+        return self.window_by_xid(embed_xid)
 
     def toplevels(self):
         out = []
@@ -286,7 +316,8 @@ def ensure_binary(log) -> None:
     if not BIN_SRC.exists():
         log(f"бинарь не скачан: {BIN_SRC} — тащу релиз (или положи вручную)")
         BIN_SRC.parent.mkdir(parents=True, exist_ok=True)
-        r = sh(["curl", "-fsSL", "--max-time", "900", "-o", str(BIN_SRC), RELEASE_URL])
+        r = sh(["curl", "-fsSL", "--max-time", "900", "-o", str(BIN_SRC),
+                latest_release_url()])
         if r.returncode:
             raise RigError(f"скачать релиз не вышло: {r.stderr[-200:]}")
         os.chmod(BIN_SRC, 0o755)
@@ -502,6 +533,25 @@ def diff_ratio(img_a, img_b) -> float:
 
 # ─────────────────────────────────── main ──────────────────────────────────
 
+def sweep_mei(log) -> None:
+    """Гигиена /tmp: onefile debug-бинарь распаковывается в /tmp/_MEI* —
+    ~700 МБ НА КАЖДЫЙ ЗАПУСК, а крашнутый прогон автоочистку не доделывает.
+    Пачка крашей съедает пользовательскую квоту /tmp (12.5 ГБ у владельца —
+    реальный инцидент 2026-11-24: 18 висячих _MEI* = 12.6 ГБ, EDQUOT на весь
+    хост). Удаляем _MEI* старше 30 минут: свежие могут принадлежать живому
+    процессу."""
+    import glob as _g
+    import shutil as _sh
+    now = time.time()
+    for p in _g.glob("/tmp/_MEI*"):
+        try:
+            if now - os.lstat(p).st_mtime > 1800:
+                _sh.rmtree(p, ignore_errors=True)
+                log(f"убрана стара распаковка PyInstaller: {p}")
+        except OSError:
+            pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--strict", action="store_true",
@@ -528,6 +578,7 @@ def main() -> int:
         raise RigError("нужен Pillow: pip install --user Pillow")
 
     try:
+        sweep_mei(log)         # до старта: не наступать на чужие /tmp квоты
         ensure_x(log)
         ensure_binary(log)
         x = X(":99")
@@ -563,54 +614,106 @@ def main() -> int:
 
         def preview_shot(tag: str):
             xid = last_embed_child(lg.since(0))
-            cw = x.child_window_by_last_embed(xid) if xid else None
-            img = x.grab_win(cw) if cw is not None else x.grab_win(app.win).crop(PREVIEW_REGION)
+            cw = x.window_by_xid(xid) if xid else None
+            rg = x.root.get_geometry()      # клампим к экрану Xvfb
+            if cw is not None:
+                try:
+                    sx, sy, sw, sh = x.screen_rect(cw)
+                    sx, sy = max(0, sx), max(0, sy)
+                    sw = min(sw, rg.width - sx, )
+                    sh = min(sh, rg.height - sy)
+                    if sw > 16 and sh > 16:
+                        img = x.grab_screen(sx, sy, sw, sh)
+                        img.save(EVIDENCE / f"{tag}.png")
+                        return img, True
+                except Exception:
+                    pass
+            # нет child'а — меряем ЭКРАН в зоне тайла (не pixmap родителя:
+            # он чужих окон не содержит в принципе)
+            ox, oy = x.origin(app.win)
+            reg_l, reg_t, reg_r, reg_b = PREVIEW_REGION
+            img = x.grab_screen(ox + reg_l, oy + reg_t, reg_r - reg_l, reg_b - reg_t)
             img.save(EVIDENCE / f"{tag}.png")
-            return img, cw is not None
+            return img, False
 
         prev0, via_child0 = preview_shot("01a_preview_boot")
         mark = lg.mark()
-        app.click_in(*BTN_CAMERA)
+        app.click_in(*BTN_CAMERA)          # первый тумблер: куда угодно
+        time.sleep(1.0)
+        off_txt = lg.since(mark)
+        # паритет не угадываем: читаем, в какое состояние клик реально
+        # перевёл (стартовый автостарт есть не в каждой сборке)
+        state_on = "'active': True" in off_txt
+        if state_on:                       # оказался ВКЛ — уводим в ВЫКЛ
+            app.click_in(*BTN_CAMERA)
+            time.sleep(1.0)
+            state_on = False
+        mark2 = lg.mark()
+        app.click_in(*BTN_CAMERA)          # снова ВКЛ — вот что меряем
         time.sleep(1.0)
         prev1, via_child1 = preview_shot("02_preview_t1")
         time.sleep(2.0)
         prev3, via_child3 = preview_shot("03_preview_t3")
         s0, s1, s3 = stats(prev0), stats(prev1), stats(prev3)
         d = diff_ratio(prev1, prev3)
-        txt = lg.since(mark)
+        txt = lg.since(mark2)
         started = "'active': True" in txt
+        state_on = started
         err_line = "Не удалось запустить превью" in txt
         # живой сигнал = кадры РАЗЛИЧАЮТСЯ между t1 и t3 (шум сенсора/сцены)
         moving = d > 0.005
-        alive_px = (s3["std"] > 8 and s3["mean"] > 20 and (moving or via_child0 is False))
+        # тёмная сцена (камера в крышку) даёт mean<20 при живом потоке —
+        # тогда критерий «движение есть», а не яркость
+        alive_px = s3["std"] > 8 and ((moving and s3["mean"] > 8)
+                                      or s3["mean"] > 20)
         reds += not V.add(
-            "(а) камера: картинка в зоне превью живая",
-            alive_px and not err_line,
+            "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
+            alive_px and started and not err_line,
             f"захват child-окна: boot={via_child0} t1={via_child1} t3={via_child3}; "
             f"пиксели boot={s0} t1={s1} t3={s3} diff(t1,t3)={d:.3f}; "
             f"лог: active={started} error={err_line}")
         art = ascii_art(x.grab_win(app.win).crop(PREVIEW_REGION))
         (EVIDENCE / "03_preview_t3_ascii.txt").write_text(art, encoding="utf-8")
 
-        # ── (б) повторный тест выкл/вкл x2 ──
+        # ── (б) повторный тест выкл/вкл x2 (4 тумблера со známым паритетом) ──
         round_errs = []
         for i in range(4):
+            expect_on = not state_on
             mark = lg.mark()
             app.click_in(*BTN_CAMERA)
             time.sleep(1.3)
             s = lg.since(mark)
+            got_on = "'active': True" in s
+            hide_line = "скрыто" in s or "'active': False" in s
+            err = "Не удалось запустить превью" in s or "Traceback" in s
             round_errs.append({
                 "round": i + 1,
-                "preview_active": "'active': True" in s,
-                "error": ("Не удалось запустить превью" in s or "Traceback" in s),
+                "expect": "on" if expect_on else "off",
+                "active": got_on,
+                "hide_ok": hide_line,
+                "error": err,
             })
-        bad = [r for r in round_errs if r["error"] or not r["preview_active"]]
+            if not err:
+                state_on = expect_on       # состояние доверено командам
+        bad = [r for r in round_errs
+               if r["error"] or r["active"] != (r["expect"] == "on")
+               or (r["expect"] == "off" and not r["hide_ok"])]
         reds += not V.add(
             "(б) повторный запуск превью", len(bad) == 0,
             f"раунды вкл/выкл×2: {round_errs}; "
-            + ("фикс переиспользования в репозитории ждёт релиза" if bad else "ок"))
+            + ("ошибочные раунды: " + repr(bad) if bad else
+               "toggle-семантика чистая"))
 
         # ── (в) микрофон: монитор + тон 440 Гц через динамики ──
+        # При ВКЛЮЧЁННОМ превью Qt-контейнер видео (отдельный top-level «MCU»)
+        # лежит ПОВЕРХ панели и ворует клики по кнопкам (доказано 2026-11-24:
+        # hover-пиксели меняются, клик не доходит). Глушим камеру — панель
+        # снова кликабельна, скрытое превью окна не поднимает.
+        if state_on:
+            app.click_in(*BTN_CAMERA)
+            time.sleep(1.2)
+            state_on = False
+            V.info("(в): камера выключена (hide) — видеоконтейнер убран с панели")
         mark = lg.mark()
         app.click_in(*BTN_MICMON)
         time.sleep(1.5)
@@ -631,9 +734,14 @@ def main() -> int:
                         time.sleep(0.35)
                         if "Монитор микрофона" in lg.since(n):
                             return (cx, y)
+                        # комбобоксы в той же полосе: клик по ним открывает
+                        # попап, который съедает ВСЕ последующие клики скана
+                        if x.popup_open():
+                            x.keys(0xff1b)     # Escape — закрыть попап
+                            time.sleep(0.25)
                 return None
 
-            hit = scan_strip(740)
+            hit = scan_strip(690)
             if hit is None:
                 ox, oy = x.origin(app.win)
                 x.root.warp_pointer(ox + 900, oy + 500)
@@ -702,20 +810,28 @@ def main() -> int:
         tone_proc.wait(timeout=15)
         tone1_levels = [v for _, v in lg.mic_levels(lg.since(tone_mark))]
 
-        # переключение микрофона: клик по селектору (попап) → Down → Return
-        mark = lg.mark()
-        app.click_in(*COMBO_MIC)
-        time.sleep(0.7)
-        if not x.popup_open():              # попап не открылся — ещё один клик
+        # переключение микрофона: клик по селектору (попап) → Down → Return.
+        # Две попытки: фокус после монитора/попапов бывает капризным.
+        switched, popup_seen = False, False
+        for _attempt in range(2):
+            mark = lg.mark()
             app.click_in(*COMBO_MIC)
             time.sleep(0.7)
-        x.keys(0xff54)          # Down — выделить соседний пункт
-        time.sleep(0.3)
-        x.keys(0xff0d)          # Return — зафиксировать
-        time.sleep(1.2)
-        switched = "media.mic_device" in lg.since(mark)
+            if not x.popup_open():              # попап не открылся — ещё клик
+                app.click_in(*COMBO_MIC)
+                time.sleep(0.7)
+            popup_seen = x.popup_open()
+            x.keys(0xff54)          # Down — выделить соседний пункт
+            time.sleep(0.3)
+            x.keys(0xff0d)          # Return — зафиксировать
+            time.sleep(1.2)
+            if "media.mic_device" in lg.since(mark):
+                switched = True
+                break
         reds += not V.add("(в1) переключение микрофона сработало", switched,
-                          "селектор микрофона: Down+Return → media.mic_device")
+                          f"селектор микрофона: popup={popup_seen}, "
+                          "событие media.mic_device "
+                          + ("есть" if switched else "не дошло"))
 
         tone_mark2 = lg.mark()
         tone_proc = subprocess.Popen(["paplay", str(wav)], env=env,
@@ -793,6 +909,7 @@ def main() -> int:
         left = sh(["pgrep", "-x", "MCU-h323-debug"]).stdout.split()
         V.info(f"пост-уборка: процессов MCU-h323-debug осталось {len(left)}, "
                f"paplay: {len(sh(['pgrep','-x','paplay']).stdout.split())}")
+        sweep_mei(V.info)      # /tmp/_MEI* от крашнутых прогонов — тоже мусор
         try:
             reds += not V.add("уборка: за собой чисто",
                               len(left) == 0, f"процессы: {left or 'нет'}")

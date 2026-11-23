@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -61,6 +62,68 @@ except ImportError:  # pragma: no cover
 def available() -> bool:
     """Доступен ли коммутатор (есть все зависимости)."""
     return _HAVE_CAM and _HAVE_CV2
+
+
+# --- Петлевые устройства (честность вирт-камеры) --------------------------------
+#
+# pyvirtualcam открывает устройство КАК OUTPUT. Если по указанному пути лежит
+# НЕ петлевой узел (на живой машине владельца /dev/video0 оказался реальным
+# узлом камеры), открытие превращает коммутатор во ВТОРОГО владельца сенсора:
+# пользователь видит «камера занята» при пустом приложении, а preview
+# ловит EBUSY. Поэтому поднимаем коммутатор ТОЛЬКО на настоящий v4l2loopback.
+
+def _sysfs_attr(node: str, attr: str, sysfs: str) -> str:
+    try:
+        with open(f"{sysfs}/{node}/{attr}", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _node_driver(node: str, sysfs: str) -> str:
+    try:
+        drv = os.path.realpath(f"{sysfs}/{node}/device/driver")
+    except OSError:
+        return ""
+    return drv.rsplit("/", 1)[-1]
+
+
+def is_loopback_device(device: str, sysfs: str = "/sys/class/video4linux") -> bool:
+    """Настоящий ли это петлевой узел (v4l2loopback)?
+
+    Надёжный признак — ДРАЙВЕР: v4l2loopback переименовывается параметром
+    devices_name, имя узла верить нельзя. Имя по умолчанию («v4l2 loopback»)
+    — только дополнительная ветка."""
+    node = os.path.basename(device)
+    if _node_driver(node, sysfs) == "v4l2loopback":
+        return True
+    return _sysfs_attr(node, "name", sysfs).lower() == "v4l2 loopback"
+
+
+def loopback_devices(sysfs: str = "/sys/class/video4linux") -> list[str]:
+    """Список петлевых /dev/videoN (порядок — по номеру узла)."""
+    found: list[str] = []
+    for i in range(32):
+        dev = f"/dev/video{i}"
+        if os.path.exists(dev) and is_loopback_device(dev, sysfs=sysfs):
+            found.append(dev)
+    return found
+
+
+def describe_video_nodes(sysfs: str = "/sys/class/video4linux") -> None:
+    """INFO-вердикт по каждому video-узлу при старте коммутатора: чем он
+    является на самом деле (driver/name) — чтобы лог объяснял отказ."""
+    try:
+        nodes = sorted(n for n in os.listdir(sysfs) if n.startswith("video"))
+    except OSError:
+        log.info("v4l2: %s недоступен — петлевых узлов не видно", sysfs)
+        return
+    for node in nodes:
+        drv = _node_driver(node, sysfs) or "?"
+        name = _sysfs_attr(node, "name", sysfs) or "?"
+        verdict = "петлевой" if (drv == "v4l2loopback"
+                                or name.lower() == "v4l2 loopback") else "РЕАЛЬНЫЙ/чужой"
+        log.info("v4l2: /dev/%s driver=%s name=%r -> %s", node, drv, name, verdict)
 
 
 # --- Источники -----------------------------------------------------------------
@@ -170,6 +233,25 @@ class VideoSourceSwitcher:
         if source is not None:
             with self._lock:
                 self._source = source
+        # Честность вирт-камеры: открыть можно только петлевой узел. Дефолтный
+        # /dev/video0 на реальном ноутбуке — узел сенсора; открытие его как
+        # OUTPUT делает коммутатор вторым владельцем камеры (репорт v0.3.3:
+        # «камера занята» на пустом месте). Сначала пробуем найти настоящий
+        # loopback, иначе — честно отказываем.
+        if not is_loopback_device(self.device):
+            describe_video_nodes()          # вердикт по каждому узлу — в лог
+            alts = loopback_devices()   # уже отфильтрованы проверкой
+            if alts:
+                log.info("Коммутатор: %s не петлевой — беру найденный %s",
+                         self.device, alts[0])
+                self.device = alts[0]
+            else:
+                self._last_error = "петлевое устройство (v4l2loopback) не найдено"
+                log.info("Коммутатор не поднят: %s — виртуальная камера выключена",
+                         self._last_error)
+                with self._lock:
+                    self._source = SourceInfo("off", "Выключено")
+                return False
         self._last_error = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="mcu-vsource", daemon=True)

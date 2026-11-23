@@ -1,13 +1,13 @@
 [
   {
-    "name": "(а) камера: картинка в зоне превью живая",
-    "ok": false,
-    "detail": "пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t3={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} diff=0.00; лог: active=True err=True"
+    "name": "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
+    "ok": true,
+    "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 41.0, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 41.0, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
   },
   {
     "name": "(б) повторный запуск превью",
     "ok": false,
-    "detail": "раунды вкл/выкл×2: [{'round': 1, 'preview_active': False, 'error': False}, {'round': 2, 'preview_active': False, 'error': True}, {'round': 3, 'preview_active': False, 'error': True}, {'round': 4, 'preview_active': False, 'error': True}]; фикс переиспользования в репозитории ждёт релиза"
+    "detail": "раунды вкл/выкл×2: [{'round': 1, 'expect': 'off', 'active': False, 'hide_ok': True, 'error': False}, {'round': 2, 'expect': 'on', 'active': True, 'hide_ok': False, 'error': False}, {'round': 3, 'expect': 'off', 'active': True, 'hide_ok': True, 'error': False}, {'round': 4, 'expect': 'on', 'active': True, 'hide_ok': False, 'error': False}]; ошибочные раунды: [{'round': 3, 'expect': 'off', 'active': True, 'hide_ok': True, 'error': False}]"
   },
   {
     "name": "(в0) монитор микрофона открылся",
@@ -32,7 +32,7 @@
   {
     "name": "избегание: экран/звонок/запись не тронуты",
     "ok": true,
-    "detail": "GUI-классы за прогон: ['media.devices', 'media.vsource', 'sip.address.changed']; запрещённых: нет"
+    "detail": "GUI-классы за прогон: ['media.camera_device', 'media.devices', 'media.preview', 'media.vsource', 'sip.address.changed']; запрещённых: нет"
   },
   {
     "name": "уборка: за собой чисто",
