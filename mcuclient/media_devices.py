@@ -29,6 +29,7 @@ import pathlib
 import platform
 import re
 import shutil
+import time
 import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -160,6 +161,11 @@ def _is_capture_capable(dev: str) -> bool:
     return "Video Capture" in out
 
 
+# Ноды без Video Capture, о которых мы уже сказали в логе (см.
+# _list_linux_cameras): watcher дёргает перечисление каждые 2 секунды.
+_skipped_capture_nodes: set = set()
+
+
 def _list_linux_cameras() -> List[DeviceInfo]:
     """Реальные камеры Linux с именами; фильтр по Video Capture.
 
@@ -175,7 +181,12 @@ def _list_linux_cameras() -> List[DeviceInfo]:
     cameras: List[DeviceInfo] = []
     for dev in candidates:
         if not _is_capture_capable(dev):
-            log.debug("Пропускаю %s: нет Video Capture", dev)
+            # Watcher опрашивает камеры каждые 2 с: повторный «Пропускаю»
+            # на ту же ноду — спам на тысячи строк в час (live-док). Один
+            # раз на ноду на процесс — и довольно.
+            if dev not in _skipped_capture_nodes:
+                _skipped_capture_nodes.add(dev)
+                log.debug("Пропускаю %s: нет Video Capture", dev)
             continue
         name, driver = _v4l2_device_name(dev)
         if not name:
@@ -209,8 +220,11 @@ def _pactl_sources() -> List[DeviceInfo]:
         return mics
     out = _run(["pactl", "list", "short", "sources"])
     # NAME из short-формы — технический идентификатор; человеку показываем
-    # description из длинной формы (там же, где системные настройки).
-    descs = _parse_pactl_sources_long(_run(["pactl", "list", "sources"]) or "")
+    # description. Карту берём из _pa_descriptions(), а не из длинной формы
+    # напрямую: на Fedora/PipeWire pactl-long может не распознаваться
+    # парсером, и тогда без pw-dump-фолбэка список остаётся техническим
+    # (live-док v0.3.3: «карта=2» в GUI-пути, сырые имена в watcher-списке).
+    descs = _pa_descriptions()
     for line in (out or "").splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -286,26 +300,75 @@ def _parse_pw_dump_sources(text: str) -> Dict[str, str]:
     return result
 
 
+# Диагностика карты имён пишется один раз на процесс (вызывается на
+# каждое перечисление устройств, а данные нужны ровно один раз).
+_pa_diag_done = False
+
+
 def _pa_descriptions() -> Dict[str, str]:
     """Имена микрофонов «как в системе»: PA/PW-имя источника -> описание.
 
     Человек в системных настройках видит ``device.description``
     («Built-in Audio Microphone…»), а PJSIP/pass-through списки носят
     технический NAME (``alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source``).
-    pactl (длинная форма), при его отсутствии — pw-dump; утилита не найдена
-    или ответ пуст — пустая карта, и UI остаётся на сырых именах (как было).
+    pactl (длинная форма); если pactl есть, но карту не дал (другой
+    формат вывода — live-отчёт v0.3.1: имена остались техническими),
+    или pactl нет — pw-dump. Пустая карта — UI на сырых именах (как
+    было), но ОДИН INFO-разговор о том, почему: утилиты, размер карты,
+    первые строки ответа (в DEBUG — это данные для разбора формата).
     """
-    if shutil.which("pactl"):
-        return _parse_pactl_sources_long(_run(["pactl", "list", "sources"]) or "")
-    if shutil.which("pw-dump"):
-        return _parse_pw_dump_sources(_run(["pw-dump"]) or "")
-    return {}
+    global _pa_diag_done
+    has_pactl = bool(shutil.which("pactl"))
+    has_pwdump = bool(shutil.which("pw-dump"))
+    descs: Dict[str, str] = {}
+    head = ""
+    if has_pactl:
+        raw = _run(["pactl", "list", "sources"]) or ""
+        descs = _parse_pactl_sources_long(raw)
+        if not descs:
+            head = "\n".join(raw.splitlines()[:6])
+    if not descs and has_pwdump:
+        raw = _run(["pw-dump"]) or ""
+        descs = _parse_pw_dump_sources(raw)
+        if not descs and not head:
+            head = "\n".join(raw.splitlines()[:6])
+    if not _pa_diag_done:
+        _pa_diag_done = True
+        log.info("Имена аудио: pactl=%s pw-dump=%s карта=%d",
+                 has_pactl, has_pwdump, len(descs))
+        if not descs and (has_pactl or has_pwdump):
+            log.debug("Имена аудио: карта пуста, начало ответа: %r", head)
+    return descs
 
 
 # Служебные «устройства» в списке захвата: null/echo-источники PJSIP/PW и
 # мониторы вывода. Это не микрофоны, но они занимают места в выпадающем
 # списке (на живой машине — 11 из 13 пунктов при двух реальных микрофонах).
 _SERVICE_AUDIO_TOKENS = frozenset({"null", "echo"})
+
+class LevelProbe:
+    """Rate-limited наблюдатель значения уровня: ~раз в секунду — «да».
+
+    Монитор дёргает read_mic_level на 20 Гц: разовая запись ничего не
+    доказывает, а лог на 20 Гц — мусор. sample(level) возвращает значение
+    не чаще раза в period_s (первый вызов — сразу) и None в остальное
+    время: «уровень действительно течёт» становится видно в логе, пока
+    окно монитора открыто (репорт v0.3.1: ноль строк о мониторе).
+    """
+
+    def __init__(self, period_s: float = 1.0, clock=time.monotonic) -> None:
+        self._period = float(period_s)
+        self._clock = clock
+        self._last = float("-inf")
+
+    def sample(self, level: float) -> Optional[float]:
+        now = self._clock()
+        if now - self._last >= self._period:
+            self._last = now
+            return level
+        return None
+
+
 
 
 def _is_service_audio_name(name: str) -> bool:
@@ -598,16 +661,21 @@ class MediaManager:
             return
         cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
         play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
+        changed = False
         if play < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "outputCount", 0) > 0:
                     self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                    changed = True
                     break
         if cap < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "inputCount", 0) > 0:
                     self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                    changed = True
                     break
+        if changed:
+            self._audio_dev_update(mgr)
         # В headless/контейнерных окружениях устройства могут присутствовать
         # в списке, но быть нерабочими. Тогда makeCall() падает с
         # PJMEDIA_EAUD_SYSERR — включаем null-устройство.
@@ -658,10 +726,58 @@ class MediaManager:
             if not ok:
                 raise RuntimeError("setCaptureDev недоступен")
             self._null_audio_active = False
-            return True
+            return self._audio_dev_update(mgr)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось переключить микрофон: %s", exc)
             return False
+
+    def _audio_dev_update(self, mgr) -> bool:  # pragma: no cover
+        """Применить выбранные индексы устройств к ЖИВОМУ звуковому потоку.
+
+        setCaptureDev/setPlaybackDev меняют только конфиг (дока binding
+        прямиком: «не меняет состояние звукового устройства»): pjsua заново
+        не открывает захват/вывод без перезапуска. Без этого шага
+        переключение микрофона декоративное — UI и монитор честно рапортуют
+        ВЫБРАННЫЙ порт, а pjsua молча продолжает читать старый (живой док
+        2026-11-24: тон 440 Гц не двигал монитор ни на одном из 12 индексов
+        при системном пике 32768). Нет метода в связке — предупреждаем и
+        считаем успех прежним (деградация как было); отказ обновления —
+        False: врать про применённое устройство нельзя.
+        """
+        # Путь перезапуска ищем ЦЕПОЧКОЙ: набор экспортов SWIG-связки
+        # зависит от сборки (живой док v0.3.5: в CI-бинде audioDevUpdateConfig
+        # НЕТ, а setSndDevMode — есть). Порядок от точного к живучему;
+        # прошлый путь пишется в лог («применено через …») — живой док
+        # проверит по строке, каким механизмом воспользовались.
+        # setDev в цепочку НЕ включаем: в проверенной CI-связке (dir()
+        # pjsua2 2.16 SWIG) его нет, а у Python-двойников mgr он часто
+        # существует «в наследство» и проглатывает цепочку молча.
+        applied = None
+        last: Optional[Exception] = None
+        for name, args in (("audioDevUpdateConfig", ()), ("setSndDevMode", (0,)),
+                           ("audioDevInit", ())):
+            m = getattr(mgr, name, None)
+            if m is None:
+                continue
+            try:
+                m(*args)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                log.debug("Путь применения звука %s не вышел: %s", name, exc)
+                continue
+            applied = name
+            break
+        if applied is not None:
+            log.info("Звуковой поток перезапущен: применено через %s", applied)
+            return True
+        if last is not None:
+            # Метод нашёлся, но отказал — врать про применённое нельзя.
+            log.warning("Ни один путь перезапуска звука не вышел (последняя: "
+                        "%s) — смена устройства могла не примениться", last)
+            return False
+        log.warning("pjsua2 без audioDevUpdateConfig/setSndDevMode — смена "
+                    "устройства не применится к живому потоку")
+        return True
 
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
         if not self.available:
@@ -672,8 +788,10 @@ class MediaManager:
             except Exception:  # noqa: BLE001
                 pass
             mgr = self.aud_mgr()
+            changed = False
             if dev_id is not None:
                 self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
+                changed = True
             # Playback НЕ трогаем. Раньше монитор ставил выбранный микрофон
             # ЕЩЁ И динамиками (setPlaybackDev := микрофон). Микрофон не
             # умеет играть, а у звуковых бэкендов (PortAudio/ALSA-дуплекс)
@@ -684,7 +802,40 @@ class MediaManager:
                 for i, info in enumerate(self.enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                        changed = True
                         break
+            unmute_done = False
+            if self._null_audio_active:
+                # Без живого звука монитор бессилен: pjsua крутит null-порт,
+                # capture-media отдаёт вечный нуль. setNullSound есть не во
+                # всех сборках (в CI-бинде его нет); setSndDevMode(0) — тот
+                # же результат через перезаход на реальные ID.
+                for name, args in (("setNullSound", (False,)),
+                                   ("setSndDevMode", (0,))):
+                    m = getattr(mgr, name, None)
+                    if not callable(m):
+                        continue
+                    try:
+                        m(*args)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("Снять null-аудио через %s не вышло: %s",
+                                  name, exc)
+                        continue
+                    self._null_audio_active = False
+                    log.info("Микрофон-монитор: null-аудио снято (%s), "
+                             "звук реальный", name)
+                    unmute_done = True
+                    break
+                if not unmute_done:
+                    log.warning("Микрофон-монитор: null-аудио не снять "
+                                "(ни setNullSound, ни setSndDevMode) — "
+                                "монитор останется с нулём")
+            if changed and not unmute_done:
+                # Выбранный индекс без применения к потоку — только бумажка:
+                # монитор читал бы старый порт (см. _audio_dev_update).
+                # Если снятие null уже перезаходило на реальные ID, второй
+                # перезаход не нужен.
+                self._audio_dev_update(mgr)
             return self.dev_int(mgr, "captureDev", "getCaptureDev") >= 0
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось открыть микрофон для монитора: %s", exc)

@@ -12,7 +12,10 @@
 
 from __future__ import annotations
 
+import gc
 import os
+import sys
+import time
 from typing import Any, Callable, Optional
 
 from . import video_embed
@@ -20,10 +23,35 @@ from .log import get_logger
 
 log = get_logger("vpreview")
 
+# Пауза перед единственным повтором нативного start(): дать pjsua
+# добить освобождение устройства после release.
+_RETRY_DELAY_S = 0.3
+
+
+class PreviewStartFailed(RuntimeError):
+    """Нативный start превью не взлетел даже после одного повтора."""
+
 
 def _err_text(exc: BaseException) -> str:
-    """Непустое описание ошибки (у pjsua2.Error из SWIG str() пустой)."""
-    return str(exc).strip() or exc.__class__.__name__
+    """Непустое, ИНФОРМАТИВНОЕ описание ошибки.
+
+    У pjsua2.Error из SWIG str() пустой — лог и событие с текстом
+    «Error» ничего не рассказывают (репорт владельца на v0.3.1: трейсбек
+    pjsua2.Error без title бесполезен). У C++-объекта Error есть поля
+    title/reason/code — забираем непустые: это данные, а не догадки, и
+    они доезжают до пользователя в событии media.preview.
+    """
+    parts = [str(exc).strip() or exc.__class__.__name__]
+    title = str(getattr(exc, "title", "") or "").strip()
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    code = getattr(exc, "code", None)
+    if title:
+        parts.append(f"title={title}")
+    if reason and reason != title:
+        parts.append(f"reason={reason}")
+    if code:
+        parts.append(f"code={code}")
+    return " | ".join(parts)
 
 
 class VideoPreviewService:
@@ -59,6 +87,13 @@ class VideoPreviewService:
         # «повторная проверка» выглядела как мёртвая кнопка (репорт с
         # живого Linux, 2026-11).
         self._preview_started = False
+        # «Выключено» = скрыто, НЕ нативный stop: pjsua 2.16 освобождает
+        # capture-ноду только вместе с libDestroy процесса (проверено
+        # живым прогоном 2026-11-23: после preview_stop fd остаётся,
+        # повторный start ловит EBUSY навечно). Поэтому OFF жжёт
+        # OUTPUT_HIDE (show=False), а ON — повторный start по тому же
+        # окну (pjsua переиспользует живое превью и показывает его).
+        self._preview_hidden = False
         self._embedded_xids: dict = {}
         # Отдельное нативное окно PJSIP (фолбэк, когда X11-встраивание
         # невозможно): держим флаг, чтобы не «мигать» настройкой.
@@ -67,7 +102,7 @@ class VideoPreviewService:
     # --- локальное превью ---
     @property
     def active(self) -> bool:
-        return self._preview is not None
+        return self._preview is not None and not self._preview_hidden
 
     def embed_possible(self) -> bool:
         """Есть ли в этой сессии бэкенд встраивания нативных окон (X11/Win)."""
@@ -83,6 +118,18 @@ class VideoPreviewService:
         self._preview_dev = int(target)
         self._preview_xid = None
         self._preview_started = False
+        self._preview_hidden = False
+
+    def _dev_name(self, dev: int) -> str:
+        """Имя ноды захвата для телеметрии: /dev/video1 и /dev/video2 — две
+        ноды одного сенсора; без имени не видно, кто на какую смотрит."""
+        try:
+            for d in (self._list_video_devices() if self._list_video_devices else []):
+                if int(d.get("id", -2)) == int(dev):
+                    return str(d.get("name", "?"))
+        except Exception:  # noqa: BLE001 — телеметрия не имеет права ронять старт
+            pass
+        return "?"
 
     def start(self, dev_id: Optional[int] = None, show_window: bool = False) -> bool:
         if not self._endpoint_ready():
@@ -105,6 +152,17 @@ class VideoPreviewService:
                     return False
                 target = devices[0]["id"]
             target = int(target)
+            # Диагностика вместо догадок (репорт v0.3.1: native start при
+            # «идеальном» состоянии): какое состояние видит сервис ПЕРЕД
+            # решением — guard, release или новый объект.
+            log.info(
+                "preview.start: obj=%s dev=%s started=%s -> target=%s(%s) "
+                "show=%s refs=%s",
+                id(self._preview), self._preview_dev,
+                self._preview_started, target, self._dev_name(target),
+                bool(show_window),
+                sys.getrefcount(self._preview) if self._preview is not None else -1,
+            )
             if self._set_video_device is not None:
                 self._set_video_device(target)
             # VideoPreview(dev) привязывает устройство при создании: при смене
@@ -114,15 +172,35 @@ class VideoPreviewService:
                 self._release_preview()
             if (self._preview is not None and self._preview_started
                     and int(self._preview_dev) == target):
-                # Тот же уже запущенный девайс без остановки. PJSIP
-                # отвечает ошибкой на повторный preview_start, и UI
-                # рапортовал «не удалось запустить»/мёртвую кнопку —
-                # это и было «повторная проверка не запускается»
-                # (репорт с живого Linux). Сменой режима окна владеет
-                # restart_show_window(), а не повторный start().
-                self._events.emit("media.preview", active=True,
-                                  native_window=self._native_window)
-                return True
+                if not self._preview_hidden:
+                    # Тот же уже запущенный девайс без остановки. PJSIP
+                    # отвечает ошибкой на повторный preview_start, и UI
+                    # рапортовал «не удалось запустить»/мёртвую кнопку —
+                    # это и было «повторная проверка не запускается»
+                    # (репорт с живого Linux).
+                    self._events.emit("media.preview", active=True,
+                                      native_window=self._native_window)
+                    return True
+                # Скрытое превью: тот же объект, повторный start — pjsua
+                # переиспользует ЖИВОЕ окно и показывает его (OUTPUT_SHOW).
+                # Никакого native stop: он убивает ноду до конца процесса.
+                try:
+                    prm = self._pj.VideoPreviewOpParam()
+                    # Показываем ВСЕГДА: после hide окно mapping-ом и
+                    # оживает (окно уже встроено в тайл — «показать»
+                    # означает «показать внутри тайла», не поп-ап).
+                    prm.show = True
+                    self._preview.start(prm)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Превью: показать после скрытия не удалось (%s)"
+                                " — пересоздаю объект", _err_text(exc))
+                    self._release_preview()
+                else:
+                    self._preview_hidden = False
+                    self._native_window = bool(show_window)
+                    self._events.emit("media.preview", active=True,
+                                      native_window=self._native_window)
+                    return True
             if self._preview is None:
                 self._make_preview(target)
             self._native_window = bool(show_window)
@@ -130,7 +208,33 @@ class VideoPreviewService:
             # show=False: PJSIP не показывает окно сам, встраиваем через X11.
             # show=True: фолбэк — отдельное нативное окно (Wayland и пр.).
             prm.show = bool(show_window)
-            self._preview.start(prm)
+            try:
+                self._preview.start(prm)
+            except Exception as exc1:  # noqa: BLE001
+                first = _err_text(exc1)
+                # Самолечение: чаще всего объект «сгорел» нативно (либу
+                # пересоздали / устройство переназначили за спиной сервиса,
+                # а Python-состояние об этом не знает) — отпускаем и ровно
+                # ОДИН раз пробуем новым объектом. Не циклом: мёртвое
+                # устройство не должен долбить бесконечный ретрай (репорт
+                # v0.3.1: error -> stop -> rebuild -> start -> error, раз в
+                # секунду).
+                log.warning(
+                    "Превью: нативный start не взлетел (%s) — отпускаю и "
+                    "повторяю через %dмс",
+                    first, int(_RETRY_DELAY_S * 1000),
+                )
+                self._release_preview()
+                time.sleep(_RETRY_DELAY_S)
+                try:
+                    self._make_preview(target)
+                    prm = self._pj.VideoPreviewOpParam()
+                    prm.show = bool(show_window)
+                    self._preview.start(prm)
+                except Exception as exc2:  # noqa: BLE001
+                    raise PreviewStartFailed(
+                        f"{first} | повтор: {_err_text(exc2)}") from exc2
+                log.info("Превью запущено с одного повтора (dev=%s)", target)
             self._preview_started = True
             log.info(
                 "Локальное превью камеры запущено (dev=%s, show=%s)",
@@ -141,25 +245,75 @@ class VideoPreviewService:
         except Exception as exc:  # noqa: BLE001
             # log.exception, а не warning: у pjsua2.Error str(exc) пустой,
             # и без трассировки причина не видна.
-            log.exception("Не удалось запустить превью камеры")
+            log.exception("Не удалось запустить превью камеры: %s",
+                          _err_text(exc))
+            # Объект, ни разу не стартовавший, нативно не открыт: держать
+            # его — значит active=True враньём и будущий stop по нему
+            # («stop бросает Error» после фейла, репорт v0.3.1).
+            if self._preview is not None and not self._preview_started:
+                # Не просто бросить ссылку: без destroy() объект остаётся в
+                # реестре SWIG-директора, а вместе с ним — слот pjsua и, если
+                # ноду всё-таки приоткрыли, сам сенсор (EBUSY-репро
+                # 2026-11-23). Путь release stop по нестартовавшему не делает.
+                self._release_preview()
             self._events.emit("media.preview", active=False, error=_err_text(exc))
             return False
 
     def _release_preview(self) -> None:
         """Остановить и отпустить текущий VideoPreview (best-effort)."""
         pv, self._preview = self._preview, None
+        started = self._preview_started
         self._preview_started = False
         if pv is not None:
-            try:  # pragma: no cover
-                pv.stop()
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Ошибка остановки превью: %s", _err_text(exc))
+            pv_id = id(pv)
+            log.info("preview.release: obj=%s dev=%s started=%s refs=%s",
+                     pv_id, self._preview_dev, started, sys.getrefcount(pv))
+            if started:
+                # stop — только по реально запущенному: по нестартовавшему
+                # объекту pjsua2 бросает Error, это тот самый каскад
+                # «stop Error после фейла» из репорта v0.3.1.
+                try:  # pragma: no cover
+                    pv.stop()
+                except Exception as exc:  # noqa: BLE001
+                    log.info("Ошибка остановки превью (obj=%s): %s",
+                             pv_id, _err_text(exc))
+            # Явное уничтожение: pjsua2 освобождает capture-ноду (сам
+            # сенсор!) только в C++-деструкторе, а SWIG-директор держит
+            # Python-объект в реестре — del/gc.collect() на живой связке
+            # 2.16 ноду НЕ отпускают (проверено контейнерным прогоном).
+            # Деструктор наружу в SWIG-связке — __swig_destroy__()
+            # (ручного destroy() там нет); в pybind11-сборках — destroy().
+            # Без этого шага первый старт работает, каждый перестарт ловит
+            # «Device or resource busy» вечно (репорт 2026-11-23).
+            killer = (getattr(pv, "__swig_destroy__", None)
+                      or getattr(pv, "destroy", None))
+            if killer is not None:
+                try:
+                    try:
+                        # SWIG: __swig_destroy__ — встроенная
+                        # delete_VideoPreview(obj), НЕ связывается с
+                        # экземпляром (pv.__swig_destroy__() падает
+                        # TypeError); pybind-destroy — связанный метод.
+                        killer(pv)
+                    except TypeError:
+                        killer()
+                    destroyed = True
+                except Exception as exc:  # noqa: BLE001
+                    destroyed = False
+                    log.info("preview.деструктор не удался (obj=%s): %s",
+                             pv_id, _err_text(exc))
+            else:
+                destroyed = False   # связка без деструктора — деградация как раньше
+            del pv
+            gc.collect()
+            log.info("preview.released: obj=%s destroyed=%s", pv_id, destroyed)
         self._preview_xid = None
         self._preview_dev = -1
+        self._preview_hidden = False
         self._native_window = False
 
     def restart_show_window(self) -> bool:
-        """Перезапустить превью отдельным нативным окном (фолбэк).
+        """Показать превью отдельным нативным окном (фолбэк).
 
         Нужно, когда X11-встраивание невозможно (Wayland/XWayland):
         показываем окно PJSIP (show=True) вместо потери кадра.
@@ -167,23 +321,56 @@ class VideoPreviewService:
         dev = self._preview_dev
         if self._preview is None or dev < 0:
             return False
-        self._release_preview()
-        ok = self.start(int(dev), show_window=True)
-        if ok:
-            # Под XWayland новое окно может открыться ПОД главным окном —
-            # со стороны это выглядит как «изображение не появилось».
-            # Поднимаем и фокусим (best-effort: XID мог ещё не созреть).
-            xid = self.preview_xid()
-            if xid:
-                video_embed.raise_window(xid)
-        return ok
+        # Не останавливаем: нативный stop убивает capture-ноду до конца
+        # процесса (pjsua 2.16, репро 2026-11-23). Показываем ЖИВОЕ окно
+        # напрямую (OUTPUT_SHOW): из скрытого и из «показанного, но
+        # не встроенного» состояния — одна и та же операция.
+        try:
+            prm = self._pj.VideoPreviewOpParam()
+            prm.show = True
+            self._preview.start(prm)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Превью: показать окном не удалось (%s)", _err_text(exc))
+            return False
+        self._preview_hidden = False
+        self._native_window = True
+        self._events.emit("media.preview", active=True, native_window=True)
+        # Под XWayland новое окно может открыться ПОД главным окном —
+        # со стороны это выглядит как «изображение не появилось».
+        # Поднимаем и фокусим (best-effort: XID мог ещё не созреть).
+        xid = self.preview_xid()
+        if xid:
+            video_embed.raise_window(xid)
+        return True
 
     def stop(self) -> None:
+        """Выключить превью: СКРЫТЬ окно, capture-порт оставить живым.
+
+        pjsua 2.16 освобождает capture-ноду так, что повторный старт
+        превью внутри процесса больше не удаётся (EBUSY навечно —
+        воспроизведено живым прогоном 2026-11-23: preview_stop оставляет
+        поток/ноду занятыми до libDestroy). Поэтому переключатель
+        «тест камеры» = show/hide (OUTPUT_HIDE/SHOW), а нативный stop —
+        только в shutdown() перед уничтожением endpoint.
+        """
         if self._preview is None:
             return
-        self._release_preview()
+        if not self._preview_hidden and self._preview_started:
+            try:
+                prm = self._pj.VideoPreviewOpParam()
+                prm.show = False
+                self._preview.start(prm)     # reuse-путь pjsua: hide
+                self._preview_hidden = True
+            except Exception as exc:  # noqa: BLE001
+                log.info("Превью: скрыть не удалось (%s) — стопим по-старому",
+                         _err_text(exc))
+                self._release_preview()
         self._events.emit("media.preview", active=False)
-        log.info("Локальное превью камеры остановлено")
+        log.info("Локальное превью камеры остановлено (скрыто, capture жив)")
+
+    def shutdown(self) -> None:
+        """Нативно отпустить превью — вызывать только перед libDestroy."""
+        self._release_preview()
 
     def preview_xid(self) -> Optional[int]:
         if self._preview is None:

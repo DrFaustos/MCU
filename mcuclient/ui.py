@@ -400,6 +400,15 @@ if QT_AVAILABLE:
             self._timer.timeout.connect(self._tick)
             self._timer.start()
 
+        def apply_device(self, dev_id: int | None, dev_name: str | None) -> None:
+            """Перетыкнуть тракт на другой микрофон без нового окна
+            (повторный клик по кнопке раньше множил «Тест микрофона»)."""
+            self._opened = self.engine.open_mic_monitor(dev_id)
+            self._levels = [0.0] * self.BARS
+            self._peak = 0.0
+            if dev_name:
+                self.info.setText(f"Тестируется: {dev_name}")
+
         def _build_ui(self) -> None:
             root = QtWidgets.QVBoxLayout(self)
             self.info = QtWidgets.QLabel("Проверка звука")
@@ -1041,6 +1050,13 @@ if QT_AVAILABLE:
             появляется не сразу — пробуем несколько раз с интервалом.
             """
             def _try() -> None:
+                # Тумблер уже выключил превью (hide) — цикл обязан умереть:
+                # иначе отложенная попытка достраивает встраивание и уходит в
+                # фолбэк restart_local_preview_window(), который ПОКАЗЫВАЕТ
+                # скрытое превью — выключенная камера «восстаёт» через
+                # секунду (поймано живым ригом 2026-11-24, раунд off).
+                if not self.engine.local_preview_active:
+                    return
                 done = False
                 for tile in self._tiles.values():
                     if getattr(tile, "_is_local", False):
@@ -1559,6 +1575,15 @@ if QT_AVAILABLE:
             dev_name = self.mic_combo.currentText() if dev_id is not None else None
             if dev_id is not None and dev_id < 0:
                 dev_id = None
+            # Повторное нажатие НЕ множит окна («Тест микрофона» веером).
+            # Живое окно — перетыкнуть тракт и поднять наверх.
+            old = getattr(self, "_mic_window", None)
+            if old is not None and old.isVisible():
+                old.apply_device(dev_id, dev_name)
+                old.raise_()
+                old.activateWindow()
+                self.device_status.setText("Монитор микрофона обновлён")
+                return
             self._mic_window = MicMonitorWindow(self.engine, dev_id, self,
                                                 dev_name=dev_name)
             self._mic_window.show()

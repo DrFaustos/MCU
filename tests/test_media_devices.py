@@ -6,6 +6,7 @@ arecord) подменяются, поэтому тесты одинаково п
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import types
@@ -550,3 +551,349 @@ def test_pactl_sources_prefer_descriptions_and_mark_service():
     # Монитор вывода — не микрофон; служебный null остаётся в списке
     # (id-контракт), но помечен; реальный вход показан человеком именем.
     assert names == ["Built-in Mic", "null (служебное)"]
+
+
+def test_pactl_sources_uses_pw_dump_map_when_pactl_long_unparsable():
+    """Fedora/PipeWire-кейс live-дока v0.3.3: short-форма есть, длинную
+    форму парсер не узнаёт — имена всё равно человеческие, карта из
+    pw-dump (раньше watcher-путь обходил фолбэк и показывал техимена)."""
+    short = "58\talsa_input.pci.Mic1\t4\t0\tRUNNING\n"
+    dump = json.dumps([
+        {"info": {"props": {
+            "media.class": "Audio/Source",
+            "node.name": "alsa_input.pci.Mic1",
+            "node.description": "Built-in Audio Microphone",
+        }}},
+    ])
+
+    def fake_run(cmd):
+        if "short" in cmd:
+            return short
+        if cmd[0] == "pw-dump":
+            return dump
+        return "непонятный формат\nещё строки\n"
+
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    orig_diag = media_devices._pa_diag_done
+    media_devices._run = fake_run
+    media_devices.shutil.which = lambda name: "/usr/bin/" + name
+    media_devices._pa_diag_done = False
+    try:
+        mics = media_devices._pactl_sources()
+    finally:
+        media_devices._run = orig_run
+        media_devices.shutil.which = orig_which
+        media_devices._pa_diag_done = orig_diag
+    assert [m.name for m in mics] == ["Built-in Audio Microphone"]
+
+
+def test_skipped_capture_node_logged_once():
+    """Watcher дёргает камеры каждые 2 с — «Пропускаю /dev/videoN»
+    должен прозвучать один раз на ноду, а не тысячестрочным спамом.
+
+    Перехват — подменой log-объекта модуля (не caplog): под полным
+    раннером боевой лог-конфиг перехватывает "mcuclient*" до caplog-
+    хендлера, и standalone/runner расходились бы (тот же приём, что в
+    тестах video_source).
+    """
+    msgs: list = []
+
+    class FakeLog:
+        def debug(self, fmt, *args):
+            msgs.append(fmt % args if args else fmt)
+
+        def info(self, *a, **k):
+            pass
+
+        warning = error = info
+
+    orig_nodes = media_devices._v4l2_capture_nodes
+    orig_cap = media_devices._is_capture_capable
+    orig_log = media_devices.log
+    orig_skipped = set(media_devices._skipped_capture_nodes)
+    media_devices._skipped_capture_nodes.clear()
+    media_devices._v4l2_capture_nodes = lambda: ["/dev/video9"]
+    media_devices._is_capture_capable = lambda dev: False
+    media_devices.log = FakeLog()
+    try:
+        media_devices._list_linux_cameras()
+        media_devices._list_linux_cameras()
+        media_devices._list_linux_cameras()
+    finally:
+        media_devices._v4l2_capture_nodes = orig_nodes
+        media_devices._is_capture_capable = orig_cap
+        media_devices.log = orig_log
+        media_devices._skipped_capture_nodes.clear()
+        media_devices._skipped_capture_nodes.update(orig_skipped)
+    spam = [m for m in msgs if "Пропускаю /dev/video9" in m]
+    assert len(spam) == 1
+
+
+
+# --- v0.3.5: смена микрофона обязана применяться к живому потоку ---
+
+
+class _FakeMgr:
+    def __init__(self, update=None):
+        self.captureDev = 0
+        self.playbackDev = 0
+        self.setCaptureDev_calls = []
+        self.updates = 0
+        self._update = update
+
+    def setCaptureDev(self, v):
+        self.setCaptureDev_calls.append(v)
+
+    def audioDevUpdateConfig(self):
+        self.updates += 1
+        if self._update:
+            self._update()
+
+
+def _mgr_with(mgr):
+    class EP:
+        def audDevManager(self):
+            return mgr
+
+    return media_devices.MediaManager(object(), EP())
+
+
+def test_set_capture_device_applies_audio_dev_update():
+    # setCaptureDev без audioDevUpdateConfig декоративен: pjsua продолжает
+    # читать старый порт (живой док 2026-11-24). Успех переключения теперь
+    # невозможен без применения конфига к потоку.
+    mgr = _FakeMgr()
+    assert _mgr_with(mgr).set_capture_device(7) is True
+    assert mgr.captureDev == 7
+    assert mgr.updates == 1
+
+
+def test_set_capture_device_fails_when_update_raises():
+    def boom():
+        raise RuntimeError("PJMEDIA_EAUD")
+
+    mgr = _FakeMgr(update=boom)
+    orig_log = media_devices.log
+    media_devices.log = type("L", (), {"warning": staticmethod(lambda *a, **k: None),
+                                       "info": staticmethod(lambda *a, **k: None),
+                                       "debug": staticmethod(lambda *a, **k: None)})()
+    try:
+        assert _mgr_with(mgr).set_capture_device(3) is False
+    finally:
+        media_devices.log = orig_log
+
+
+def test_set_capture_device_falls_back_to_snd_dev_mode():
+    # CI-сборка pjsua2 (док v0.3.5): audioDevUpdateConfig в связке НЕТ,
+    # зато есть setSndDevMode — цепочка обязана применить через него и
+    # назвать в логе прошедший путь (живой док ищет строку «применено через»).
+    msgs = []
+
+    def _rec(fmt, *a, **k):
+        msgs.append(fmt % a if a else fmt)
+
+    log = type("L", (), {"warning": staticmethod(_rec),
+                         "info": staticmethod(_rec),
+                         "debug": staticmethod(_rec)})()
+
+    class ModeMgr(_FakeMgr):
+        audioDevUpdateConfig = None  # нет метода в CI-связке
+
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = ModeMgr()
+    orig_log = media_devices.log
+    media_devices.log = log
+    try:
+        assert _mgr_with(mgr).set_capture_device(9) is True
+    finally:
+        media_devices.log = orig_log
+    assert mgr.modes == [0]
+    assert any("применено через setSndDevMode" in m for m in msgs)
+
+
+def test_set_capture_device_prefers_exact_update_over_modes():
+    # Порядок цепочки: точечный audioDevUpdateConfig важнее тотального
+    # перезахода setSndDevMode — лишний restart звука без нужды не нужен.
+    class BothMgr(_FakeMgr):
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = BothMgr()
+    assert _mgr_with(mgr).set_capture_device(4) is True
+    assert mgr.updates == 1
+    assert mgr.modes == []
+
+
+def test_set_capture_device_fails_when_all_paths_raise():
+    # Все найденные пути отказали — честный False: «успех» без применения
+    # к живому потоку ровно и стоил владельцу трёх кругов отладки.
+    msgs = []
+    log = type("L", (), {
+        "warning": staticmethod(lambda f, *a, **k: msgs.append(f % a if a else f)),
+        "debug": staticmethod(lambda f, *a, **k: None),
+        "info": staticmethod(lambda f, *a, **k: None)})()
+
+    class SickMgr(_FakeMgr):
+        def __init__(self):
+            super().__init__()
+            self.modes: list = []
+
+        def audioDevUpdateConfig(self):
+            self.updates += 1
+            raise RuntimeError("PJMEDIA_EAUD")
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+            raise RuntimeError("PJMEDIA_EAUD_SYSERR")
+
+    mgr = SickMgr()
+    orig_log = media_devices.log
+    media_devices.log = log
+    try:
+        assert _mgr_with(mgr).set_capture_device(5) is False
+    finally:
+        media_devices.log = orig_log
+    assert mgr.updates == 1 and mgr.modes == [0]
+    assert any("Ни один путь перезапуска" in m for m in msgs)
+
+
+def test_set_capture_device_without_update_method_degrades_honestly():
+    # Связка pjsua2 без audioDevUpdateConfig и без setSndDevMode: прежняя
+    # деградация (считаем успех), но предупреждением в лог — «успех» без
+    # применения к потоку.
+    msgs = []
+    class L:
+        @staticmethod
+        def warning(fmt, *a):
+            msgs.append(fmt % a if a else fmt)
+        info = debug = warning
+
+    class Legacy(_FakeMgr):
+        audioDevUpdateConfig = None  # нет метода в связке (getattr → None)
+
+    mgr = Legacy()
+    orig_log = media_devices.log
+    media_devices.log = L()
+    try:
+        assert _mgr_with(mgr).set_capture_device(2) is True
+    finally:
+        media_devices.log = orig_log
+    assert mgr.updates == 0
+    assert any("audioDevUpdateConfig" in m for m in msgs)
+
+
+# --- v0.3.2: монитор микрофона самодостаточен; карта имён — с диагностикой ---
+
+
+def test_open_mic_monitor_unmutes_null_audio():
+    """Без живого звука монитор читает мёртвый null-порт (репорт: «уровень
+    мёртв на всех устройствах»). Монитор обязан снять null-заглушку."""
+
+    class _NullMgr(_AudioMgr):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.null_calls: list = []
+
+        def setNullSound(self, flag):  # noqa: N802
+            self.null_calls.append(flag)
+
+    mgr = _NullMgr(capture_dev=2)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mgr.null_calls == [False]
+    assert mm._null_audio_active is False
+
+
+def test_open_mic_monitor_survives_without_setnullsound():
+    # Другая сборка bindings без setNullSound: не падает, флаг честно жив.
+    mgr = _AudioMgr(capture_dev=3)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mm._null_audio_active is True
+
+
+def test_open_mic_monitor_unmutes_via_snd_dev_mode():
+    # CI-связка (док v0.3.5): setNullSound там нет, есть setSndDevMode —
+    # снятие null идёт через перезаход на реальные ID.
+
+    class ModeMgr(_AudioMgr):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.modes: list = []
+
+        def setSndDevMode(self, mode):  # noqa: N802
+            self.modes.append(mode)
+
+    mgr = ModeMgr(capture_dev=2)
+    mm = _manager(mgr)
+    mm._null_audio_active = True
+    assert mm.open_mic_monitor(3) is True
+    assert mgr.modes == [0]
+    assert mm._null_audio_active is False
+
+
+def test_level_probe_reports_about_once_per_second():
+    t = {"now": 0.0}
+    probe = media_devices.LevelProbe(period_s=1.0, clock=lambda: t["now"])
+    assert probe.sample(0.1) == 0.1       # первый сэмпл — сразу
+    t["now"] = 0.5
+    assert probe.sample(0.2) is None      # 20 Гц молчат
+    t["now"] = 1.05
+    assert probe.sample(0.3) == 0.3       # ~раз в секунду — значение
+    t["now"] = 1.4
+    assert probe.sample(0.4) is None
+
+
+def test_level_probe_period_scales():
+    t = {"now": 10.0}
+    probe = media_devices.LevelProbe(period_s=0.5, clock=lambda: t["now"])
+    assert probe.sample(1) == 1
+    t["now"] = 10.4
+    assert probe.sample(2) is None
+    t["now"] = 10.5
+    assert probe.sample(3) == 3
+
+
+def test_pa_descriptions_falls_back_to_pw_dump():
+    """pactl есть, но его вывод парсер не узнал (live-отчёт: имена остались
+    техническими) — карта берётся из pw-dump, а не остаётся пустой."""
+    good = ('[{"info": {"props": {"media.class": "Audio/Source", '
+            '"node.name": "mic0", "node.description": "Headset Mic"}}}]')
+
+    def fake_run(cmd):
+        return good if cmd[0] == "pw-dump" else "какой-то другой формат\nстрока 2"
+
+    orig_run = media_devices._run
+    orig_which = media_devices.shutil.which
+    media_devices._run = fake_run
+    media_devices.shutil.which = lambda name: f"/usr/bin/{name}"
+    try:
+        assert media_devices._pa_descriptions() == {"mic0": "Headset Mic"}
+    finally:
+        media_devices._run = orig_run
+        media_devices.shutil.which = orig_which
+
+
+def test_pa_descriptions_empty_without_utils():
+    orig_which = media_devices.shutil.which
+    orig_run = media_devices._run
+    media_devices.shutil.which = lambda name: None
+    media_devices._run = lambda cmd: ""
+    try:
+        assert media_devices._pa_descriptions() == {}
+    finally:
+        media_devices.shutil.which = orig_which
+        media_devices._run = orig_run
