@@ -582,7 +582,9 @@ class SipEngine:
         try:
             self._recording.stop_conference_recording()
             self._recording.stop_audio_recording_silent()
-            self._vpreview.stop()
+            # shutdown, не stop: OFF превью = hide, а нативный stop — только
+            # перед уничтожением endpoint (pjsua 2.16 не отпускает ноду).
+            self._vpreview.shutdown()
             self._vsource.stop_screen_share_silent()
             self._vsource.stop_virtual_camera_silent()
             self._detach_own_media()

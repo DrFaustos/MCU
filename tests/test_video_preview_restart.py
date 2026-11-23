@@ -72,9 +72,12 @@ def test_restart_show_window_reuses_same_device():
     svc.start(0)
     first = svc._preview
     assert svc.restart_show_window() is True
-    assert svc._preview is not first  # пересоздан
-    assert svc._preview.dev == 0
-    assert svc._preview.started.show is True
+    # нативный stop НЕ зовём: он убивает capture-ноду до конца процесса
+    # (pjsua 2.16) — фолбэк показывает то же окно show=True
+    assert svc._preview is first
+    assert first.stopped == 0
+    assert first.dev == 0
+    assert first.started.show is True
 
 
 def test_restart_without_preview_returns_false():
@@ -250,10 +253,10 @@ def test_stop_never_called_on_unstarted_object():
 
 
 def test_release_stops_started_object():
-    """Позитивная половина: стартованный объект stop-ится штатно."""
+    """Позитивная половина: shutdown останавливает стартованный объект."""
     pj = _SeqPj(fail_times=0)
     svc = _service(pj=pj)
     assert svc.start(0) is True
-    svc.stop()
+    svc.shutdown()
     assert pj.stops == [0]
     assert svc.active is False

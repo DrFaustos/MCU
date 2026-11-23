@@ -1,0 +1,42 @@
+[
+  {
+    "name": "(а) камера: картинка в зоне превью живая",
+    "ok": false,
+    "detail": "пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t3={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} diff=0.00; лог: active=True err=True"
+  },
+  {
+    "name": "(б) повторный запуск превью",
+    "ok": false,
+    "detail": "раунды вкл/выкл×2: [{'round': 1, 'preview_active': False, 'error': False}, {'round': 2, 'preview_active': False, 'error': True}, {'round': 3, 'preview_active': False, 'error': True}, {'round': 4, 'preview_active': False, 'error': True}]; фикс переиспользования в репозитории ждёт релиза"
+  },
+  {
+    "name": "(в0) монитор микрофона открылся",
+    "ok": false,
+    "detail": "ни константа, ни плотный скан полосы 740..800 не дали события «Монитор микрофона» — в этом билде кнопка недоступна координатно"
+  },
+  {
+    "name": "(в1) переключение микрофона сработало",
+    "ok": false,
+    "detail": "селектор микрофона: Down+Return → media.mic_device"
+  },
+  {
+    "name": "(в) тон 440 Гц двигает монитор на двух микрофонах",
+    "ok": false,
+    "detail": "движение пикселей: фон=-1 тон1=-1 тон2=-1 (порог >max(60, 3×фон)); лог-уровни: фон=[] тон1=[] тон2=[]"
+  },
+  {
+    "name": "(г) имена микрофонов человеческие",
+    "ok": false,
+    "detail": "приложение: ['alsa_input.pci-0000_c2_00.6.HiFi__Mic2__source', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source']; система(pactl): ['alsa_output.pci-0000_c2_00.6.HiFi__Speaker__sink.monitor', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic2__source', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source']; технических имён в списке: 2; humanize через pw-dump есть в репозитории — ждёт релиза"
+  },
+  {
+    "name": "избегание: экран/звонок/запись не тронуты",
+    "ok": true,
+    "detail": "GUI-классы за прогон: ['media.devices', 'media.vsource', 'sip.address.changed']; запрещённых: нет"
+  },
+  {
+    "name": "уборка: за собой чисто",
+    "ok": true,
+    "detail": "процессы: нет"
+  }
+]

@@ -777,6 +777,41 @@ GUI (X11→headless) и звук (PulseAudio→null-audio). Исходники �
 
  
 
+### Живой риг: релизный бинарь на реальном железе (`scripts/testbed/live_selftest_rig.py`)
+
+Цикл «собрал → само-проверил → отчёт владельцу»: риг гоняет **тот же**
+self-contained бинарь (`MCU-h323-debug` из GitHub release), который скачивает
+владелец, на этом же ноутбуке — настоящая камера, настоящие микрофоны, тон
+440 Гц через динамики. Вердикты по четырём симптомам репорта (а-камера,
+б-повторный запуск, в-микрофон, г-имена устройств) с PNG-доказательствами в
+`docs/evidence/live-rig-<дата>/`.
+
+**Железное правило:** рабочий стол владельца (DISPLAY=:0) не трогается никогда.
+Весь UI живёт на Xvfb `:99` внутри контейнера `mcu-rig-x` (образ
+`scripts/testbed/rig-x/Containerfile`, FROM mcu-dev-h323 + xvfb); сокет общий
+(`$XDG_RUNTIME_DIR/mcu-rig-x11/X99` + symlink в `/tmp/.X11-unix`), пилон —
+на хосте (glibc-совместимость бинаря) с изолированными HOME/XDG_* и
+`PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native`. Захват — только XGetImage
+(python-xlib): НИКАКИХ portal/Screenshot API — они поднимают владельцу окна
+разрешений. Драйв — Xlib warp + XTEST (на чистом Xvfb координаты 1:1; на
+XWayland владельца фракционный масштаб ломает XTEST-указатель, а Qt игнорирует
+XSendEvent — потому ригу и нужен виртуальный X).
+
+```bash
+pip install --user python-xlib Pillow            # зависимости хоста
+python3 scripts/testbed/live_selftest_rig.py --map   # калибровка кнопок (Xvfb сам поднимет)
+python3 scripts/testbed/live_selftest_rig.py         # док-прогон а/б/г + evidence
+python3 scripts/testbed/live_selftest_rig.py --strict  # красный вердикт = неверный код выхода
+```
+
+Координаты кнопок — константы с проверкой «кнопка там, где надо» по сигнатуре
+в логе (QSS без :hover, потому hover-пиксели не критерий); переснимаются
+`--map`-ом, лежат в `tmp/rig/calibrated.json`, дразнятся через `RIG_BTN_*`.
+Экран/звонок/запись — зоны чёрного списка: риг их не кликает и в конце прогона
+ДОКАЗЫВАЕТ отсутствием соответствующих GUI-событий. Бинарь не найден — риг
+сам скачает релиз; Xvfb-контейнер не поднят — поднимет (idempotent).
+
+
 Полная инструкция — [docs/TESTING_TWO_CLIENTS.md](docs/TESTING_TWO_CLIENTS.md).
 Проверка web-конференции из браузера — [docs/WEB_CONFERENCE_TEST.md](docs/WEB_CONFERENCE_TEST.md).
 

@@ -1,0 +1,18 @@
+# EBUSY-пробник на нативном pjsua2 2.16 (SWIG, сборка scripts/install_pjsua2.sh, образ mcu-rig-app)
+# команда: podman run --rm --security-opt label=disable --device /dev/video1 --device /dev/video2 -v $PWD:/src:z localhost/mcu-rig-app python3 /src/scripts/testbed/ebusy_probe.py --cycles 5
+
+=== ЭТАЛОН: код HEAD (git show HEAD:mcuclient/video_preview_service.py) — exit 1 ===
+[i] целевое устройство: dev 0 «HD Camera: HD Camera»
+[i] цикл 1: start -> True
+[i] цикл 2: start -> False   # pjsua_vid_preview_start: Device or resource busy
+[i] цикл 3: start -> False
+[i] цикл 4: start -> False
+[i] цикл 5: start -> False
+
+=== ФИКС: рабочий код (OFF=hide вместо native stop) — exit 0 ===
+[i] цикл 1: start -> True
+[i] цикл 2: start -> True
+[i] цикл 3: start -> True
+[i] цикл 4: start -> True
+[i] цикл 5: start -> True
+[+] 5 чистых цикла старт/стоп; shutdown (real stop + __swig_destroy__) перед libDestroy — без краха
