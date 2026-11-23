@@ -72,7 +72,11 @@ jobs:
               gh release delete "$TAG" --yes --cleanup-tag=false || true; done
 
 
+  # Windows-сборка приостановлена по просьбе владельца (2026-11-23): пока
+  # идёт живое тестирование — только Linux-бинарник (+ авто-архив GitHub).
+  # Вернуть: remove `if: false` + вернуть needs/шаг скачивания в release.
   build-windows:
+    if: false
     needs: preflight
     runs-on: windows-latest
     steps:
@@ -169,16 +173,12 @@ jobs:
 
   release:
     if: ${{ github.event_name == 'push' }}
-    needs: [preflight, build-windows, build-linux]
+    needs: [preflight, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: MCU-Windows-${{ needs.preflight.outputs.variant }}
-          path: release-files/
-
+      # Windows-ассет не скачиваем: сборка приостановлена (см. build-windows).
       - uses: actions/download-artifact@v4
         with:
           name: MCU-Linux-${{ needs.preflight.outputs.variant }}
