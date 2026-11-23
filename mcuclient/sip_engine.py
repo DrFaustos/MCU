@@ -1802,6 +1802,10 @@ class SipEngine:
     def local_preview_active(self) -> bool:
         return self._vpreview.active
 
+    def preview_embed_possible(self) -> bool:
+        """Можно ли встраивать нативное окно превью (X11/Windows бэкенд)."""
+        return self._vpreview.embed_possible()
+
     def local_preview_xid(self) -> Optional[int]:
         """Нативный XID окна локального превью (или None)."""
         return self._vpreview.preview_xid()

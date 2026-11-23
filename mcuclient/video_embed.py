@@ -112,6 +112,23 @@ def embed_window(child: int, parent: int, width: int = 0, height: int = 0) -> bo
     return False
 
 
+def raise_window(handle: int) -> bool:
+    """Поднять нативное окно на передний план (фолбэк-окно превью).
+
+    Только X11: на Windows top-level окно с show=True открывается и так
+    активным; на прочих платформах — честный False (ничего не подняли).
+    """
+    if not handle:
+        return False
+    if x11_embed is not None and not _IS_WINDOWS:
+        try:
+            return bool(x11_embed.raise_window(handle))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("raise_window: %s", exc)
+            return False
+    return False
+
+
 def resize_window(handle: int, width: int, height: int) -> bool:
     """Подогнать встроенное окно под размер тайла."""
     if not handle:

@@ -104,3 +104,22 @@ def test_error_reports_nonempty_reason():
     assert name == "media.preview"
     assert payload["active"] is False
     assert payload["error"]  # непустая причина
+
+
+def test_restart_show_window_raises_fallback_window():
+    """Фолбэк-окно под XWayland может открыться ПОД главным — его надо
+    поднять, иначе пользователь решит, что «изображение не появилось»."""
+    from mcuclient import video_embed as ve
+
+    pj = _Pj()
+    svc = _service(pj=pj)
+    svc.start(0)
+    svc.preview_xid = lambda: 4242  # тип: XID уже готов
+    raised: list = []
+    orig = ve.raise_window
+    try:
+        ve.raise_window = lambda xid: raised.append(xid) or True
+        assert svc.restart_show_window() is True
+    finally:
+        ve.raise_window = orig
+    assert raised == [4242]
