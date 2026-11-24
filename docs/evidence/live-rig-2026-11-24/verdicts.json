@@ -1,10 +1,10 @@
 {
-  "run_at": "2026-11-24 04:15:31 +0400",
+  "run_at": "2026-11-24 06:02:03 +0400",
   "verdicts": [
     {
       "name": "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
       "ok": true,
-      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 41.0, 'std': 73.1, 'min': 0, 'max': 254} t3={'mean': 41.0, 'std': 73.1, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
+      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
     },
     {
       "name": "(б) повторный запуск превью",
@@ -19,12 +19,12 @@
     {
       "name": "(в1) переключение микрофона сработало",
       "ok": true,
-      "detail": "успешно переключено 13 индексов (до №13), на всех нулевой уровень"
+      "detail": "успешно переключено 14 индексов (до №13), на всех нулевой уровень"
     },
     {
       "name": "(в) тон 440 Гц двигает монитор на двух микрофонах",
       "ok": false,
-      "detail": "mic1 [не выбран]: фон -1px/-1.000lvl → тон -1px/-1.000lvl | второй живой микрофон: не выбран; живых 0 из 2; watcher: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']"
+      "detail": "boot/default: фон 890px/0.010lvl → тон 818px/0.020lvl; живых раундов 0 из 2; самопрослушивание в логе: есть; watcher: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']"
     },
     {
       "name": "(г) имена микрофонов человеческие",
@@ -34,7 +34,7 @@
     {
       "name": "избегание: экран/звонок/запись не тронуты",
       "ok": true,
-      "detail": "GUI-классы за прогон: ['media.camera_device', 'media.devices', 'media.preview']; запрещённых: нет"
+      "detail": "GUI-классы за прогон: ['media.camera_device', 'media.devices', 'media.mic_device', 'media.preview']; запрещённых: нет"
     },
     {
       "name": "уборка: за собой чисто",

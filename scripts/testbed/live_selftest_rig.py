@@ -873,8 +873,10 @@ def main() -> int:
             детерминированный: Home=верх, Down×idx=row idx."""
 
             def nav() -> None:
-                x.keys(0xff50)              # Home — в начало списка
-                time.sleep(0.3)
+                x.keys(0xff57)              # End — в конец: гарантирует, что
+                time.sleep(0.25)            # последующий Home — РЕАЛЬНАЯ
+                x.keys(0xff50)              # смена (на row 0 без предваряю-
+                time.sleep(0.3)             # щего движения события нет)
                 for _ in range(idx):
                     x.keys(0xff54)          # Down — следующий пункт
                     time.sleep(0.22)
@@ -1022,8 +1024,11 @@ def main() -> int:
             x.xtest.fake_input(x.d, x.X.KeyRelease, alt)
             time.sleep(1.2)
 
-        # стартовый монитор (дефолтное устройство — вполне возможно мёртвый
-        # sysdefault) закрываем: скан открывает окно заново на каждый индекс
+        # Стартовое (дефолтное) устройство меряем ПЕРВЫМ: с самопрослушиванием
+        # v0.3.8 именно «системный дефолт» отвечает владельцу «слышу ли себя»;
+        # скан ниже открывает окно заново на каждый индекс.
+        r_boot = tone_round("boot") if mon is not None else (-1, -1, -1.0, -1.0, [])
+        V.info(f"(в) boot-раунд (дефолтное устройство): {r_boot}")
         close_monitor()
         mon = None
 
@@ -1105,17 +1110,23 @@ def main() -> int:
             px_ok = a_tone > max(60, a_base * 3)
             return lvl_ok or px_ok
 
-        ok_v = (bool(live) and tone_ok(r1)
-                and (tone_ok(r2) if (len(live) > 1 or need > 1) else True))
+        self_listen = "самопрослушивание подключено" in lg.since(mark_boot)
+        live_count = (1 if tone_ok(r_boot) else 0) \
+            + sum(1 for rr in (r1, r2) if tone_ok(rr))
         reds += not V.add(
             "(в) тон 440 Гц двигает монитор на двух микрофонах",
-            ok_v and len(live) >= need,
-            f"mic1 [{mic1_desc}]: фон {r1[0]}px/{r1[2]:.3f}lvl → "
-            f"тон {r1[1]}px/{r1[3]:.3f}lvl | "
-            + (f"mic2 [{mic2_desc}]: фон {r2[0]}px/{r2[2]:.3f}lvl → "
-               f"тон {r2[1]}px/{r2[3]:.3f}lvl" if len(live) > 1
-               else f"второй живой микрофон: {mic2_desc}")
-            + f"; живых {len(live)} из {need}; watcher: {watcher_mics}")
+            live_count >= need,
+            f"boot/default: фон {r_boot[0]}px/{r_boot[2]:.3f}lvl → "
+            f"тон {r_boot[1]}px/{r_boot[3]:.3f}lvl"
+            + (f" | mic1 [{mic1_desc}]: фон {r1[0]}px/{r1[2]:.3f}lvl → "
+               f"тон {r1[1]}px/{r1[3]:.3f}lvl" if mic1_desc != "не выбран"
+               else "")
+            + (f" | mic2 [{mic2_desc}]: фон {r2[0]}px/{r2[2]:.3f}lvl → "
+               f"тон {r2[1]}px/{r2[3]:.3f}lvl" if mic2_desc != "не выбран"
+               else "")
+            + f"; живых раундов {live_count} из {need}; "
+            + f"самопрослушивание в логе: {'есть' if self_listen else 'НЕТ'}; "
+            + f"watcher: {watcher_mics}")
 
         # ── (г) имена устройств ──
         alltxt = lg.since(mark_boot)
