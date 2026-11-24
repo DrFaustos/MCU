@@ -864,34 +864,52 @@ def main() -> int:
             return None
 
         def select_mic(idx: int):
-            """Пункт комбо №idx: попап → Home (верх) → Down×idx → Return.
-            Возвращает id события (None — события не было: пункт уже был
-            выбран или попап не открылся)."""
+            """Пункт комбо №idx. Попап после нескольких циклов открываться
+            переставал (фокус), поэтому клавиатурный путь, работающий в обеих
+            тактиках Qt: клик (фокус/попап) → Escape если попап (идём по
+            ЗАКРЫТОМУ комбо) → Home → Down×idx → Return. Return коммитит,
+            если попап открыт, и открывает его, если закрыт — тогда второй
+            Return коммитит там; в конце Escape-страховка. Индекс
+            детерминированный: Home=верх, Down×idx=row idx."""
+
+            def nav() -> None:
+                x.keys(0xff50)              # Home — в начало списка
+                time.sleep(0.3)
+                for _ in range(idx):
+                    x.keys(0xff54)          # Down — следующий пункт
+                    time.sleep(0.22)
+
             for _attempt in range(3):
                 mark = lg.mark()
                 app.click_in(*COMBO_MIC)
-                time.sleep(0.9)
-                if not x.popup_open():
-                    app.click_in(*COMBO_MIC)
-                    time.sleep(0.9)
+                time.sleep(0.6)
+                if x.popup_open():
+                    x.keys(0xff1b)          # закрытый комбо: клавиши меняют
+                    time.sleep(0.3)         # выбор по-разному в стилях —
+                    nav()                   # коммит добьём Return-ами ниже
+                    time.sleep(0.3)
                     if not x.popup_open():
-                        continue
-                x.keys(0xff50)                  # Home — в начало списка
-                time.sleep(0.25)
-                for _ in range(idx):
-                    x.keys(0xff54)              # Down
-                    time.sleep(0.12)
-                x.keys(0xff0d)                  # Return
-                time.sleep(1.4)
-                got = mic_event_id(lg.since(mark))
+                        app.click_in(*COMBO_MIC)   # открыть попап для Return
+                        time.sleep(0.5)
+                else:
+                    nav()
+                x.keys(0xff0d)              # Return №1
+                time.sleep(0.6)
+                if x.popup_open():
+                    x.keys(0xff0d)          # Return №2 — коммит в попапе
+                    time.sleep(0.6)
+                if x.popup_open():
+                    x.keys(0xff1b)          # не должен остаться открытым
+                    time.sleep(0.3)
+                s = lg.since(mark)
+                got = mic_event_id(s)
                 if got is not None:
                     return got
-                # в v0.3.6 pjsua-применение может честно упасть (цепочка
-                # restart-методов не вышла) — события media.mic_device тогда
-                # НЕТ, но переключение предпринималось: помечаем -2, скан
+                # pjsua-применение могло честно упасть (цепочка restart-
+                # методов не вышла) — события media.mic_device тогда НЕТ,
+                # но переключение предпринималось: помечаем -2, скан
                 # померит уровень и на таком индексе
-                s2 = lg.since(mark)
-                if "Ни один путь перезапуска" in s2 or "Не удалось переключить" in s2:
+                if "Ни один путь перезапуска" in s or "Не удалось переключить" in s:
                     return -2
             return None
 

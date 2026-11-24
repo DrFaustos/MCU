@@ -1,0 +1,25 @@
+# PortAudio хоста vs бинарь MCU-h323-debug v0.3.7 (rig, 2026-11-24 04:18:40 +0400)
+# Вывод: хостовый PA знает PipeWire-устройства; стек pjsua2 бинаря —
+# только сырые ALSA-алиасы (13 шт), на pure-PipeWire все открываются
+# EBUSY -> pjsua_set_snd_dev2 EAUD_SYSERR; тон 440 при этом хост слышит
+# (pw-record peak 32768), монитор бинаря — 0.000 на всех 13 индексах.
+# default in/out = 6 6
+# --- системная libportaudio (с PipeWire backend) ---
+0 HD-Audio Generic: HDMI 0 (hw:0,3)    OUT
+1 HD-Audio Generic: HDMI 1 (hw:0,7)    OUT
+2 HD-Audio Generic: SN6140 Analog (hw:1,0) IN OUT
+3 acp63: - (hw:2,0) IN 
+4 hdmi    OUT
+5 pipewire IN OUT
+6 default IN OUT
+7 Ryzen HD Audio Controller Digital Microphone IN 
+8 Ryzen HD Audio Controller Stereo Microphone IN 
+9 Ryzen HD Audio Controller Speaker IN OUT
+# --- бинарь (микрофонное комбо, из mcu.log дока: MON capture=…) ---
+combo row 1 -> pjsua capture=4 'sysdefault:CARD=Generic_1' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 2 -> pjsua capture=5 'front:CARD=Generic_1,DEV=0' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 3 -> pjsua capture=7 'surround40:CARD=Generic_1,DEV=0' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 4 -> pjsua capture=10 'surround51:CARD=Generic_1,DEV=0' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 5 -> pjsua capture=11 'surround71:CARD=Generic_1,DEV=0' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 6 -> pjsua capture=12 'sysdefault:CARD=acp63' — тон: level 0.000 (EAUD_SYSERR при apply)
+combo row 7..13 -> pjsua capture=12 'sysdefault:CARD=acp63' — тон: level 0.000 (EAUD_SYSERR при apply)
