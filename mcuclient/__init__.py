@@ -8,7 +8,7 @@
 # котором на самом деле sip-код, и никакое имя артефакта не спасёт.
 PROTOCOL_VARIANT = "sip"
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 
 
 def version_string() -> str:

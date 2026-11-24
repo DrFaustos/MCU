@@ -15,13 +15,13 @@ VSVersionInfo(
       StringTable(
         u'040904B0',
         [StringStruct(u'CompanyName', u'MCU Project'),
-         StringStruct(u'FileDescription', u'MCU - videoconference server/terminal [sip] 0.3.4-sip'),
-         StringStruct(u'FileVersion', u'0.3.4.0'),
+         StringStruct(u'FileDescription', u'MCU - videoconference server/terminal [sip] 0.3.5-sip'),
+         StringStruct(u'FileVersion', u'0.3.5.0'),
          StringStruct(u'InternalName', u'MCU'),
          StringStruct(u'LegalCopyright', u'MIT License'),
          StringStruct(u'OriginalFilename', u'MCU.exe'),
          StringStruct(u'ProductName', u'MCU [sip]'),
-         StringStruct(u'ProductVersion', u'0.3.4.0')])
+         StringStruct(u'ProductVersion', u'0.3.5.0')])
     ]),
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
   ]
