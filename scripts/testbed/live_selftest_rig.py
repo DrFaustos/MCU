@@ -83,7 +83,7 @@ XSOCK_DIR = Path("/run/user/1000") / "mcu-rig-x11"
 RELEASE_URL = ("https://github.com/DrFaustos/MCU/releases/download/"
                "v0.3.7-h323/MCU-h323-debug")   # запаска, если API недоступен
 RELEASE_LIST = "https://api.github.com/repos/DrFaustos/MCU/releases?per_page=1"
-EXPECTED_VERSION = os.environ.get("RIG_EXPECTED_VERSION", "0.3.6-h323")
+EXPECTED_VERSION = os.environ.get("RIG_EXPECTED_VERSION", "0.3.7-h323")
                  # заголовок окна обязан совпасть; вотчер передаёт
                  # RIG_EXPECTED_VERSION=<тег без v>
 
