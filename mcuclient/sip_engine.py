@@ -2067,6 +2067,9 @@ class SipEngine:
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
         return self._devices.open_mic_monitor(dev_id)
 
+    def close_mic_monitor(self) -> None:
+        self._devices.close_mic_monitor()
+
     def read_mic_level(self) -> float:
         return self._devices.read_mic_level()
 

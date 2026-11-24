@@ -442,6 +442,12 @@ if QT_AVAILABLE:
         def closeEvent(self, event) -> None:  # noqa: N802
             self._timer.stop()
             self._opened = False
+            # Убрать самопрослушивание: без этого микрофон продолжал
+            # играть себя в колонки фоном после закрытия окна теста.
+            try:
+                self.engine.close_mic_monitor()
+            except Exception:  # noqa: BLE001
+                pass
             super().closeEvent(event)
 
     class _LevelBars(QtWidgets.QWidget):
