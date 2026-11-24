@@ -840,7 +840,8 @@ class MediaManager:
             break
         if applied is not None:
             name, args = applied
-            tag = f"{name}{args[0]}" if name == "setSndDevMode" else name
+            first = args[0] if args else ""
+            tag = f"{name}{first}" if name == "setSndDevMode" else name
             if deferred:
                 # setSndDevMode(1) не открывает устройство — новые индексы
                 # подхватятся при следующем открытии. Сказать честно.
