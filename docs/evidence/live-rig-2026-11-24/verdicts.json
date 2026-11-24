@@ -1,10 +1,10 @@
 {
-  "run_at": "2026-11-24 06:02:03 +0400",
+  "run_at": "2026-11-24 06:08:18 +0400",
   "verdicts": [
     {
       "name": "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
       "ok": true,
-      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 40.7, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
+      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 40.8, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 40.8, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
     },
     {
       "name": "(б) повторный запуск превью",
@@ -19,12 +19,12 @@
     {
       "name": "(в1) переключение микрофона сработало",
       "ok": true,
-      "detail": "успешно переключено 14 индексов (до №13), на всех нулевой уровень"
+      "detail": "успешно переключено 2 индексов (до №13), живых найдено 2: [(0, \"'pipewire' getTxLevel=True звук=реальный\"), (1, \"'default' getTxLevel=True звук=реальный\")]"
     },
     {
       "name": "(в) тон 440 Гц двигает монитор на двух микрофонах",
-      "ok": false,
-      "detail": "boot/default: фон 890px/0.010lvl → тон 818px/0.020lvl; живых раундов 0 из 2; самопрослушивание в логе: есть; watcher: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']"
+      "ok": true,
+      "detail": "boot/default: фон 0px/0.000lvl → тон 10295px/0.240lvl | mic1 [№0 'pipewire' getTxLevel=True звук=реальный]: фон 0px/0.000lvl → тон 9337px/0.250lvl | mic2 [№1 'default' getTxLevel=True звук=реальный]: фон 0px/0.000lvl → тон 9275px/0.250lvl; живых раундов 3 из 2; самопрослушивание в логе: есть (отключений при закрытиях: 0); тон digital; watcher: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']"
     },
     {
       "name": "(г) имена микрофонов человеческие",
