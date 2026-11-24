@@ -866,3 +866,131 @@ def test_exc_brief_survives_empty_swig_str():
     text = media_devices._exc_brief(_SwigErr())
     assert "pjsua_set_snd_dev2" in text
     assert "PJMEDIA_EAUD_NODEFDEV" in text
+
+
+# --- ALSA_PLUGIN_DIR: маршрут к системным модулям (PipeWire/Pulse) ---
+
+
+def test_alsa_plugin_dir_sets_first_dir_with_modules(monkeypatch, tmp_path):
+    good = tmp_path / "lib64-alsa"
+    good.mkdir()
+    (good / "libasound_module_pcm_pipewire.so").write_bytes(b"x")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.delenv("ALSA_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(media_devices.platform, "system",
+                        lambda: "Linux")
+    monkeypatch.setattr(media_devices, "_ALSA_PLUGIN_CANDIDATES",
+                        (str(empty), str(good), "/nonexistent"))
+    assert media_devices.ensure_alsa_plugin_dir() == str(good)
+    import os
+    assert os.environ["ALSA_PLUGIN_DIR"] == str(good)
+
+
+def test_alsa_plugin_dir_respects_existing_env(monkeypatch):
+    monkeypatch.setenv("ALSA_PLUGIN_DIR", "/custom")
+    monkeypatch.setattr(media_devices.platform, "system",
+        lambda: "Linux")
+    assert media_devices.ensure_alsa_plugin_dir() is None
+    import os
+    assert os.environ["ALSA_PLUGIN_DIR"] == "/custom"
+
+
+def test_alsa_plugin_dir_noop_off_linux(monkeypatch):
+    monkeypatch.delenv("ALSA_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(media_devices.platform, "system",
+        lambda: "Windows")
+    assert media_devices.ensure_alsa_plugin_dir() is None
+    import os
+    assert "ALSA_PLUGIN_DIR" not in os.environ
+
+
+def test_alsa_plugin_dir_none_when_no_modules(monkeypatch, tmp_path):
+    d = tmp_path / "nomod"
+    d.mkdir()
+    monkeypatch.delenv("ALSA_PLUGIN_DIR", raising=False)
+    monkeypatch.setattr(media_devices.platform, "system",
+        lambda: "Linux")
+    monkeypatch.setattr(media_devices, "_ALSA_PLUGIN_CANDIDATES",
+        (str(d), "/definitely/not/here"))
+    assert media_devices.ensure_alsa_plugin_dir() is None
+    import os
+    assert "ALSA_PLUGIN_DIR" not in os.environ
+
+
+def test_humanize_names_system_routing_devices():
+    # PJSIP-имена маршрутизирующих плагинов получают человеческие ярлыки.
+    assert media_devices._humanize_audio_name(
+        "default", {}) == "Системные устройства по умолчанию"
+    assert media_devices._humanize_audio_name(
+        "pipewire", {}) == "PipeWire (системный звук)"
+    # Несовпавшие описания не мешают системному ярлыку:
+    assert media_devices._humanize_audio_name(
+        "default", {"alsa_input.usb-Mic": "Микрофон USB"}
+    ) == "Системные устройства по умолчанию"
+
+
+# --- Самопрослушивание монитора: tx-уровень живёт только на
+#     комmutированном в мост порту (замер 2026-11-24: 0.0 без
+#     startTransmit против 32.0 с ним при том же тоне) ---
+
+
+class _XmitMedia(_CapMedia):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.started = []
+        self.stopped = []
+
+    def startTransmit(self, dst):  # noqa: N802
+        self.started.append(dst)
+
+    def stopTransmit(self, dst):  # noqa: N802
+        self.stopped.append(dst)
+
+
+class _XmitMgr(_AudioMgr):
+    def __init__(self, cap, play, **kw):
+        super().__init__(cap=cap, **kw)
+        self._play = play
+
+    def getPlaybackDevMedia(self):  # noqa: N802
+        return self._play
+
+
+def test_open_mic_monitor_links_self_listening():
+    cap = _XmitMedia(tx=12)
+    play = _XmitMedia(tx=0)
+    mgr = _XmitMgr(cap, play, capture_dev=3)
+    mm = _manager(mgr)
+    assert mm.open_mic_monitor(3) is True
+    assert cap.started == [play]
+    assert mm._monitor_echo is True
+    mm.close_mic_monitor()
+    assert cap.stopped == [play]
+    assert mm._monitor_echo is False
+
+
+def test_monitor_echo_idempotent_open_and_lazy_close():
+    cap = _XmitMedia(tx=12)
+    mgr = _XmitMgr(cap, _XmitMedia(), capture_dev=3)
+    mm = _manager(mgr)
+    assert mm.open_mic_monitor(3) is True
+    assert mm.open_mic_monitor(3) is True
+    assert len(cap.started) == 1  # повторный клик не мноит соединения
+    mm.close_mic_monitor()
+    mm.close_mic_monitor()  # вторая закрытия — ничего, не падает
+    assert len(cap.stopped) == 1
+
+
+def test_monitor_echo_survives_transmit_failure():
+    class _Boom(_XmitMedia):
+        def startTransmit(self, dst):  # noqa: N802
+            raise RuntimeError("bridge busy")
+
+    cap = _Boom(tx=12)
+    mgr = _XmitMgr(cap, _XmitMedia(), capture_dev=3)
+    mm = _manager(mgr)
+    # Отказ коммутации не должен ронять открытие монитора:
+    assert mm.open_mic_monitor(3) is True
+    assert mm._monitor_echo is False
+    mm.close_mic_monitor()  # тихо, без падения

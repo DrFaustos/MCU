@@ -49,6 +49,11 @@ def check_pjsua2() -> List[Status]:
 
     ep = None
     try:
+        from .media_devices import (  # noqa: PLC0415
+            ensure_alsa_plugin_dir,
+        )
+
+        ensure_alsa_plugin_dir()
         ep = pjsua2.Endpoint()
         cfg = pjsua2.EpConfig()
         try:
