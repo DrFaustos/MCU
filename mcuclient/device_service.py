@@ -46,6 +46,10 @@ class DeviceService:
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:
         return self._media.open_mic_monitor(dev_id) if self._media is not None else False
 
+    def close_mic_monitor(self) -> None:
+        if self._media is not None:
+            self._media.close_mic_monitor()
+
     def read_mic_level(self) -> float:
         return self._media.read_mic_level() if self._media is not None else 0.0
 

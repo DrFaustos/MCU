@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Универсальная установка Python-биндинга pjsua2 (PJSIP) для MCU Client.
+# Универсальная установка Python-биндинга pjsua2 (PJSIP) для MCU.
 #
 # Собирает PJSIP из исходников с SWIG-биндингами и ставит их в указанное
 # Python-окружение (по умолчанию — в текущий python3). Это единственный
@@ -145,4 +145,4 @@ install_deps
 build_pjsip
 build_binding
 verify
-log "Готово. Теперь MCU Client поднимет SIP-транспорт."
+log "Готово. Теперь MCU поднимет SIP-транспорт."

@@ -20,14 +20,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import platform
 import re
+import time
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .log import get_logger
 
@@ -133,6 +135,11 @@ def _is_capture_capable(dev: str) -> bool:
     return "Video Capture" in out
 
 
+# Ноды без Video Capture, о которых мы уже сказали в логе (см.
+# _list_linux_cameras): watcher дёргает перечисление каждые 2 секунды.
+_skipped_capture_nodes: set = set()
+
+
 def _list_linux_cameras() -> List[DeviceInfo]:
     """Реальные камеры Linux с именами; фильтр по Video Capture.
 
@@ -148,7 +155,12 @@ def _list_linux_cameras() -> List[DeviceInfo]:
     cameras: List[DeviceInfo] = []
     for dev in candidates:
         if not _is_capture_capable(dev):
-            log.debug("Пропускаю %s: нет Video Capture", dev)
+            # Watcher опрашивает камеры каждые 2 с: повторный «Пропускаю»
+            # на ту же ноду — спам на тысячи строк в час (live-док). Один
+            # раз на ноду на процесс — и довольно.
+            if dev not in _skipped_capture_nodes:
+                _skipped_capture_nodes.add(dev)
+                log.debug("Пропускаю %s: нет Video Capture", dev)
             continue
         name, driver = _v4l2_device_name(dev)
         if not name:
@@ -181,6 +193,12 @@ def _pactl_sources() -> List[DeviceInfo]:
     if not shutil.which("pactl"):
         return mics
     out = _run(["pactl", "list", "short", "sources"])
+    # NAME из short-формы — технический идентификатор; человеку показываем
+    # description. Карту берём из _pa_descriptions(), а не из длинной формы
+    # напрямую: на Fedora/ PipeWire pactl-long может не распознаваться
+    # парсером, и тогда без pw-dump-фолбэка список остаётся техническим
+    # (live-док v0.3.3: «карта=2» в GUI-пути, сырые имена в watcher-списке).
+    descs = _pa_descriptions()
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
@@ -189,8 +207,238 @@ def _pactl_sources() -> List[DeviceInfo]:
         # *.monitor — это петля вывода, не микрофон.
         if name.endswith(".monitor"):
             continue
-        mics.append(DeviceInfo(id=src_id, name=name, kind="microphone", driver="pulse"))
+        human = descs.get(name) or name
+        if _is_service_audio_name(name):
+            human = f"{human} (служебное)"
+        mics.append(DeviceInfo(id=src_id, name=human, kind="microphone", driver="pulse"))
     return mics
+
+
+def _parse_pactl_sources_long(text: str) -> Dict[str, str]:
+    """Разобрать ``pactl list sources`` (длинная форма): NAME -> description.
+
+    Приоритет — свойство ``device.description`` (то же видит пользователь в
+    системных настройках), затем поле ``Description:``. Источник без описания
+    в карту не попадает — вызывающийся честно откатится на сырое NAME.
+    """
+    result: Dict[str, str] = {}
+    name = field_desc = prop_desc = ""
+
+    def flush() -> None:
+        if name:
+            human = prop_desc or field_desc
+            if human and human != name:
+                result[name] = human
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("Source #"):
+            flush()
+            name = field_desc = prop_desc = ""
+        elif s.startswith("Name:"):
+            name = s.split(":", 1)[1].strip()
+        elif s.startswith("Description:"):
+            field_desc = s.split(":", 1)[1].strip()
+        elif s.startswith("device.description"):
+            prop_desc = s.split("=", 1)[1].strip().strip('"')
+    flush()
+    return result
+
+
+def _parse_pw_dump_sources(text: str) -> Dict[str, str]:
+    """Разобрать ``pw-dump`` (JSON): node.name -> node.description.
+
+    Только источники захвата: ``Audio/Source`` (PipeWire) и
+    ``Media/Audio/Source`` (legacy-класс поверх PA-модулей); составные
+    ``Audio/Source/Sink`` — это выходы с петлёй, не микрофон.
+    """
+    if not text.strip():
+        return {}
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    result: Dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        props = ((item.get("info") or {}).get("props")) or {}
+        if props.get("media.class") not in ("Audio/Source", "Media/Audio/Source"):
+            continue
+        name = props.get("node.name") or props.get("media.name")
+        desc = props.get("node.description") or props.get("media.name")
+        if name and desc and desc != name:
+            result[str(name)] = str(desc)
+    return result
+
+
+# Диагностика карты имён пишется один раз на процесс (вызывается на
+# каждое перечисление устройств, а данные нужны ровно один раз).
+_pa_diag_done = False
+
+
+def _pa_descriptions() -> Dict[str, str]:
+    """Имена микрофонов «как в системе»: PA/PW-имя источника -> описание.
+
+    Человек в системных настройках видит ``device.description``
+    («Built-in Audio Microphone…»), а PJSIP/pass-through списки носят
+    технический NAME (``alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source``).
+    pactl (длинная форма); если pactl есть, но карту не дал (другой
+    формат вывода — live-отчёт v0.3.1: имена остались техническими),
+    или pactl нет — pw-dump. Пустая карта — UI на сырых именах (как
+    было), но ОДИН INFO-разговор о том, почему: утилиты, размер карты,
+    первые строки ответа (в DEBUG — это данные для разбора формата).
+    """
+    global _pa_diag_done
+    has_pactl = bool(shutil.which("pactl"))
+    has_pwdump = bool(shutil.which("pw-dump"))
+    descs: Dict[str, str] = {}
+    head = ""
+    if has_pactl:
+        raw = _run(["pactl", "list", "sources"])
+        descs = _parse_pactl_sources_long(raw)
+        if not descs:
+            head = "\n".join(raw.splitlines()[:6])
+    if not descs and has_pwdump:
+        raw = _run(["pw-dump"])
+        descs = _parse_pw_dump_sources(raw)
+        if not descs and not head:
+            head = "\n".join(raw.splitlines()[:6])
+    if not _pa_diag_done:
+        _pa_diag_done = True
+        log.info("Имена аудио: pactl=%s pw-dump=%s карта=%d",
+                 has_pactl, has_pwdump, len(descs))
+        if not descs and (has_pactl or has_pwdump):
+            log.debug("Имена аудио: карта пуста, начало ответа: %r", head)
+    return descs
+
+
+# Служебные «устройства» в списке захвата: null/echo-источники PJSIP/PW и
+# мониторы вывода. Это не микрофоны, но они занимают места в выпадающем
+# списке (на живой машине — 11 из 13 пунктов при двух реальных микрофонах).
+# ALSA-имена маршрутизирующих «плагин»-устройств: в системе это и есть
+# «колонки и микрофон по умолчанию», но PJSIP носит их технические имена.
+_SYSTEM_ALSA_LABELS = {
+    "default": "Системные устройства по умолчанию",
+    "pipewire": "PipeWire (системный звук)",
+    "pulse": "PulseAudio (системный звук)",
+}
+
+# Куда Ubuntu-сборка libasound (из бинарника) умеет смотреть за модулями.
+# Встроенные пути компиляции не включают Fedora-раскладку /usr/lib64,
+# поэтому без явного ALSA_PLUGIN_DIR модуль pcm_pipewire не находится,
+# «default» не открывается, и в списке остаются лишь сырые ALSA-алиасы
+# (репорт: на чистом PipeWire микрофон/динамик молчат).
+_ALSA_PLUGIN_CANDIDATES = (
+    "/usr/lib64/alsa-lib",                 # Fedora / RHEL / openSUSE
+    "/usr/lib/x86_64-linux-gnu/alsa-lib",  # Ubuntu / Debian (multiarch)
+    "/usr/lib/aarch64-linux-gnu/alsa-lib",
+    "/usr/lib/alsa-lib",
+    "/usr/local/lib/alsa-lib",
+)
+
+
+def ensure_alsa_plugin_dir() -> Optional[str]:
+    """Указать libasound, где лежат системные ALSA-модули (PipeWire/Pulse).
+
+    Бинарник несёт свой libasound (сборка CI-Ubuntu); его компилированные
+    пути поиска модулей не покрывают чужие дистрибутивные раскладки
+    (Fedora: /usr/lib64/alsa-lib). ALSA_PLUGIN_DIR задаёт сам каталог
+    модулей, а не родительский — проверяем наличием в нём
+    libasound_module_pcm_*.so. Уже заданную пользователем переменную не
+    трогаем. Возвращает выбранный каталог или None; бросать не умеет.
+    """
+    try:
+        if platform.system() != "Linux":
+            return None
+        if os.environ.get("ALSA_PLUGIN_DIR"):
+            return None
+        for d in _ALSA_PLUGIN_CANDIDATES:
+            try:
+                found = any(
+                    f.startswith("libasound_module_pcm_")
+                    for f in os.listdir(d)
+                )
+            except OSError:
+                continue
+            if found:
+                os.environ["ALSA_PLUGIN_DIR"] = d
+                log.info("ALSA_PLUGIN_DIR := %s (системные модули ALSA)", d)
+                return d
+        log.info(
+            "Системные модули ALSA не найдены — маршрута через "
+            "PipeWire/PulseAudio нет, в списке будут только сырые "
+            "ALSA-алиасы (в Debian/Fedora ставится пакет pipewire-alsa)"
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ALSA_PLUGIN_DIR не выставлен: %s", exc)
+    return None
+
+
+# Выставляем до первого обращения pjsua2 к libasound: модуль читает
+# окружение лениво при открытии устройства, но импорт media_devices
+# гарантированно раньше старта Endpoint.
+ensure_alsa_plugin_dir()
+
+
+_SERVICE_AUDIO_TOKENS = frozenset({"null", "echo"})
+
+
+class LevelProbe:
+    """Rate-limited наблюдатель значения уровня: ~раз в секунду — «да».
+
+    Монитор дёргает read_mic_level на 20 Гц: разовая запись ничего не
+    доказывает, а лог на 20 Гц — мусор. sample(level) возвращает значение
+    не чаще раза в period_s (первый вызов — сразу) и None в остальное
+    время: «уровень действительно течёт» становится видно в логе, пока
+    окно монитора открыто (репорт v0.3.1: ноль строк о мониторе).
+    """
+
+    def __init__(self, period_s: float = 1.0, clock=time.monotonic) -> None:
+        self._period = float(period_s)
+        self._clock = clock
+        self._last = float("-inf")
+
+    def sample(self, level: float) -> Optional[float]:
+        now = self._clock()
+        if now - self._last >= self._period:
+            self._last = now
+            return level
+        return None
+
+
+def _is_service_audio_name(name: str) -> bool:
+    low = (name or "").lower()
+    if low.endswith(".monitor"):
+        return True
+    return any(tok in _SERVICE_AUDIO_TOKENS for tok in re.split(r"[^a-z0-9]+", low))
+
+
+def _humanize_audio_name(pjsip_name: str, descs: Dict[str, str]) -> str:
+    """Имя устройства PJSIP -> «как в системе» + пометка служебных.
+
+    PJSIP поверх PulseAudio/PipeWire носит в имени технический PA-NAME —
+    ищем его подстрокой (самое длинное совпадение выигрывает: у мониторов
+    имя содержит имя стока) и подставляем description. Не нашли — обычный
+    _friendly_audio_name (ALSA hw:-имена). Служебные null/echo/мониторы не
+    прячем (числовой id-контракт и порядок индексов — неприкосновенны), а
+    помечаем: выбор «служебного» устройства объясняет молчание монитора.
+    """
+    raw = pjsip_name or ""
+    display = ""
+    hit = ""
+    for src_name, human in descs.items():
+        if src_name and src_name in raw and len(src_name) > len(hit):
+            hit, display = src_name, human
+    if not display:
+        display = _SYSTEM_ALSA_LABELS.get(raw, "")
+    if not display:
+        display = _friendly_audio_name(raw)
+    if _is_service_audio_name(raw) or _is_service_audio_name(display):
+        display = f"{display} (служебное)"
+    return display
 
 
 def _arecord_cards() -> List[DeviceInfo]:
@@ -334,6 +582,18 @@ def _is_synthetic_video(driver: str, name: str) -> bool:
     return d in {"sdl", "colorbar"} or "colorbar" in n
 
 
+def _exc_brief(exc: BaseException) -> str:
+    """Непустое описание исключения: у pjsua2.Error из SWIG str() пустой,
+    данные живут в title/reason — без них отказ не разобрать (док v0.3.6:
+    «не вышел: » и пустота)."""
+    parts = [str(exc).strip() or exc.__class__.__name__]
+    for attr in ("title", "reason"):
+        v = str(getattr(exc, attr, "") or "").strip()
+        if v and v not in parts:
+            parts.append(f"{attr}={v}")
+    return " | ".join(parts)
+
+
 class MediaManager:
     """Обёртка над pjsua2 для перечисления и переключения устройств.
 
@@ -347,6 +607,7 @@ class MediaManager:
         self._endpoint = endpoint
         self._null_audio = bool(null_audio)
         self._null_audio_active = False
+        self._monitor_echo = False
 
     @property
     def available(self) -> bool:
@@ -453,16 +714,21 @@ class MediaManager:
             return
         cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
         play = self.dev_int(mgr, "playbackDev", "getPlaybackDev")
+        changed = False
         if play < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "outputCount", 0) > 0:
                     self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                    changed = True
                     break
         if cap < 0:
             for i, dev in enumerate(devices):
                 if getattr(dev, "inputCount", 0) > 0:
                     self.dev_set(mgr, "captureDev", "setCaptureDev", i)
+                    changed = True
                     break
+        if changed:
+            self._audio_dev_update(mgr)
         # В headless/контейнерных окружениях устройства могут присутствовать
         # в списке, но быть нерабочими. Тогда makeCall() падает с
         # PJMEDIA_EAUD_SYSERR — включаем null-устройство.
@@ -489,11 +755,13 @@ class MediaManager:
         devices: List[dict] = []
         try:
             mgr = self.aud_mgr()
+            descs = _pa_descriptions()
             for i, info in enumerate(self.enum_devices(mgr)):
+                raw = getattr(info, "name", f"dev{i}")
                 devices.append({
                     "id": i,
-                    "name": _friendly_audio_name(getattr(info, "name", f"dev{i}")),
-                    "raw_name": getattr(info, "name", f"dev{i}"),
+                    "name": _humanize_audio_name(raw, descs),
+                    "raw_name": raw,
                     "driver": getattr(info, "driver", "?"),
                     "inputs": getattr(info, "inputCount", 0),
                     "outputs": getattr(info, "outputCount", 0),
@@ -511,12 +779,108 @@ class MediaManager:
             if not ok:
                 raise RuntimeError("setCaptureDev недоступен")
             self._null_audio_active = False
-            return True
+            return self._audio_dev_update(mgr)
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось переключить микрофон: %s", exc)
             return False
 
+    def _audio_dev_update(self, mgr) -> bool:  # pragma: no cover
+        """Применить выбранные индексы устройств к ЖИВОМУ звуковому потоку.
+
+        setCaptureDev/setPlaybackDev меняют только конфиг (дока binding
+        прямиком: «не меняет состояние звукового устройства»): pjsua заново
+        не открывает захват/вывод без перезапуска. Без этого шага
+        переключение микрофона декоративное — UI и монитор честно рапортуют
+        ВЫБРАННЫЙ порт, а pjsua молча продолжает читать старый (живой док
+        2026-11-24: тон 440 Гц не двигал монитор ни на одном из 12 индексов
+        при системном пике 32768). Нет метода в связке — предупреждаем и
+        считаем успех прежним (деградация как было); отказ обновления —
+        False: врать про применённое устройство нельзя.
+        """
+        # Путь перезапуска ищем ЦЕПОЧКОЙ: набор экспортов SWIG-связки
+        # зависит от сборки (живой док v0.3.5: в CI-бинде audioDevUpdateConfig
+        # НЕТ, а setSndDevMode — есть). Порядок от точного к живучему;
+        # прошлый путь пишется в лог («применено через …») — живой док
+        # проверит по строке, каким механизмом воспользовались.
+        # * audioDevUpdateConfig — точечное применение конфига (есть не везде);
+        # * setSndDevMode(0) — по доке binding: «откроет звуковое устройство,
+        #   используя текущие активные ID, выставленные setCaptureDev()/
+        #   setPlaybackDev()», т.е. классический apply с перезаходом;
+        # * audioDevInit — полный рестарт звукового драйвера.
+        # setDev в цепочку НЕ включаем: в проверенной CI-связке (dir()
+        # pjsua2 2.16 SWIG) его нет, а у Python-двойников mgr он часто
+        # существует «в наследство» и проглатывает цепочку молча.
+        # setSndDevMode аргумент — БИТМАСКА pjsua_snd_dev_mode, не «применить»:
+        # 0 = полный дуплекс, открыть немедленно (настоящий apply);
+        # 1 = NO_IMMEDIATE_OPEN — переконфигурировать, открыть при первом
+        #     же употреблении (честная отсрочка);
+        # 2 = SPEAKER_ONLY — захват убивает, для микрофона НЕприменим.
+        # Пробы живой связкой (rig-app контейнер): обёртка зовёт
+        # pjsua_set_snd_dev2(&param), отказ — pjsua2.Error с непустыми
+        # title/reason при пустом str().
+        applied = None
+        deferred = False
+        last: Optional[Exception] = None
+        for name, args in (("audioDevUpdateConfig", ()),
+                           ("setSndDevMode", (0,)), ("setSndDevMode", (1,)),
+                           ("audioDevInit", ())):
+            m = getattr(mgr, name, None)
+            if m is None:
+                continue
+            try:
+                m(*args)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                log.debug("Путь применения звука %s%s не вышел: %s",
+                          name, args or "", _exc_brief(exc))
+                continue
+            if name == "setSndDevMode" and args == (1,):
+                deferred = True
+            applied = (name, args)
+            break
+        if applied is not None:
+            name, args = applied
+            first = args[0] if args else ""
+            tag = f"{name}{first}" if name == "setSndDevMode" else name
+            if deferred:
+                # setSndDevMode(1) не открывает устройство — новые индексы
+                # подхватятся при следующем открытии. Сказать честно.
+                log.info("Звук применён через %s (отсрочка: устр-во "
+                         "перезапустится при следующем открытии); немедленный "
+                         "перезаход не вышел: %s", tag,
+                         _exc_brief(last) if last is not None else "—")
+            else:
+                log.info("Звуковой поток перезапущен: применено через %s", tag)
+            return True
+        if last is not None:
+            # Метод нашёлся, но отказал — врать про применённое нельзя.
+            log.warning("Ни один путь перезапуска звука не вышел (последняя: "
+                        "%s) — смена устройства могла не примениться",
+                        _exc_brief(last))
+            return False
+        log.warning("pjsua2 без audioDevUpdateConfig/setSndDevMode — смена "
+                    "устройства не применится к живому потоку")
+        return True
+
     def open_mic_monitor(self, dev_id: Optional[int] = None) -> bool:  # pragma: no cover
+        """Подготовить тракт захвата для визуального теста микрофона.
+
+        Поведение (данные с живого отчёта: монитор молчал без единой
+        строки в логе):
+        * выбирает capture-устройство, если выбранное НЕ трогает
+          playback — вывод на capture-only порт роняет дуплекс;
+        * самодостаточен: если ранее включилось null-аудио (headless-
+          старт, старт без устройств), монитор снимает заглушку
+          (setNullSound(False)) — иначе read_mic_level читает мёртвый
+          порт и «уровень мёртв на всех устройствах» неотличим от
+          тихо-молчащего монитора;
+        * рапортует ОДНОЙ INFO-строкой весь путь: индекс открытого
+          звукового устройства, имя capture-порта, наличие getTxLevel
+          в сборке bindings и режим звука. Значение уровня далее
+          пишет UI-монитор ~раз в секунду (LevelProbe).
+        Деградация честная: нет порта/getTxLevel — нуль на мониторе и
+        соотв. строка в логе, а не молчаливая имитация тишины.
+        """
         if not self.available:
             return False
         try:
@@ -525,21 +889,107 @@ class MediaManager:
             except Exception:  # noqa: BLE001
                 pass
             mgr = self.aud_mgr()
+            changed = False
             if dev_id is not None:
                 self.dev_set(mgr, "captureDev", "setCaptureDev", int(dev_id))
-                self.dev_set(mgr, "playbackDev", "setPlaybackDev", int(dev_id))
+                changed = True
+            # Playback НЕ трогаем. Раньше монитор ставил выбранный микрофон
+            # ЕЩЁ И динамиками (setPlaybackDev := микрофон). Микрофон не
+            # умеет играть, а у звуковых бэкендов (PortAudio/ALSA-дуплекс)
+            # отказ открыть вывод на capture-only устройстве ронял и ввод —
+            # монитор показывал ноль уже на уровне захвата. Тест микрофона
+            # визуальный (эквалайзер), слушать себя он не обязан.
             if self.dev_int(mgr, "captureDev", "getCaptureDev") < 0:
                 for i, info in enumerate(self.enum_devices(mgr)):
                     if getattr(info, "inputCount", 0) > 0:
                         self.dev_set(mgr, "captureDev", "setCaptureDev", i)
-                        self.dev_set(mgr, "playbackDev", "setPlaybackDev", i)
+                        changed = True
                         break
-            return self.dev_int(mgr, "captureDev", "getCaptureDev") >= 0
+            unmute_done = False
+            if self._null_audio_active:
+                # Без живого звука монитор бессилен: pjsua крутит null-
+                # порт, capture-media отдаёт вечный нуль. Пробуем вернуть
+                # реальный звуковой device (нет метода/отказ — честная
+                # запись в лог, монитор продолжит с нулём).
+                # setNullSound есть не во всех сборках (в CI-бинде его нет);
+                # setSndDevMode(0) — тот же результат через перезаход на
+                # реальные ID (дока: открывает устройство текущими ID).
+                done = False
+                for name, args in (("setNullSound", (False,)),
+                                   ("setSndDevMode", (0,))):
+                    m = getattr(mgr, name, None)
+                    if not callable(m):
+                        continue
+                    try:
+                        m(*args)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("Снять null-аудио через %s%s не вышло: %s",
+                                  name, args or "", _exc_brief(exc))
+                        continue
+                    self._null_audio_active = False
+                    log.info("Микрофон-монитор: null-аудио снято (%s), "
+                             "звук реальный", name)
+                    done = True
+                    unmute_done = True
+                    break
+                if not done:
+                    log.warning("Микрофон-монитор: null-аудио не снять "
+                                "(ни setNullSound, ни setSndDevMode) — "
+                                "монитор останется с нулём")
+            if changed and not unmute_done:
+                # Выбранный индекс без применения к потоку — только бумажка:
+                # монитор читал бы старый порт (см. _audio_dev_update).
+                # Если снятие null уже перезаходило на реальные ID, второй
+                # перезаход не нужен.
+                self._audio_dev_update(mgr)
+            cap = self.dev_int(mgr, "captureDev", "getCaptureDev")
+            port_name = "?"
+            for i, info in enumerate(self.enum_devices(mgr)):
+                if i == cap:
+                    port_name = getattr(info, "name", "?")
+                    break
+            media = getattr(mgr, "captureDevMedia", None)
+            if media is None:
+                media = getattr(mgr, "getCaptureDevMedia", None)
+            try:
+                capm = media() if callable(media) else media
+            except Exception:  # noqa: BLE001
+                capm = None
+            has_tx = bool(capm is not None and hasattr(capm, "getTxLevel"))
+            log.info(
+                "Микрофон-монитор: capture=%s порт=%r getTxLevel=%s звук=%s",
+                cap, port_name, has_tx,
+                "null" if self._null_audio_active else "реальный",
+            )
+            if cap >= 0 and has_tx and not self._null_audio_active:
+                # Замер v0.3.8 (контейнер с живым PipeWire): tx-уровень
+                # capture-порта обновляется только когда порт коммутрован
+                # в мост — несоединённый порт вечный ноль даже при RMS
+                # 8500 в том же устройстве. Самопрослушивание (классика
+                # microfon test): capture -> воспроизведение. Уровень
+                # оживает, пользователь слышит себя — тест честный.
+                self._ensure_monitor_echo(mgr)
+            return cap >= 0
         except Exception as exc:  # noqa: BLE001
             log.warning("Не удалось открыть микрофон для монитора: %s", exc)
             return False
 
     def read_mic_level(self) -> float:  # pragma: no cover
+        """Уровень сигнала микрофона, нормализованный в 0.0..1.0.
+
+        Направление взято из исходников PJSIP 2.16, а не из названия
+        метода. pjsua.h документирует pjsua_conf_get_signal_level(slot,
+        tx, rx): tx — сигнал «от моста к порту» (воспроизведение), rx —
+        «от порта к мосту» (захват). А pjsua2 (pjsip/src/pjsua2/media.cpp)
+        пишет &level в ПЕРВЫЙ аргумент у getRxLevel() и во ВТОРОЙ у
+        getTxLevel(): имена перепутаны местами относительно pjsua, и
+        микрофон читается через getTxLevel(). Прежний getRxLevel()
+        измерял динамики: на тихой машине монитор показывал ноль при
+        любом микрофоне (репорт с живого Linux, 2026-11).
+
+        pjsua2 возвращает 0..100 (level*100/255); UI-монитор (прогресс-бар
+        0..100 как level*100, «пик» в формате 0.000) ждёт 0.0..1.0.
+        """
         if not self.available:
             return 0.0
         try:
@@ -548,9 +998,90 @@ class MediaManager:
             if media is None:
                 media = getattr(mgr, "getCaptureDevMedia", None)
             cap = media() if callable(media) else media
-            return max(0.0, float(cap.getRxLevel()))
+            if cap is None:
+                return 0.0
+            getter = getattr(cap, "getTxLevel", None)
+            if getter is None:
+                # Другая сборка bindings без getTxLevel: направление
+                # честно прочитать нельзя; врать уровнем динамиков не
+                # будем — нуль на мониторе виден честнее, чем ложь.
+                log.debug("AudioMedia.getTxLevel недоступен — уровень не читается")
+                return 0.0
+            return min(1.0, max(0.0, float(getter()) / 100.0))
         except Exception:  # noqa: BLE001
             return 0.0
+
+    # --- самопрослушивание монитора (capture -> воспроизведение) ---
+    @staticmethod
+    def _dev_media(mgr, which: str):  # pragma: no cover
+        """captureDevMedia / playbackDevMedia: свойство или метод — обе связки."""
+        media = getattr(mgr, which, None)
+        if media is None:
+            media = getattr(mgr, f"get{which[0].upper()}{which[1:]}", None)
+        try:
+            return media() if callable(media) else media
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _ensure_monitor_echo(self, mgr) -> bool:  # pragma: no cover
+        """Соединить capture-порт с воспроизведением (один раз).
+
+        Без коммутации в мост pjsua не считает tx-уровень capture-порта:
+        живой замер 2026-11-24 (контейнер с PipeWire-маршрутом): тот же
+        тон даёт RMS 8500 сырым захватом и getTxLevel 0.0 у несоединённого
+        порта; после startTransmit — 32.0. Это второй (внешний) корень
+        «монитор молчит на всех устройствах»: путь перезапуска звука
+        (v0.3.7) сам по себе уровень не оживляет.
+        """
+        if self._monitor_echo:
+            return True
+        cap = self._dev_media(mgr, "captureDevMedia")
+        play = self._dev_media(mgr, "playbackDevMedia")
+        if cap is None or play is None:
+            log.info("Микрофон-монитор: порты медиа недоступны — "
+                     "без самопрослушивания уровень может остаться нулём")
+            return False
+        start = getattr(cap, "startTransmit", None)
+        if not callable(start):
+            log.info("Микрофон-монитор: startTransmit нет в сборке "
+                     "bindings — уровень без соединения не оживает")
+            return False
+        try:
+            start(play)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Микрофон-монитор: самопрослушивание не "
+                        "подключилось: %s", _exc_brief(exc))
+            return False
+        self._monitor_echo = True
+        log.info("Микрофон-монитор: самопрослушивание подключено "
+                 "(capture -> воспроизведение)")
+        return True
+
+    def close_mic_monitor(self) -> None:  # pragma: no cover
+        """Разорвать самопрослушивание монитора (закрытие окна теста)."""
+        if not self._monitor_echo:
+            # Диагностика для живого дока: молчаливый ранний выход не
+            # позволял отличить «закрытие не дошло» от «соединения и не
+            # было». Соединение могло слечь и вместе с пересозданным
+            # менеджером звука — тогда рвать уже нечего.
+            log.info("Микрофон-монитор: активного самопрослушивания нет "
+                     "(снято ранее или менеджер звука пересоздан)")
+            return
+        try:
+            mgr = self.aud_mgr()
+            cap = self._dev_media(mgr, "captureDevMedia")
+            play = self._dev_media(mgr, "playbackDevMedia")
+            stop = getattr(cap, "stopTransmit", None) if cap else None
+            if callable(stop) and play is not None:
+                try:
+                    stop(play)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("stopTransmit: %s", _exc_brief(exc))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._monitor_echo = False
+            log.info("Микрофон-монитор: самопрослушивание отключено")
 
     @staticmethod
     def _is_synthetic_video(driver: str, name: str) -> bool:

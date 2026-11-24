@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Точка входа MCU Client.
+"""Точка входа MCU.
 
 Примеры:
     python run.py --listen 0.0.0.0:5060 --display-name "MCU Room"
@@ -13,7 +13,7 @@
     python run.py --no-camera --no-mic         # старт с выключенными устройствами
 
 Логирование настраивается ДО тяжёлых импортов (pjsua2, PySide6), чтобы
-аварийное завершение на этапе импорта тоже попало в mcu-client.log.
+аварийное завершение на этапе импорта тоже попало в mcu.log.
 """
 
 from __future__ import annotations
@@ -44,21 +44,76 @@ if sys.stdout is None or sys.stderr is None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # choices для --h323-codec-profile берутся из того же кортежа, что и
+    # валидатор конфига: argparse и Config должны отвергать один и тот же набор,
+    # иначе профиль, принятый командной строкой, упадёт при валидации (или
+    # наоборот — пройдёт валидацию, которую хост истолкует как compat).
+    from mcuclient.codec_negotiation import H323_CODEC_PROFILE_MODES
+
     p = argparse.ArgumentParser(
         prog="mcuclient",
         description="Кроссплатформенный ВКС-клиент (SIP/H.323) уровня MCU",
     )
+    # Вариант сборки в --version обязателен: на машине по два клиента каждой
+    # линейки, и отличать их можно только строкой версии (тег = версия-вариант).
+    from mcuclient import version_string
+    p.add_argument("--version", action="version", version=version_string())
     p.add_argument("--config", help="путь к config.json")
     p.add_argument("--listen", help="адрес приёма вызовов, напр. 0.0.0.0:5060")
     p.add_argument("--display-name", help="имя комнаты/дисплея")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"], help="SIP-транспорт")
+    p.add_argument("--domain", metavar="ДОМЕН",
+                   help="домен/адрес МСУ, который набирают терминалы "
+                        "(по умолчанию — вызов по IP)")
+    p.add_argument("--sip-user", metavar="USER",
+                   help="SIP-user МСУ (номер зала); по умолчанию — имя комнаты")
+    p.add_argument("--srtp", choices=["off", "optional", "mandatory"],
+                   help="шифрование медиа; по умолчанию off (закрытый контур)")
+    p.add_argument("--codec-profile", choices=["max_compat", "wideband", "g711_only"],
+                   help="набор кодеков (max_compat = максимум совместимости)")
     p.add_argument(
         "--protocol", "--proto", choices=["auto", "sip", "h323", "h323_native"], default=None,
         help="протокол исходящего вызова (--call/--auto-call): auto/sip/h323/h323_native",
     )
+    p.add_argument("--register", metavar="URI",
+                   help="регистратор, напр. sip:voip.corp:5060 (без него MCU "
+                        "отвечает только на прямые вызовы по IP)")
+    p.add_argument("--reg-user", help="имя абонента/номер зала для регистрации")
+    p.add_argument("--reg-password",
+                   help="пароль абонента (надёжнее env MCU_REG_PASSWORD — в "
+                        "cmdline его видно через ps)")
+    p.add_argument("--reg-domain",
+                   help="домен для SIP-URI (по умолчанию хост регистратора)")
     p.add_argument("--h323", action="store_true", help="включить H.323-шлюз")
     p.add_argument("--h323-port", type=int, help="порт H.323 (по умолчанию 1720)")
     p.add_argument("--h323-socket", help="unix-сокет C++-хоста mcu_h323d (Вариант B, ADR-0002)")
+    p.add_argument("--h323-codec-profile", choices=list(H323_CODEC_PROFILE_MODES),
+                   help="лицензионный набор кодеков H.323-хоста: royalty-free "
+                        "(только свободные семейства) / compat (всё, лицензии на "
+                        "стороне заказчика) — матрица в docs/CODECS.md")
+    p.add_argument("--h323-audio-codecs", metavar="СПИСОК",
+                   help="белый список и приоритет аудио-форматов хоста через "
+                        "запятую (имена форматов H323Plus: G.722-64k,G.711,iLBC)")
+    p.add_argument("--h323-allow-codecs", metavar="СПИСОК",
+                   help="кодеки, защищённые от снятия профилем: везём по гранту "
+                        "правообладателя (G.722.1, бинарный OpenH264)")
+    # Транспорт видео (Этап 4). Выбор кодеков и таблица возможностей — НЕ здесь:
+    # это --h323-codec-profile/--h323-*-codecs и аргументы самого mcu_h323d
+    # (--video/--no-video). Тут только «показывать ли картинку и куда».
+    p.add_argument("--h323-video", dest="h323_video", action="store_true", default=None,
+                   help="картинка H.323-вызовов в панели: кадры кладутся в шину "
+                        "медиа веб-конференции (там же, где звук SIP-терминала)")
+    p.add_argument("--no-h323-video", dest="h323_video", action="store_false",
+                   help="не поднимать видео-мост (аудио H.323 работает как раньше)")
+    p.add_argument("--h323-video-socket", metavar="PATH",
+                   help="unix-сокет бинарных кадров mcu_h323d "
+                        "(по умолчанию к сокету хоста добавляется .video)")
+    p.add_argument("--h323-video-fps", type=float, default=5.0,
+                   help="потолок кадров на вызов в панель (по умолчанию 5; "
+                        "0 — без своего лимита)")
+    p.add_argument("--h323-video-preview", action="store_true",
+                   help="кадр H.323 в единственную ячейку панели (/api/frame.png); "
+                        "перекрывает картинку локального источника МСУ")
     p.add_argument("--headless", action="store_true", help="без GUI")
     p.add_argument("--doctor", action="store_true",
                    help="диагностика окружения (pjsua2, порт, устройства, графика) и выход")
@@ -120,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("main")
     log.info("=" * 64)
-    log.info("MCU Client: старт. Лог-файл: %s", log_file_path())
+    log.info("MCU: старт. Лог-файл: %s", log_file_path())
     log.info("Аргументы: %s", argv if argv is not None else sys.argv[1:])
 
     try:
@@ -209,14 +264,45 @@ def main(argv: list[str] | None = None) -> int:
         config.raw["room"]["name"] = args.display_name
     if args.transport:
         config.raw["sip"]["transport"] = args.transport
+    # --- Адрес МСУ и совместимость: CLI важнее конфига ---------------------
+    if args.domain is not None or args.sip_user is not None:
+        config.set_sip_address(domain=args.domain, user=args.sip_user)
+    if args.srtp:
+        config.set_srtp(args.srtp)
+    if args.codec_profile:
+        config.set_codec_profile(args.codec_profile)
     if args.null_audio:
         config.raw["sip"]["null_audio"] = True
     if args.auto_answer is not None:
         config.raw["sip"]["auto_answer"] = bool(args.auto_answer)
+    # --- Регистрация на регистраторе: CLI важнее конфига -------------------
+    # Пароль можно взять из окружения: в shell-истории и в cmdline (его видно
+    # через ps) он светился бы всем, кто залогинен на сервере МСУ.
+    if args.register or args.reg_user or args.reg_password:
+        reg = config.raw["sip"].setdefault("registration", {})
+        if args.register:
+            reg["registrar"] = args.register
+        if args.reg_user:
+            reg["username"] = args.reg_user
+        password = args.reg_password or os.environ.get("MCU_REG_PASSWORD", "")
+        if password:
+            reg["password"] = password
+        if args.reg_domain:
+            reg["domain"] = args.reg_domain
+        reg["enabled"] = True
     if args.h323:
         config.raw["h323"]["enabled"] = True
     if args.h323_port:
         config.raw["h323"]["port"] = args.h323_port
+    # Кодек-профиль H.323 пишется в конфиг, а не живёт только в argv: хост
+    # запускают стенды (scripts/testbed/*) и systemd, и им обоим нужен ОДИН
+    # источник — Config.h323_host_codec_args.
+    if args.h323_codec_profile:
+        config.raw["h323"]["codec_profile"] = args.h323_codec_profile
+    if args.h323_audio_codecs:
+        config.raw["h323"]["audio_codecs"] = args.h323_audio_codecs
+    if args.h323_allow_codecs:
+        config.raw["h323"]["allow_codecs"] = args.h323_allow_codecs
 
     # --- Web-панель: CLI важнее конфига ---
     web_cfg = config.raw.setdefault("features", {}).setdefault("web", {})
@@ -251,10 +337,29 @@ def main(argv: list[str] | None = None) -> int:
         # Работает, только если собран H323Plus; иначе start() вернёт False
         # и приём H.323 останется выключенным (SIP продолжает работать).
         h323_socket = getattr(args, "h323_socket", None) or DEFAULT_SOCKET
+        # ВАЖНО: передаём РЕЕСТР движка, а не engine.room. Комната у движка
+        # появляется только в engine.start() (_create_room), а этот код
+        # выполняется раньше — room тут ещё None, и приём H.323 падал бы на
+        # первом входящем вызове. Реестр живёт с момента __init__ и отдаёт
+        # актуальную комнату, плюс в нём единый счётчик id на обе линии.
         h323_native = H323Endpoint(
-            engine.room, engine.events, config, port=config.h323_port,
-            socket_path=h323_socket,
+            None, engine.events, config, port=config.h323_port,
+            socket_path=h323_socket, registry=engine.registry,
+            # Видео по умолчанию включено: без видео-моста картинка всё равно
+            # не доезжает до панели, а хост при согласованном видео вынужден
+            # слать кадры base64 в общую очередь, где живёт аудио.
+            video=True if args.h323_video is None else bool(args.h323_video),
+            video_socket=args.h323_video_socket or "",
+            video_fps=float(args.h323_video_fps),
         )
+        # Чтобы accept/reject/hangup из UI/web доезжали до H.323-хоста
+        # (у этих участников нет pjsua2-объекта, CallService их не видит).
+        engine.set_h323_native(h323_native)
+        # А чтобы тоны, набранные аппаратным терминалом, попадали в ОБЩИЙ журнал
+        # DTMF комнаты: у H.323-вызова нет pjsua2-колбэков on_dtmf_event, тон
+        # приходит событием хоста dtmf.in. Без этой строки журнал H.323-вызова
+        # пуст, и «набрал ли терминал PIN» по МСУ не проверяется вовсе.
+        h323_native.set_dtmf_service(engine.dtmf_service)
     except Exception:  # noqa: BLE001
         log.critical("Ошибка создания движка:", exc_info=True)
         report_fatal("Ошибка инициализации движка (SIP/медиа).")
@@ -323,6 +428,29 @@ def main(argv: list[str] | None = None) -> int:
 
     # === ШАГ 3.5: встроенный web-сервер управления ===
     web_server = _start_web_server(engine, config, h323, log)
+    # Кадры видео H.323 — в СУЩЕСТВУЮЩИЙ путь панели: шину медиа веб-конференции
+    # (туда же кладёт звук аппаратный SIP-терминал). Шина появляется вместе с
+    # веб-сервером, поэтому присылка — после его запуска.
+    if web_server is not None:
+        _preview = bool(args.h323_video_preview)
+
+        def _panel_sinks():
+            # Сессию панели пересоздают (HTTPS/порт через apply_settings), и шина
+            # при этом НОВАЯ. Кэш по ссылке дал бы «видео пропало после
+            # включения TLS» — неотличимо от поломки H.323, поэтому достаем
+            # каждый раз заново.
+            session = getattr(web_server, "session", None)
+            if session is None:
+                return None, None
+            return (
+                getattr(getattr(session, "conference", None), "bus", None),
+                getattr(session, "frame_hub", None) if _preview else None,
+            )
+
+        try:
+            h323_native.set_video_sinks(sinks_provider=_panel_sinks)
+        except Exception:  # noqa: BLE001 — видео не имеет права ронять запуск МСУ
+            log.exception("H.323: видео-мост не подключён к панели")
     # SFU mediasoup (симулкаст/масштаб) — отдельный Node-процесс.
     mediasoup = _start_mediasoup(config, log)
 
@@ -536,7 +664,7 @@ def _run_cli() -> int:
         )
         _exit_code = 1
     logging.getLogger("mcuclient.main").info(
-        "MCU Client: процесс завершается, код=%s, uptime=%.1f c",
+        "MCU: процесс завершается, код=%s, uptime=%.1f c",
         _exit_code, _time.time() - _start,
     )
     return _exit_code

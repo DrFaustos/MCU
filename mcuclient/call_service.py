@@ -29,7 +29,7 @@ class CallService:
         pj_module=None,
         is_available: Optional[Callable[[], bool]] = None,
         get_participant: Optional[Callable[[int], object]] = None,
-        register_participant: Optional[Callable[[object, str], object]] = None,
+        register_participant: Optional[Callable[..., object]] = None,
         drop_participant: Optional[Callable[[int], None]] = None,
         get_call_class: Optional[Callable[[], object]] = None,
         get_account: Optional[Callable[[], object]] = None,
@@ -121,7 +121,12 @@ class CallService:
                 prm.opt.audioCount = 1
                 prm.opt.videoCount = self._video_count()
                 call.makeCall(uri, prm)
-                participant = self._register_participant(call, uri)
+                # Состояние передаём сразу: реальный регистратор движка
+                # требует state обязательным аргументом (участник рождается
+                # уже CONNECTING, а не IDLE с последующей дозаписью).
+                participant = self._register_participant(
+                    call, uri, state=CallState.CONNECTING
+                )
                 participant.state = CallState.CONNECTING
                 if self._remember_call is not None:
                     self._remember_call(participant.id, call)

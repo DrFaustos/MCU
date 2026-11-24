@@ -139,3 +139,65 @@ def test_apply_media_state_sets_and_clears_window():
         e == "call.video" and p.get("id") == part.id and p.get("active") is False
         for e, p in seen
     )
+
+
+def test_apply_negotiated_codecs_writes_participant_model():
+    """Согласованные кодеки обязаны оседать в модели, а не только в журнале.
+
+    Панель (REST-проекция участника) и тайл UI читают
+    Participant.audio_codec/video_codec. До правки для SIP их не писал никто:
+    при активном звонке оператор читал «кодека нет» — разбор жил только в
+    log.info, а писателем полей оказался один H.323-эндпоинт.
+    """
+    reg = CallRegistry(Room(name="R"))
+    mgr = CallManager(reg, EventBus(), _Pj())
+    call = object()
+    part = reg.register(call, "sip:a@h", CallState.CONFIRMED)
+
+    audio = _Media(0, 1)
+    audio.codecName = "PCMU/8000"
+    video = _Media(2, 1)
+    video.codecName = "H264/90000"
+    ci = _CallInfo(part.id)
+    ci.media = [audio, video]
+
+    codecs = mgr.apply_negotiated_codecs(ci, call)
+
+    assert codecs == {"audio": "PCMU/8000", "video": "H264/90000"}
+    assert part.audio_codec == "PCMU/8000"
+    assert part.video_codec == "H264/90000"
+
+
+def test_apply_negotiated_codecs_keeps_value_when_stack_is_silent():
+    """Пустой codecName не имеет права затирать уже согласованный кодек.
+
+    pjsua2 заполняет mi.codecName не на каждом getInfo(): «нет данных» не
+    должно выглядеть как «кодек пропал» — то же правило, что введено для
+    rx_bitrate_kbps (None означает «не измерено», а не «ноль»).
+    """
+    reg = CallRegistry(Room(name="R"))
+    mgr = CallManager(reg, EventBus(), _Pj())
+    call = object()
+    part = reg.register(call, "sip:a@h", CallState.CONFIRMED)
+    part.audio_codec = "G722/16000"
+
+    silent = _Media(0, 1)
+    silent.codecName = ""
+    ci = _CallInfo(part.id)
+    ci.media = [silent]
+
+    mgr.apply_negotiated_codecs(ci, call)
+
+    assert part.audio_codec == "G722/16000"
+
+
+def test_apply_negotiated_codecs_unknown_participant_is_noop():
+    """Участник не найден — не падаем; разбор возвращаем, его логируют."""
+    reg = CallRegistry(Room(name="R"))
+    mgr = CallManager(reg, EventBus(), _Pj())
+    media = _Media(0, 1)
+    media.codecName = "PCMU/8000"
+    ci = _CallInfo(999)
+    ci.media = [media]
+
+    assert mgr.apply_negotiated_codecs(ci, object())["audio"] == "PCMU/8000"

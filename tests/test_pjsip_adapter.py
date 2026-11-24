@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from mcuclient import pjsip_adapter as pa
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _skip import skip  # noqa: E402
+from mcuclient import pjsip_adapter as pa  # noqa: E402
 
 
 def test_stub_endpoint_conforms_to_protocol():
@@ -49,7 +58,7 @@ def test_real_pjsua2_endpoint_conforms_when_available():
     Тест пропускается, если pjsua2 не установлен (CI без нативного стека).
     """
     if not pa.PJSIP_AVAILABLE:
-        return
+        skip("pjsua2 не установлен — соответствию EndpointProtocol проверять нечем")
     ep = pa.create_endpoint()  # pragma: no cover
     assert isinstance(ep, pa.EndpointProtocol)  # pragma: no cover
 

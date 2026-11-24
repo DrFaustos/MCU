@@ -1,0 +1,12 @@
+# coredump: systemd-coredump 2026-11-19 15:53:47 pid 3808351 SIGSEGV /opt/openmcu-ru/bin/openmcu-ru (v3.48.0@2b93508, -fwrapv build) [смерть контейнера 15:46:47, core сохранён systemd в 15:53]
+# контекст: 16-е 'Adding member' в одну long-lived конференцию room101 после 11 микшерных 'Down to sleep' (churn add/leave за день)
+#0  0x00007f5ddfeda898 in abort () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f5ddff3b5c7 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f5ddff52c1c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f5ddff56b9c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f5ddff57782 in realloc () from /lib/x86_64-linux-gnu/libc.so.6
+#5  0x000055e93d95e1a5 in PAbstractArray::InternalSetSize(int, int) ()
+#6  0x000055e93da892d7 in H323_RTPChannel::Transmit() ()
+#7  0x000055e93d9496cf in PThread::PX_ThreadStart(void*) ()
+#8  0x00007f5ddff469e3 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#9  0x00007f5ddffd8860 in ?? () from /lib/x86_64-linux-gnu/libc.so.6

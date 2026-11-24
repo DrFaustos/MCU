@@ -1,0 +1,501 @@
+[MCU] журнал пишется в /root/.mcu-client/mcu.log: /src: [Errno 30] Read-only file system: '/src/mcu.log'
+19:43:15 WARNING mcuclient.log: журнал пишется в /root/.mcu-client/mcu.log: /src: [Errno 30] Read-only file system: '/src/mcu.log'
+19:43:15 INFO    mcuclient.main: ================================================================
+19:43:15 INFO    mcuclient.main: MCU: старт. Лог-файл: /root/.mcu-client/mcu.log
+19:43:15 INFO    mcuclient.main: Аргументы: ['--headless', '--config', '/src/docker/testbed/mcu.config.json', '--null-audio', '--display-name', 'MCU Testbed']
+19:43:15 INFO    mcuclient.env: PID: 1
+19:43:15 INFO    mcuclient.env: ОС: Linux 7.3.4-ogc8.1.fc45.x86_64 (x86_64)
+19:43:15 INFO    mcuclient.env: Python: 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+19:43:15 INFO    mcuclient.env: Исполняемый файл: /usr/bin/python3
+19:43:15 INFO    mcuclient.env: Frozen (PyInstaller): False
+19:43:15 INFO    mcuclient.env: Текущая папка: /src
+19:43:15 INFO    mcuclient.env: Лог-файл: /root/.mcu-client/mcu.log
+19:43:15 INFO    mcuclient.env: Модуль PySide6     : 6.12.0 (/usr/local/lib/python3.12/dist-packages/PySide6/__init__.py)
+19:43:15 INFO    mcuclient.env: Модуль pjsua2      : ? (/usr/local/lib/python3.12/dist-packages/pjsua2.py)
+19:43:15 INFO    mcuclient.env: Модуль numpy       : 2.5.5 (/usr/local/lib/python3.12/dist-packages/numpy/__init__.py)
+19:43:15 INFO    mcuclient.env: Модуль cv2         : 5.1.0 (/usr/local/lib/python3.12/dist-packages/cv2/__init__.py)
+19:43:15 INFO    mcuclient.env: Модуль mss         : 10.2.0 (/usr/local/lib/python3.12/dist-packages/mss/__init__.py)
+19:43:15 INFO    mcuclient.env: Модуль pyvirtualcam: 0.15.0 (/usr/local/lib/python3.12/dist-packages/pyvirtualcam/__init__.py)
+19:43:15 INFO    mcuclient.main: Импорт mcuclient.config...
+19:43:15 INFO    mcuclient.main: Импорт mcuclient.h323_gateway...
+19:43:15 INFO    mcuclient.main: Импорт mcuclient.sip_engine (включает pjsua2)...
+19:43:15 INFO    mcuclient.main: Импорт завершён. PJSIP_AVAILABLE=True
+19:43:15 INFO    mcuclient.main: Шаг 2/6: создание SipEngine...
+19:43:15 INFO    mcuclient.media: Найдено устройств: камер=0, микрофонов=3
+19:43:15 INFO    mcuclient.recorder: Кодер h264_nvenc есть, но не работает — пропускаем
+19:43:15 INFO    mcuclient.recorder: Кодер h264_qsv есть, но не работает — пропускаем
+19:43:15 INFO    mcuclient.recorder: Аппаратные кодеры не найдены, используется программный libx264
+19:43:15 INFO    mcuclient.main: Шаг 3/6: создание H323Gateway...
+19:43:15 INFO    mcuclient.main: Шаг 4/6: engine.start()...
+19:43:15 INFO    mcuclient.sip: Автосоздана комната 'MCU Testbed'
+19:43:15 INFO    mcuclient.sip: Лимит одновременных вызовов: 16
+19:43:15.578         os_core_unix.c !pjlib 2.16 for POSIX initialized
+19:43:16.923         sip_endpoint.c  .Creating endpoint instance...
+19:43:16.923                  pjlib  .select() I/O Queue created (0x1573c508)
+19:43:16.923         sip_endpoint.c  .Module "mod-msg-print" registered
+19:43:16.923        sip_transport.c  .Transport manager created.
+19:43:16.923           pjsua_core.c  .PJSUA state changed: NULL --> CREATED
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+19:43:19 INFO    mcuclient.sip: SIP-транспорт: udp порт 5060 (id=0)
+19:43:19 INFO    mcuclient.media: null-аудио включено (null_audio=on)
+19:43:19 INFO    mcuclient.sip: PJSIP: видео поддерживается
+19:43:19 INFO    mcuclient.sip: Видео-кодек H264/100: приоритет 250
+19:43:19 INFO    mcuclient.sip: Видео-кодек H263-1998/96: приоритет 245
+19:43:19 INFO    mcuclient.sip: Видео-кодек VP8/102: приоритет 225
+19:43:19 INFO    mcuclient.sip: Видео-аккаунт: autoTransmit=True, captureDev=0
+19:43:19 INFO    mcuclient.sip: SRTP: режим 'off' -> srtpUse=0
+19:43:19 INFO    mcuclient.sip: NAT(аккаунт): ICE=True trickle=off TURN=нет ka=15s contact_rewrite=True
+19:43:19 INFO    mcuclient.sip: SIP-interop: prack=off session_timer=optional expires=1800s min_se=900s hold=rfc3264 rtcp_mux=off
+19:43:19 INFO    mcuclient.sip: SIP-регистрация: sip:asterisk:15080 (user=6001, expires=120s, proxy=-)
+19:43:19 INFO    mcuclient.sip: Движок запущен: 0.0.0.0:5060, комната 'MCU Testbed', pjsip=True, SRTP=off, раскладка=speaker
+19:43:19 INFO    mcuclient.devices: Наблюдение за устройствами запущено (интервал 2.0s)
+19:43:19 INFO    mcuclient.abr: Опрос RTCP для ABR запущен (интервал 3.0s)
+19:43:19 INFO    mcuclient.sip: Главный поток зарегистрирован в pjlib
+19:43:19 INFO    mcuclient.main: Шаг 4/6: SIP-движок запущен, главный поток зарегистрирован
+19:43:19 INFO    mcuclient.main: SIP-транспорт слушает 0.0.0.0:5060 (udp)
+19:43:19 INFO    mcuclient.main: Headless-режим. Нажмите Ctrl+C для выхода.
+19:43:19 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:43:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:43:59 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:01 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:03 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:05 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:07 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:09 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:11 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:13 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:44:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:10 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:13 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:45:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:16 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:18 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:20 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:22 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:24 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:26 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:28 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:30 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:32 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:34 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:36 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:38 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:40 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:42 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:44 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:46 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:48 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:50 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:52 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:54 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:56 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:45:58 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:10 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:16 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:18 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:20 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:22 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:24 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:26 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:28 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:30 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:32 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:34 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:36 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:38 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:40 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:42 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:44 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:46 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:48 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:50 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:52 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:54 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:56 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:46:58 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:07 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:47:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:10 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:12 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:47:12 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:47:12 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:47:12 INFO    mcuclient.call: Вызов 1: состояние CONNECTING
+19:47:12 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:47:12 INFO    mcuclient.call: Вызов 1: состояние CONFIRMED
+19:47:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:14 INFO    mcuclient.call: Вызов 1: состояние DISCONNECTED
+19:47:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:47:59 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:01 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:03 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:05 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:07 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:09 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:11 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:13 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:13 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:48:13 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:48:13 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:48:13 INFO    mcuclient.call: Вызов 2: состояние CONNECTING
+19:48:13 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:48:13 INFO    mcuclient.call: Вызов 2: состояние CONFIRMED
+19:48:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:15 INFO    mcuclient.call: Вызов 2: состояние DISCONNECTED
+19:48:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:40 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:48:40 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:48:40 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:48:40 INFO    mcuclient.call: Вызов 3: состояние CONNECTING
+19:48:40 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:48:40 INFO    mcuclient.call: Вызов 3: состояние CONFIRMED
+19:48:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:48:59 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:01 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:02 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:49:02 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:49:02 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:49:02 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:49:02 INFO    mcuclient.call: Вызов 4: состояние CONNECTING
+19:49:02 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:49:02 INFO    mcuclient.call: Вызов 4: состояние CONFIRMED
+19:49:03 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:04 INFO    mcuclient.call: Вызов 4: состояние DISCONNECTED
+19:49:05 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:07 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:09 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:11 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:13 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:39 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:49:39 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:49:39 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:49:39 INFO    mcuclient.call: Вызов 5: состояние CONNECTING
+19:49:39 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:49:39 INFO    mcuclient.call: Вызов 5: состояние CONFIRMED
+19:49:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:41 INFO    mcuclient.call: Вызов 5: состояние DISCONNECTED
+19:49:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:49:59 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:01 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:03 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:05 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:07 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:09 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:13 INFO    mcuclient.sip: Авто-ответ на вызов от "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:50:13 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:50:13 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:50:13 INFO    mcuclient.call: Вызов 6: состояние CONNECTING
+19:50:13 INFO    mcuclient.call: Вызов принят: "RTP Terminal" <sip:rtpterm@10.222.8.2>
+19:50:13 INFO    mcuclient.call: Вызов 6: состояние CONFIRMED
+19:50:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:15 INFO    mcuclient.call: Вызов 6: состояние DISCONNECTED
+19:50:16 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:18 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:20 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:22 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:24 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:26 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:28 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:30 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:32 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:34 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:36 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:38 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:40 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:42 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:43 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:50:43 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:50:43 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:50:43 INFO    mcuclient.call: Вызов 7: состояние CONNECTING
+19:50:43 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:50:43 INFO    mcuclient.call: Вызов 7: состояние CONFIRMED
+19:50:44 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:46 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:48 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:50 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:52 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:54 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:56 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:50:56 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:50:58 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:10 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:16 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:18 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:20 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:22 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:24 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:26 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:28 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:30 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:32 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:34 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:36 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:38 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:40 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:42 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:44 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:46 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:46 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:51:46 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:51:46 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:51:46 INFO    mcuclient.call: Вызов 8: состояние CONNECTING
+19:51:46 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:51:46 INFO    mcuclient.call: Вызов 8: состояние CONFIRMED
+19:51:48 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:48 INFO    mcuclient.call: Вызов 3: состояние DISCONNECTED
+19:51:50 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:52 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:54 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:56 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:51:58 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:10 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:12 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:14 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:16 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:17 INFO    mcuclient.call: Вызов 7: состояние DISCONNECTED
+19:52:17 INFO    mcuclient.call: Вызов 8: состояние DISCONNECTED
+19:52:18 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:20 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:22 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:24 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:24 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:52:24 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:52:24 INFO    mcuclient.call: Вызов 9: состояние CONNECTING
+19:52:24 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:24 INFO    mcuclient.call: Вызов 9: состояние CONFIRMED
+19:52:24 INFO    mcuclient.call: Вызов 9: состояние DISCONNECTED
+19:52:24 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:26 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:28 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:30 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:32 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:34 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:36 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:38 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:40 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:42 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:44 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:44 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:52:44 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:52:44 INFO    mcuclient.call: Вызов 10: состояние CONNECTING
+19:52:44 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:44 INFO    mcuclient.call: Вызов 10: состояние CONFIRMED
+19:52:44 INFO    mcuclient.call: Вызов 10: состояние DISCONNECTED
+19:52:44 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:46 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:48 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:50 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:52:50 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:52 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:54 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:56 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:58 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:52:59 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:59 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:52:59 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:52:59 INFO    mcuclient.call: Вызов 11: состояние CONNECTING
+19:52:59 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:52:59 INFO    mcuclient.call: Вызов 11: состояние CONFIRMED
+19:52:59 INFO    mcuclient.call: Вызов 11: состояние DISCONNECTED
+19:53:00 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:02 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:04 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:06 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:08 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:11 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:13 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:21 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:53:21 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:53:21 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:53:21 INFO    mcuclient.call: Вызов 12: состояние CONNECTING
+19:53:21 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:53:21 INFO    mcuclient.call: Вызов 12: состояние CONFIRMED
+19:53:21 INFO    mcuclient.call: Вызов 12: состояние DISCONNECTED
+19:53:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:49 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:51 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:53 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:54 INFO    mcuclient.sip: Авто-ответ на вызов от "Anonymous" <sip:anonymous@anonymous.invalid>
+19:53:54 INFO    mcuclient.sip: Согласованные кодеки вызова: аудио=OPUS/48000, видео=-
+19:53:54 INFO    mcuclient.codec: Кодек video не согласован: в answer-SDP нет video-потока (PJMEDIA не нашёл общего кодека с offer терминала)
+19:53:54 INFO    mcuclient.call: Вызов 13: состояние CONNECTING
+19:53:54 INFO    mcuclient.call: Вызов принят: "Anonymous" <sip:anonymous@anonymous.invalid>
+19:53:54 INFO    mcuclient.call: Вызов 13: состояние CONFIRMED
+19:53:55 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:57 INFO    mcuclient.abr: ABR вверх: 1500 -> 1650 кбит/с (потери 0.0%, джиттер 0 мс — запас есть)
+19:53:57 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:53:59 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:00 INFO    mcuclient.abr: ABR вверх: 1650 -> 1815 кбит/с (потери 0.0%, джиттер 0 мс — запас есть)
+19:54:01 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:03 INFO    mcuclient.abr: ABR вверх: 1815 -> 1996 кбит/с (потери 0.0%, джиттер 0 мс — запас есть)
+19:54:03 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:05 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:06 INFO    mcuclient.abr: ABR вверх: 1996 -> 2195 кбит/с (потери 0.0%, джиттер 0 мс — запас есть)
+19:54:07 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:09 INFO    mcuclient.abr: ABR вверх: 2195 -> 2414 кбит/с (потери 0.0%, джиттер 0 мс — запас есть)
+19:54:09 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:10 INFO    mcuclient.call: Вызов 13: состояние DISCONNECTED
+19:54:11 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:13 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:15 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:17 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:19 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:21 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:23 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:25 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:27 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:29 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:31 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:33 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:35 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:37 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:39 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:41 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:43 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:44 INFO    mcuclient.sip: Регистрация на регистраторе: OK (expires=119s)
+19:54:45 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False
+19:54:47 INFO    mcuclient.devices: Устройства обновлены: камер=0, микрофонов=3, changed=False

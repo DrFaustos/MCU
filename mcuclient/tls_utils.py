@@ -43,7 +43,8 @@ def openssl_available() -> bool:
 
 
 def ensure_self_signed(cert_dir: Optional[Path] = None, host: str = "localhost",
-                       extra_hosts: Optional[list[str]] = None) -> Tuple[Path, Path]:
+                       extra_hosts: Optional[list[str]] = None,
+                       days: int = 3650, basename: str = "mcu-web") -> Tuple[Path, Path]:
     """Вернуть пути (cert, key), сгенерировав самоподписанный сертификат.
 
     Если файлы уже есть — возвращает их. Генерация — через ``openssl``;
@@ -54,8 +55,8 @@ def ensure_self_signed(cert_dir: Optional[Path] = None, host: str = "localhost",
     """
     directory = Path(cert_dir) if cert_dir else default_cert_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    cert_file = directory / "mcu-web.crt"
-    key_file = directory / "mcu-web.key"
+    cert_file = directory / f"{basename}.crt"
+    key_file = directory / f"{basename}.key"
     if cert_file.is_file() and key_file.is_file():
         return cert_file, key_file
 
@@ -75,7 +76,7 @@ def ensure_self_signed(cert_dir: Optional[Path] = None, host: str = "localhost",
     cmd = [
         "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
         "-keyout", str(key_file), "-out", str(cert_file),
-        "-days", "3650", "-subj", f"/CN={host}",
+        "-days", str(int(days) or 3650), "-subj", f"/CN={host}",
         "-addext", f"subjectAltName={san}",
     ]
     log.info("Генерация самоподписанного сертификата: %s", cert_file)
@@ -112,6 +113,23 @@ def make_ssl_context(cert_file: Path, key_file: Path) -> ssl.SSLContext:
     return context
 
 
+def ensure_sip_tls_cert(host: str, days: int = 3650,
+                        extra_hosts: Optional[list[str]] = None) -> Tuple[Path, Path]:
+    """Самоподписанный сертификат для SIP-TLS (транспорт tls).
+
+    Ключевое требование закрытого контура: сертификат не должен стать причиной
+    отказа. Поэтому срок — ~10 лет, SAN покрывают и хост, и IP, а верификацию
+    пира мы по умолчанию НЕ требуем (см. sip_engine._configure_transport).
+
+    Если openssl недоступен, бросаем RuntimeError — вызывающий код обязан
+    откатиться на UDP/TCP, а не ронять приложение.
+    """
+    directory = default_cert_dir() / "sip"
+    return ensure_self_signed(cert_dir=directory, host=host or "localhost",
+                              extra_hosts=extra_hosts, days=days, basename="mcu-sip")
+
+
 __all__ = [
-    "default_cert_dir", "ensure_self_signed", "make_ssl_context", "openssl_available",
+    "default_cert_dir", "ensure_self_signed", "ensure_sip_tls_cert",
+    "make_ssl_context", "openssl_available",
 ]

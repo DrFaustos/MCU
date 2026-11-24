@@ -49,6 +49,11 @@ def check_pjsua2() -> List[Status]:
 
     ep = None
     try:
+        from .media_devices import (  # noqa: PLC0415
+            ensure_alsa_plugin_dir,
+        )
+
+        ensure_alsa_plugin_dir()
         ep = pjsua2.Endpoint()
         cfg = pjsua2.EpConfig()
         try:
@@ -215,7 +220,7 @@ def run_doctor(config=None) -> int:
     checks += check_ffmpeg()
 
     log.info("=" * 60)
-    log.info("MCU Client — диагностика (--doctor)")
+    log.info("MCU — диагностика (--doctor)")
     log.info("=" * 60)
     fails = 0
     for level, title, detail in checks:

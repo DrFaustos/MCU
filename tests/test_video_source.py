@@ -4,6 +4,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Каталог тестов — чтобы _skip импортировался и под pytest, и под
+# tests/_runner.py (он грузит файлы по пути и sys.path каталога не добавляет).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _skip import skip  # noqa: E402
 
 import mcuclient.video_source as vs  # noqa: E402
 from mcuclient.video_source import (  # noqa: E402
@@ -11,6 +16,22 @@ from mcuclient.video_source import (  # noqa: E402
     VideoSourceSwitcher,
     default_sources,
 )
+
+
+def _require_cam() -> None:
+    """Коммутатор собран: без numpy/pyvirtualcam кадры строить нечем.
+
+    Прежняя форма `if not vs._HAVE_CAM: return` засчитывалась обеими точками
+    проверки как успех, поэтому на машине без pyvirtualcam (и в CI, где его не
+    ставят вовсе) четыре кейса — форма кадра, бегущая полоса, обе ветки `_fit` —
+    не исполнялись никогда, а прогон был зелёным. Причина в прежних комментариях
+    («numpy недоступен») к тому же неверна: `_HAVE_CAM` — это numpy И pyvirtualcam
+    (mcuclient/video_source.py: `try: import numpy, pyvirtualcam`), т.е. при живом
+    numpy тест всё равно пропускается, и писать только про numpy — значит врать
+    читателю о причине.
+    """
+    if not vs._HAVE_CAM:
+        skip("нет numpy/pyvirtualcam — _make_colorbar() и _fit() нечего строить")
 
 
 def test_default_sources_has_off_colorbar_screen():
@@ -40,8 +61,7 @@ def test_stop_without_start_is_safe():
 
 
 def test_colorbar_frame_shape_and_rgb():
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
     frame = sw._make_colorbar()
     assert frame.shape == (48, 64, 3)
@@ -105,8 +125,7 @@ def test_stop_is_idempotent():
 
 def test_colorbar_has_moving_bar():
     """Бегущая полоса должна менять положение при росте frames_sent."""
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     sw = VideoSourceSwitcher(device="/dev/null", width=200, height=40, fps=5)
     sw._frames_sent = 0
     f0 = sw._make_colorbar()
@@ -118,8 +137,7 @@ def test_colorbar_has_moving_bar():
 def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
     """Если cv2 нет и размеры не совпадают — _fit не должен падать."""
     sw = VideoSourceSwitcher(device="/dev/null", width=64, height=48, fps=5)
-    if not vs._HAVE_CAM:
-        return  # numpy недоступен — тест неприменим
+    _require_cam()
     import numpy as np
 
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
@@ -132,11 +150,99 @@ def test_fit_returns_none_without_cv2_when_resize_needed(monkeypatch=None):
 
 
 def test_fit_passthrough_when_size_matches():
-    if not vs._HAVE_CAM:
-        return
+    _require_cam()
     import numpy as np
 
     sw = VideoSourceSwitcher(device="/dev/null", width=16, height=8, fps=5)
     frame = np.zeros((8, 16, 3), dtype=np.uint8)
     out = sw._fit(frame)
     assert out is not None and out.shape == (8, 16, 3)
+
+
+# --- честность вирт-камеры: гейт петлевого устройства (v0.3.3) ---------------
+
+
+def _fake_sysfs(tmp, nodes):
+    """Слепок /sys/class/video4linux: nodes = {'video9': {'name':..., 'driver':...}}."""
+    base = tmp / "sysfs"
+    for node, spec in nodes.items():
+        d = base / node
+        d.mkdir(parents=True)
+        (d / "name").write_text(spec.get("name", ""), encoding="utf-8")
+        if "driver" in spec:
+            drv = tmp / "drivers" / spec["driver"]
+            drv.mkdir(parents=True, exist_ok=True)
+            (d / "device").mkdir(exist_ok=True)
+            link = d / "device" / "driver"
+            if not link.exists():
+                link.symlink_to(drv)
+    return str(base)
+
+
+def test_is_loopback_by_name_and_driver(tmp_path):
+    base = _fake_sysfs(tmp_path, {
+        "video9": {"name": "v4l2 loopback\n"},
+        "video8": {"name": "HD Camera: HD Camera", "driver": "uvcvideo"},
+        "video7": {"driver": "v4l2loopback"},
+    })
+    assert vs.is_loopback_device("/dev/video9", sysfs=base) is True
+    assert vs.is_loopback_device("/dev/video7", sysfs=base) is True
+    assert vs.is_loopback_device("/dev/video8", sysfs=base) is False
+    assert vs.is_loopback_device("/dev/videoX", sysfs=base) is False
+
+
+def test_start_refuses_real_device_without_loopback(tmp_path, monkeypatch):
+    """Репорт v0.3.3: на машине без v4l2loopback /dev/video0 — реальный узел;
+    pyvirtualcam открыл его как OUTPUT, коммутатор автоподнялся и cv2 держит
+    сенсор — юзер видит «камера занята» на пустом месте. Поднимать нельзя."""
+    monkeypatch.setattr(vs, "_HAVE_CAM", True)
+    monkeypatch.setattr(vs, "_HAVE_CV2", True)
+    _fake_sysfs(tmp_path, {"video0": {"name": "HD Camera", "driver": "uvcvideo"}})
+    monkeypatch.setattr(vs, "is_loopback_device",
+                        lambda dev, sysfs=None: dev.endswith("LOOP"))
+    monkeypatch.setattr(vs, "loopback_devices", lambda sysfs=None: [])
+    sw = VideoSourceSwitcher(device="/dev/video0")
+    assert sw.start(SourceInfo("camera", "camera")) is False
+    assert sw.running is False
+    assert "v4l2loopback" in (sw.last_error or "")
+    assert sw.current_source().kind == "off"
+
+
+def test_start_redirects_to_found_loopback(tmp_path, monkeypatch):
+    monkeypatch.setattr(vs, "_HAVE_CAM", True)
+    monkeypatch.setattr(vs, "_HAVE_CV2", True)
+    monkeypatch.setattr(vs, "is_loopback_device",
+                        lambda dev, sysfs=None: dev == "/dev/video20")
+    monkeypatch.setattr(vs, "loopback_devices", lambda sysfs=None: ["/dev/video20"])
+    monkeypatch.setattr(VideoSourceSwitcher, "_loop", lambda self: None)
+    sw = VideoSourceSwitcher(device="/dev/video0")
+    assert sw.start(SourceInfo("camera", "camera")) is True
+    assert sw.device == "/dev/video20"
+    sw.stop()
+
+
+def test_renamed_loopback_detected_by_driver(tmp_path):
+    """devices_name у v4l2loopback — переименовываемый параметр: имя узла
+    верить нельзя, признак — driver в sysfs."""
+    base = _fake_sysfs(tmp_path, {
+        "video3": {"name": "Моя Студия", "driver": "v4l2loopback"},
+    })
+    assert vs.is_loopback_device("/dev/video3", sysfs=base) is True
+
+
+def test_describe_nodes_reports_verdicts(tmp_path, monkeypatch):
+    # caplog не годится: боевой конфиг вешает на mcuclient* файловый
+    # handler с propagate=False — под full-runner'ом caplog слепой.
+    seen: list[str] = []
+
+    def fake_info(msg, *args):
+        seen.append(str(msg) % args if args else str(msg))
+
+    monkeypatch.setattr(vs.log, "info", fake_info)
+    base = _fake_sysfs(tmp_path, {
+        "video0": {"name": "HD Camera", "driver": "uvcvideo"},
+        "video1": {"name": "Моя Студия", "driver": "v4l2loopback"},
+    })
+    vs.describe_video_nodes(sysfs=base)
+    text = "\n".join(seen)
+    assert "РЕАЛЬНЫЙ" in text and "петлевой" in text

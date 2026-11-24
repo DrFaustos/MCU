@@ -1,0 +1,45 @@
+{
+  "run_at": "2026-11-24 06:08:18 +0400",
+  "verdicts": [
+    {
+      "name": "(а) камера: картинка в зоне превью живая (после выкл->вкл)",
+      "ok": true,
+      "detail": "захват child-окна: boot=False t1=True t3=True; пиксели boot={'mean': 26.8, 'std': 8.7, 'min': 13, 'max': 131} t1={'mean': 40.8, 'std': 73.2, 'min': 0, 'max': 254} t3={'mean': 40.8, 'std': 73.2, 'min': 0, 'max': 254} diff(t1,t3)=0.000; лог: active=True error=False"
+    },
+    {
+      "name": "(б) повторный запуск превью",
+      "ok": true,
+      "detail": "раунды вкл/выкл×2: [{'round': 1, 'expect': 'off', 'active': False, 'hide_ok': True, 'error': False}, {'round': 2, 'expect': 'on', 'active': True, 'hide_ok': False, 'error': False}, {'round': 3, 'expect': 'off', 'active': False, 'hide_ok': True, 'error': False}, {'round': 4, 'expect': 'on', 'active': True, 'hide_ok': False, 'error': False}]; toggle-семантика чистая"
+    },
+    {
+      "name": "(в0) монитор микрофона открылся",
+      "ok": true,
+      "detail": "«Тест микрофона — уровень сигнала»"
+    },
+    {
+      "name": "(в1) переключение микрофона сработало",
+      "ok": true,
+      "detail": "успешно переключено 2 индексов (до №13), живых найдено 2: [(0, \"'pipewire' getTxLevel=True звук=реальный\"), (1, \"'default' getTxLevel=True звук=реальный\")]"
+    },
+    {
+      "name": "(в) тон 440 Гц двигает монитор на двух микрофонах",
+      "ok": true,
+      "detail": "boot/default: фон 0px/0.000lvl → тон 10295px/0.240lvl | mic1 [№0 'pipewire' getTxLevel=True звук=реальный]: фон 0px/0.000lvl → тон 9337px/0.250lvl | mic2 [№1 'default' getTxLevel=True звук=реальный]: фон 0px/0.000lvl → тон 9275px/0.250lvl; живых раундов 3 из 2; самопрослушивание в логе: есть (отключений при закрытиях: 0); тон digital; watcher: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']"
+    },
+    {
+      "name": "(г) имена микрофонов человеческие",
+      "ok": true,
+      "detail": "приложение: ['Ryzen HD Audio Controller Stereo Microphone', 'Ryzen HD Audio Controller Digital Microphone']; система(pactl): ['alsa_output.pci-0000_c2_00.6.HiFi__Speaker__sink.monitor', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic2__source', 'alsa_input.pci-0000_c2_00.6.HiFi__Mic1__source']; технических имён в списке: 0; humanize через pw-dump есть в репозитории — ждёт релиза"
+    },
+    {
+      "name": "избегание: экран/звонок/запись не тронуты",
+      "ok": true,
+      "detail": "GUI-классы за прогон: ['media.camera_device', 'media.devices', 'media.mic_device', 'media.preview']; запрещённых: нет"
+    },
+    {
+      "name": "уборка: за собой чисто",
+      "ok": true,
+      "detail": "процессы: нет"
+    }
+  ]
+}

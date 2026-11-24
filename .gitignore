@@ -77,12 +77,14 @@ cython_debug/
 .DS_Store
 config.json
 
-# runtime log
+# runtime log (mcu-client.log — legacy имя до ренима MCU-Client → MCU)
 mcu-client.log
+mcu.log
 *.log
 
-# generated icon
+# generated icon (mcu-client.ico — legacy имя до ренима)
 packaging/mcu-client.ico
+packaging/mcu.ico
 
 # GitHub token (локально, не коммитить)
 .gh_token
@@ -105,6 +107,9 @@ __pycache__/
 tools/h323d/*.o
 tools/h323d/bin/
 tools/h323d/build/
+# собранный бинарь в корне каталога (Makefile-путь): 2.2 МБ, пересобирается
+# ./scripts/build_h323d.sh — в дереве ему не место
+tools/h323d/mcu_h323d
 .build-venv2/
 
 # Локальное venv для WebRTC (aiortc) — не коммитим
@@ -119,3 +124,12 @@ node_modules/
 mediasoup-sidecar/node_modules/
 # Пустой корневой lock (создан случайно в корне, не нужен)
 /package-lock.json
+
+# scratch для агентов (одноразовые скрипты/логи)
+.agent/
+
+# hw_emu: одноразовые диагностические прогоны стендов в контейнере (scratch)
+/tmp_labdiag/
+
+# артефакты стендов (--dump-dir внутри /work)
+tmp/

@@ -1,12 +1,14 @@
-# MCU Client — кроссплатформенный ВКС-клиент (SIP / H.323)
+# MCU — кроссплатформенный ВКС (SIP / H.323)
 
 ![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 ![development: active](https://img.shields.io/badge/development-active-blue)
 ![releases: unstable](https://img.shields.io/badge/releases-unstable-red)
 
-Клиентское приложение для видеоконференцсвязи, реализующее функции MCU
-(Multipoint Control Unit) — проведение многосторонних ВКС-сессий с
-аппаратными и программными терминалами по протоколам SIP и H.323.
+Приложение **MCU** для видеоконференцсвязи, реализующее функции MCU
+(Multipoint Control Unit) — проведение многосторонних ВКС-сессий:
+**сервер** (комната, микшеры, web-админка `/admin`) и **терминал**
+(набор и приём вызовов) к аппаратным и программным ВКС по протоколам
+SIP и H.323.
 
 > [!WARNING]
 > **🚧 Проект в активной разработке (pre-alpha).** Приложение пока
@@ -19,6 +21,20 @@
 >
 > 🤖 **ИИ-агенту/новому разработчику:** начинать с
 > [docs/AI_CONTEXT.md](docs/AI_CONTEXT.md) — контекст, грабли, журнал изменений.
+
+> [!NOTE]
+> **Продукт называется MCU.** Режимы: **сервер** (комната, микшеры,
+> `/admin`) и **терминал** (набор и приём вызовов). Новое имя несёт
+> витрину: бинарник и релизные артефакты (`MCU-h323-debug.exe`), заголовок
+> окна («MCU 0.2.34-h323»), desktop/flatpak-пакеты, имя лога (`mcu.log`).
+> Внутренний python-пакет движка **остался `mcuclient`** намеренно: имя
+> живёт в путях импорта, пространстве имён логгера, переменных окружения
+> (`MCU_DEBUG`, `MCU_WEB_TOKEN`), раскладке PyInstaller-сборки и каталогах
+> пользовательских данных (`MCU-Client`, `mcu-client`, `~/.mcu-client`);
+> его переименование — риск для существующих конфигов, записей,
+> TLS-сертификатов и внешних скриптов при невидимой пользователю пользе.
+> Flatpak-идентификатор `ru.mcu.McuClient` сохранён по той же причине:
+> смена id ломает путь обновления уже установленных копий.
 
 ## Возможности
 
@@ -33,7 +49,8 @@
 * **TLS (HTTPS)** для web-панели — опционально, по умолчанию выключено
   (`--web-tls`, самоподписанный сертификат);
 * **ICE (STUN/TURN)** для WebRTC — настраивается для работы через интернет;
-* протоколы **SIP** (нативно, PJSIP/pjsua2) и **H.323** (GStreamer/шлюз);
+* протоколы **SIP** (нативно, PJSIP/pjsua2) и **H.323** (нативный стек
+  H323Plus в отдельном процессе `mcu_h323d`; GStreamer-шлюз — legacy);
 * согласование кодеков при звонке (audio + video), поддержка большинства кодеков;
 * использование **камеры** и **микрофона** с включением/выключением на лету;
 * **демонстрация экрана** (screen sharing) через `mss` + `pyvirtualcam` — захват экрана и трансляция в виртуальную камеру (OBS Virtual Camera на Windows, `v4l2loopback` на Linux);
@@ -45,15 +62,17 @@
 * **работа в закрытом контуре** без интернета и обязательного шифрования (SRTP/TLS опциональны).
 
 Язык реализации — **Python 3.10+**: один кодовый базис для Windows и Linux,
-медиастек из PJSIP (SIP/RTP/кодеки), GStreamer (H.323/транскодирование),
-GUI — Qt (PySide6).
+медиастек из PJSIP (SIP/RTP/кодеки) и H323Plus (H.323 — отдельным процессом
+`mcu_h323d`), GStreamer — транскодирование и захват, GUI — Qt (PySide6).
 
 ---
 
 ## Архитектура
 
 * **SIP Engine** — обёртка над `pjsua2`. Регистрация не нужна: приём по IP.
-* **H.323 Gateway** — мост для H.323-эндпоинтов (GStreamer/openh323), опционален.
+* **H.323 Host** — C++-процесс `mcu_h323d` на H323Plus: приём и исходящие вызовы,
+  PCM-медиа; `H323AudioBridge` сводит вызовы в общий микс. Без хоста клиент
+  работает SIP-only. `H323Gateway` (GStreamer/openh323) — legacy-обходной путь.
 * **Session / Room** — одна автосоздаваемая комната, состояние участников, whitelist по IP.
 * **Media bridge** — микс аудио, раскладка видео, транскодирование, битрейт.
 * **Screen Sharer** — захват экрана через `mss`, трансляция в виртуальную камеру через `pyvirtualcam`.
@@ -150,7 +169,27 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 ## Конфигурация (`config.json`)
 
-* `sip.require_encryption` — **false** по умолчанию для работы в закрытом контуре без сертификатов;
+* `sip.srtp` — режим шифрования медиа: `"off"` (RTP), `"optional"`
+  (SRTP, если терминал его предложил — единственный режим, где в одном зале
+  живут и Polycom с SRTP, и старый шлюз без шифрования), `"mandatory"`
+  (только SRTP). Пустая строка = авто по legacy-флагу
+  `sip.require_encryption` (он сохранён для совместимости);
+* `sip.max_calls` — потолок одновременных вызовов (по умолчанию 16). В
+  типовой сборке PJSIP `PJSUA_MAX_CALLS` равен 32, а без явного значения
+  пятый участник рискует получить 488/503;
+* `sip.nat` — NAT-traversal **уровня учётной записи**: `public_address`
+  (публичный адрес для SDP, когда STUN недоступен), `turn_server`/`turn_user`/
+  `turn_password`/`turn_transport`, `keep_alive_sec` (иначе NAT-binding
+  протухает через 30–60 c и звонок «умирает без звука» после CONFIRMED),
+  `rewrite_contact`, `ice_trickle` (`off` для аппаратных терминалов,
+  `half`/`full` для веба), `report_nat_type_in_sdp`;
+  `sip.stun.server` + `sip.stun.enable_ice` — сам STUN-сервер и включение ICE.
+  `sip.stun.server` принимает обе формы — `stun:stun.l.google.com:19302` и
+  `stun.l.google.com:19302` (порт обязателен). Этот же сервер автоматически
+  подставляется в WebRTC (`features.web.ice_servers`), если вы не перечислили
+  его там отдельно: один зал с SIP-терминалами и браузерами должен ходить
+  через один STUN.
+  > ICE/TURN в uaConfig не настраиваются: в pjsua2 2.16 там нет таких полей.
 * `features.allow_screen_share` — включить/выключить демонстрацию экрана;
 * `features.allow_recording` — включить/выключить запись конференции;
 * `features.recording_path` — директория для записей (по умолчанию `./recordings`);
@@ -188,8 +227,11 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
     │   ├── video_source_service.py# демонстрация экрана/vcam
     │   ├── video_preview_service.py # превью/встраивание видео
     │   ├── media_control_service.py # камера/микрофон/мут
-    │   ├── h323_gateway.py        # шлюз H.323 (GStreamer, опционально)
+    │   ├── h323_gateway.py        # legacy-шлюз H.323 (GStreamer, опционально)
+    │   ├── h323_host.py           # IPC хоста mcu_h323d: разбор событий, команды
+    │   ├── h323d_client.py        # подписки на события хоста, replay `ready`
     │   ├── h323_endpoint.py       # приём/исходящие H.323 (хост mcu_h323d)
+    │   ├── h323_audio_bridge.py   # PCM-мост: микширование H.323-вызовов
     │   ├── media_devices.py       # камера/микрофон, вкл/выкл
     │   ├── screen_share.py        # захват экрана -> виртуальная камера
     │   ├── recorder.py            # запись конференции (FFmpeg)
@@ -218,6 +260,21 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
   (видно уровень сигнала);
 * чекбоксы **Камера** и **Микрофон** — включают/выключают устройства
   до и во время звонка.
+
+**Честно про Linux-звук.** Бинарь несёт свою `libasound` (сборку CI), а её
+встроенные пути поиска модулей не покрывают раскладку других дистрибутивов
+(на Fedora модули лежат в `/usr/lib64/alsa-lib`). Из-за этого в сборках до
+0.3.7 включительно модуль `pcm_pipewire` не находился, маршрутизирующее
+устройство `default` не открывалось, и в списке оставались только сырые
+ALSA-алиасы (`sysdefault:`, `front:` …) — на чистом PipeWire (Fedora 38+,
+Ubuntu 22.10+) все они заняты звуковым сервером и открываются ошибкой,
+поэтому монитор показывал `0.000` при работающем системном звуке. Начиная
+с 0.3.8 приложение само выставляет `ALSA_PLUGIN_DIR` на каталог системных
+ALSA-модулей, и `default`/`pipewire` открываются через PipeWire — список
+микрофонов и уровни совпадают с системными настройками. Для маршрута
+нужен пакет `pipewire-alsa` (в Fedora и Ubuntu desktop ставится по
+умолчанию); без него в списке останутся только сырые алиасы. Честного
+обхода через `~/.asoundrc` для сборок старше 0.3.8 нет — обновитесь.
 
 В сетке видео всегда есть **тайл «Вы»** (своя камера):
 
@@ -256,11 +313,11 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 ## Логи и диагностика
 
-Приложение пишет лог в файл **`mcu-client.log`**:
+Приложение пишет лог в файл **`mcu.log`**:
 
 * onefile-сборка (`.exe` / AppImage) — рядом с исполняемым файлом;
 * запуск из исходников — в текущей рабочей папке;
-* если рядом нет прав на запись — `~/.mcu-client/mcu-client.log`.
+* если рядом нет прав на запись — `~/.mcu-client/mcu.log`.
 
 Лог содержит строку запуска (платформа, версия Python, путь к логу), все
 ошибки и необработанные исключения с трассировкой, а также трассировку
@@ -268,7 +325,7 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 Это особенно важно на **Windows** в сборке `--windowed`: консоли нет, и если
 приложение закрывается сразу после запуска, причина останется в
-`mcu-client.log` рядом с `.exe`. Дополнительно при **критической ошибке на
+`mcu.log` рядом с `.exe`. Дополнительно при **критической ошибке на
 старте** (импорт, конфиг, движок) показывается нативное окно **MessageBox**
 с текстом и путём к лог-файлу — приложение не «исчезает молча»
 (`mcuclient.log.report_fatal`).
@@ -287,6 +344,7 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 | Мут участника (аудио)       | кнопка 🔇 на тайле       |
 | Мут участника (видео)       | кнопка 📷✕ на тайле      |
 | Мут всех                    | кнопка **Мут всех**      |
+| Тоны набора (DTMF, PIN в IVR) | секция **Тоны набора**: поле + 16 кнопок / web-панель |
 | Раскладка видео             | селектор layouts         |
 | Качество видео (разрешение) | селектор 360p/720p/1080p |
 | Битрейт видео               | слайдер kbps             |
@@ -301,20 +359,29 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 ## Ограничения
 
-* H.323 в Python не имеет зрелого стека «из коробки»; `h323_gateway.py`
-  интегрируется с GStreamer/openh323 и по умолчанию выключен. SIP полностью
-  функционален на pjsua2.
+* H.323: зрелого Python-стека «из коробки» нет, поэтому H323Plus вынесен в
+  отдельный C++-процесс `mcu_h323d` (`tools/h323d`, ADR-0002). Сигнализация и
+  аудио-медиа через него проверены стендами на двух и трёх процессах хоста;
+  видео через хост, AEC и прогон с реальным терминалом Sony/Polycom — ещё нет.
+  `h323_gateway.py` (GStreamer/openh323) — legacy-обходной путь, по умолчанию
+  выключен; без хоста приложение работает SIP-only. SIP полностью функционален
+  на pjsua2.
 * Шифрование (SRTP/TLS) **опционально** и выключено по умолчанию для совместимости
-  с закрытыми контурами без сертификатов. Включается через `sip.require_encryption: true`.
+  с закрытыми контурами без сертификатов. Включается через `sip.srtp`:
+  `optional` — шифровать, если терминал предложил (рекомендуется для смешанного
+  парка), `mandatory` — только шифрованные вызовы, остальные отклоняются.
 * Запись конференции через FFmpeg захватывает экран (где отображается сетка участников).
   Для записи только аудио можно использовать встроенный `pjsua2.AudioMediaRecorder`.
 * Демонстрация экрана требует установки `mss`, `pyvirtualcam` и виртуальной камеры
   (OBS Virtual Camera на Windows, `v4l2loopback` на Linux).
 * Одна комната создаётся при старте; многокомнатный режим намеренно не реализован.
-* Web-конференция (браузер) — это **приём + fan-out** медиа, а не полноценный
-  SFU: нет записи веб-потока, симулкаста и микширования аудио (каждый зритель
-  получает отдельный трек на каждого публикатора); для интернета/NAT нужен
-  STUN/TURN. Раздача SIP/H.323-видео в браузер напрямую — нет (нужен транскодинг).
+* Web-конференция (браузер) — это **приём + fan-out** медиа: запись веб-сессии
+  есть (`WebRecorder`: кадры `FrameHub` + аудио-микс `AudioMixSession`), аудио
+  **микшируется** — каждый зритель получает один трек голосов всех, кроме себя
+  (`AudioMixSession.mixed_for`), а не отдельный трек на каждого публикатора.
+  Нет: **симулкаста** и транскодинга SIP/H.323-видео в браузер (нужен
+  видеомикшер/транскодер — см. `mediasoup-sidecar/`); для интернета/NAT нужен
+  STUN/TURN. Раздача SIP/H.323-видео в браузер напрямую — нет.
 
 ---
 
@@ -330,26 +397,26 @@ SIP/H.323 URI (например `sip:100@192.168.1.50`) или IP-адрес и 
 
 **Установка (portable):**
 
-1. Скачайте из раздела *Releases* файлы `MCU-Client.exe` и `ffmpeg.exe`.
-2. Положите их в одну папку, например `C:\Program Files\MCU-Client\`.
-3. Запустите `MCU-Client.exe` (FFmpeg подхватывается рядом с .exe).
+1. Скачайте из раздела *Releases* файлы `MCU-h323-debug.exe` и `ffmpeg.exe`.
+2. Положите их в одну папку, например `C:\Program Files\MCU\`.
+3. Запустите `MCU-h323-debug.exe` (FFmpeg подхватывается рядом с .exe).
 
 Опционально — ярлык в меню «Пуск» (PowerShell):
 
-    $dir = "C:\Program Files\MCU-Client"
-    $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk")
-    $s.TargetPath = "$dir\MCU-Client.exe"
+    $dir = "C:\Program Files\MCU"
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU.lnk")
+    $s.TargetPath = "$dir\MCU-h323-debug.exe"
     $s.WorkingDirectory = $dir
     $s.Save()
 
 **Удаление (PowerShell):**
 
-    Remove-Item -Recurse -Force "C:\Program Files\MCU-Client"
-    Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU Client.lnk"
+    Remove-Item -Recurse -Force "C:\Program Files\MCU"
+    Remove-Item -Force "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\MCU.lnk"
     Remove-Item -Recurse -Force "$env:APPDATA\MCU-Client"   # config.json и записи (если создавались)
 
 Если приложение запускалось «портативно» из другой папки — просто удалите
-эту папку вместе с `MCU-Client.exe` и `ffmpeg.exe`.
+эту папку вместе с `MCU-h323-debug.exe` и `ffmpeg.exe`.
 
 ### Linux — AppImage (рекомендуется, универсально)
 
@@ -359,19 +426,19 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 **Установка:**
 
     # Скачать из Releases
-    wget https://github.com/DrFaustos/MCU/releases/latest/download/MCU-Client-x86_64.AppImage
-    chmod +x MCU-Client-x86_64.AppImage
+    wget https://github.com/DrFaustos/MCU/releases/latest/download/MCU-x86_64.AppImage
+    chmod +x MCU-x86_64.AppImage
 
     # Установить в ~/.local (ярлык + иконка)
-    ./packaging/install.sh MCU-Client-x86_64.AppImage
+    ./packaging/install.sh MCU-x86_64.AppImage
 
-После этого приложение доступно в меню как **MCU Client** и командой
-`MCU-Client.AppImage`.
+После этого приложение доступно в меню как **MCU** и командой
+`MCU.AppImage`.
 
 **Запуск без установки (портативно):**
 
-    chmod +x MCU-Client-x86_64.AppImage
-    ./MCU-Client-x86_64.AppImage --listen 0.0.0.0:5060
+    chmod +x MCU-x86_64.AppImage
+    ./MCU-x86_64.AppImage --listen 0.0.0.0:5060
 
 **Удаление:**
 
@@ -379,29 +446,29 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 Скрипт удаляет ровно то, что установил:
 
-    ~/.local/bin/MCU-Client.AppImage
-    ~/.local/share/applications/mcu-client.desktop
-    ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
+    ~/.local/bin/MCU.AppImage
+    ~/.local/share/applications/mcu.desktop
+    ~/.local/share/icons/hicolor/scalable/apps/mcu.svg
 
 Ручное удаление (если скрипта под рукой нет):
 
-    rm -f ~/.local/bin/MCU-Client.AppImage
-    rm -f ~/.local/share/applications/mcu-client.desktop
-    rm -f ~/.local/share/icons/hicolor/scalable/apps/mcu-client.svg
+    rm -f ~/.local/bin/MCU.AppImage
+    rm -f ~/.local/share/applications/mcu.desktop
+    rm -f ~/.local/share/icons/hicolor/scalable/apps/mcu.svg
 
 Если `fuse` недоступен (например, в контейнере), запускайте с
-`APPIMAGE_EXTRACT_AND_RUN=1 ./MCU-Client-x86_64.AppImage`.
+`APPIMAGE_EXTRACT_AND_RUN=1 ./MCU-x86_64.AppImage`.
 
 ### Linux — Flatpak
 
 **Сборка пакета** (нужны `flatpak`, `flatpak-builder`):
 
     flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
-    ./packaging/build_flatpak.sh          # -> dist/MCU-Client.flatpak
+    ./packaging/build_flatpak.sh          # -> dist/MCU.flatpak
 
 **Установка:**
 
-    flatpak install --user dist/MCU-Client.flatpak
+    flatpak install --user dist/MCU.flatpak
     flatpak run ru.mcu.McuClient
 
 **Удаление:**
@@ -436,7 +503,7 @@ openSUSE, ALT, Astra Linux и т.д.) без установки зависимо
 
 CI (`.github/workflows/release.yml`) при пуше тега `v*` собирает **только
 debug-бинарники** (консольные, `MCU_DEBUG=1`, расширенный лог):
-`MCU-Client-debug.exe` (Windows) и `MCU-Client-debug` (Linux) — и
+`MCU-h323-debug.exe` (Windows) и `MCU-h323-debug` (Linux) — и
 прикрепляет их к GitHub Release. Это сделано для этапа активной отладки:
 в консольной сборке видны логи сразу в окне. Флаг `PYTHONUTF8=1` в workflow
 устраняет ошибку `UnicodeEncodeError` на Windows-раннере (cp1252).
@@ -537,9 +604,11 @@ debug-бинарники** (консольные, `MCU_DEBUG=1`, расшире�
 >
 >  
 >
-> Учтите: при `require_encryption: true` вызовы с терминалов, не
-> поддерживающих SRTP/TLS, будут отклонены. Убедитесь, что у обеих сторон
-> настроены сертификаты (для TLS).
+> Учтите: при `sip.srtp: "mandatory"` вызовы с терминалов, не
+> поддерживающих SRTP/TLS, будут отклонены. Если парк смешанный (часть
+> терминалов без SRTP), поставьте `sip.srtp: "optional"` — шифрование
+> включится для тех, кто его поддерживает, и звонок не сорвётся. Убедитесь,
+> что у обеих сторон настроены сертификаты (для TLS).
 
 Дополнительно:
 
@@ -604,12 +673,17 @@ CallManager, сервис записи (с подменой FFmpeg).
 
 ### Линтер и типы
 
- 
-
-Строгая типизация включена **постепенно**: модули
-`models`, `call_registry`, `call_manager`, `pjsip_adapter`, `config`
-проверяются в строгом режиме (см. `[[tool.mypy.overrides]]` в
-`pyproject.toml`), остальной пакет — в мягком, пока идёт типизация.
+Строгая типизация включена **постепенно**: для уже вычищенных модулей
+`disallow_untyped_defs` включён пер-модульно в `mypy.ini` (секции
+`[mypy-mcuclient.*]`), остальной пакет — в мягком, пока идёт типизация.
+Набор держится в одном месте — в `mypy.ini`: при его наличии `mypy` секцию
+`[tool.mypy]` из `pyproject.toml` **не читает**, поэтому переносить настройки
+«в pyproject», не убрав `mypy.ini`, нельзя — правка молча не применится.
+Тот же набор для проверок без mypy перечислен в `STRICT_MODULES` внутри
+`scripts/check_annotations.py` (он же вызывается в CI). Он может быть шире
+mypy-строгости только на явно помеченные модули (`STRICT_SET_AHEAD`): само
+расхождение трёх наборов ловит
+`tests/test_doc_values.py::test_strict_typing_sets_do_not_drift_apart`.
 
 ### CI
 
@@ -619,7 +693,18 @@ CallManager, сервис записи (с подменой FFmpeg).
 * `ruff check`;
 * `pytest --cov`;
 * `mypy` по строгим модулям (блокирует) + по остальному пакету
-  (не блокирует).
+  (не блокирует);
+* `scripts/check_annotations.py` — аннотации строгих модулей без mypy
+  (блокирует);
+* `scripts/doc_values_selftest.py` — подсов вранья в документы: страж
+  документов (`tests/test_doc_values.py`) обязан на нём покраснеть
+  (блокирует).
+
+Ссылки вида `<файл>.py::<имя>` в документах и комментариях обязаны вести на
+живой символ: их сверяет
+`tests/test_doc_values.py::test_doc_pointers_to_code_symbols_are_alive`.
+Усечённое имя (`::test_router_...`) читатель разыскать не может, а сверка
+чисел кейсов на нём молчит — она смотрит на файл, а не на имя.
 
 ### Архитектура (после декомпозиции)
 
@@ -706,6 +791,77 @@ GUI (X11→headless) и звук (PulseAudio→null-audio). Исходники �
 Видео-стенд без камеры (синтетический источник PJSIP Colorbar):
 
  
+
+### Живой риг: релизный бинарь на реальном железе (`scripts/testbed/live_selftest_rig.py`)
+
+Цикл «собрал → само-проверил → отчёт владельцу»: риг гоняет **тот же**
+self-contained бинарь (`MCU-h323-debug` из GitHub release), который скачивает
+владелец, на этом же ноутбуке — настоящая камера, настоящие микрофоны, тон
+440 Гц через динамики. Вердикты по четырём симптомам репорта (а-камера,
+б-повторный запуск, в-микрофон, г-имена устройств) с PNG-доказательствами в
+`docs/evidence/live-rig-<дата>/`.
+
+**Квота /tmp — следить.** Onefile debug-бинарь распаковывается в `/tmp/_MEI*`
+(~700 МБ на запуск), а крашнутый прогон автоочистку не доделывает: пачка
+крашей съедает пользовательскую квоту /tmp (инцидент 2026-11-24: 18 висячих
+`_MEI*` ≈ 12.6 ГБ, EDQUOT на весь хост). Риг сносит `_MEI*` старше 30 минут
+на старте и в пост-уборке; при ручной отладке бинаря — чистить руками.
+
+**Захват картинки — по корневому окну.** Встроенное превью живёт в отдельном
+top-level Qt-контейнера: pixmap главного окна его пикселей НЕ содержит, а при
+включённой камере контейнер лежит поверх панели и ворует клики — перед шагами
+по панельным кнопкам риг глушит превью (hide), а кадр меряет `XGetImage` корня
+по координатам child-окна из строки `embed(x11): child=…`.
+
+**Версия измеряемого бинаря — под замком.** Релиз берётся первым элементом
+`/releases?per_page=1` (у `/releases/latest` флаг latest стоит лишь на одном
+релизе — API молчал, и риг молча замерял прошлый бинарь; поймал себя сам по
+заголовку окна). Далее заголовок окна сверяется с `EXPECTED_VERSION`
+(переопределяется `RIG_EXPECTED_VERSION=«тег без v»`); несовпадение — RigError,
+а не тихий прогон не той сборки.
+
+**Микрофон (в) — звуком, не глазами.** Qt-диалоги невидимы для WM_NAME
+(`_NET_WM_NAME` обязателен в поиске окна), панель в 800px-вьюпорте режет
+5-ю строку — риг расширяет окно до высоты экрана−40. Переключение микрофона
+проверяется живым сканом индексов комбо: payload `media.mic_device` — только
+`{'id': N}` (имён нет), watcher-имена служат эталоном «живой есть точно», а
+живой индекс доказывается тон-проверкой на каждом: какой индекс двигает уровень
+при 440 Гц — тот и живой. Журнал пилон пересоздаёт каждый запуск — boot-маркер
+= 0, не `mark()` (seek в старый EOF давал молчаливо пустые чтения).
+
+**Тон — цифровой, не «через воздух».** Акустика «колонки→воздух→микрофон» зависит от
+громкости комнаты (0.02–0.04 на пороге 0.05 — лотерея). Док временно делает
+дефолтным source monitor-копию динамиков (pactl: wpctl Sources мониторы не
+показывает, Pulse-слой видит), при необходимости расглушает sink, а после
+проверки (в) возвращает source/громкость/mute; пережитый крэш чинится
+state-файлом при следующем старте и в finally. Цифровой раунд даёт level
+0.2–0.4 — пороги остаются честными.
+
+**Железное правило:** рабочий стол владельца (DISPLAY=:0) не трогается никогда.
+Весь UI живёт на Xvfb `:99` внутри контейнера `mcu-rig-x` (образ
+`scripts/testbed/rig-x/Containerfile`, FROM mcu-dev-h323 + xvfb); сокет общий
+(`$XDG_RUNTIME_DIR/mcu-rig-x11/X99` + symlink в `/tmp/.X11-unix`), пилон —
+на хосте (glibc-совместимость бинаря) с изолированными HOME/XDG_* и
+`PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native`. Захват — только XGetImage
+(python-xlib): НИКАКИХ portal/Screenshot API — они поднимают владельцу окна
+разрешений. Драйв — Xlib warp + XTEST (на чистом Xvfb координаты 1:1; на
+XWayland владельца фракционный масштаб ломает XTEST-указатель, а Qt игнорирует
+XSendEvent — потому ригу и нужен виртуальный X).
+
+```bash
+pip install --user python-xlib Pillow            # зависимости хоста
+python3 scripts/testbed/live_selftest_rig.py --map   # калибровка кнопок (Xvfb сам поднимет)
+python3 scripts/testbed/live_selftest_rig.py         # док-прогон а/б/г + evidence
+python3 scripts/testbed/live_selftest_rig.py --strict  # красный вердикт = неверный код выхода
+```
+
+Координаты кнопок — константы с проверкой «кнопка там, где надо» по сигнатуре
+в логе (QSS без :hover, потому hover-пиксели не критерий); переснимаются
+`--map`-ом, лежат в `tmp/rig/calibrated.json`, дразнятся через `RIG_BTN_*`.
+Экран/звонок/запись — зоны чёрного списка: риг их не кликает и в конце прогона
+ДОКАЗЫВАЕТ отсутствием соответствующих GUI-событий. Бинарь не найден — риг
+сам скачает релиз; Xvfb-контейнер не поднят — поднимет (idempotent).
+
 
 Полная инструкция — [docs/TESTING_TWO_CLIENTS.md](docs/TESTING_TWO_CLIENTS.md).
 Проверка web-конференции из браузера — [docs/WEB_CONFERENCE_TEST.md](docs/WEB_CONFERENCE_TEST.md).

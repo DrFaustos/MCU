@@ -69,3 +69,39 @@ def test_media_setters_clamp():
 def test_default_has_all_keys():
     assert {"room", "sip", "media", "h323"} <= set(DEFAULT_CONFIG)
     assert {"audio", "video"} <= set(DEFAULT_CONFIG["sip"]["codecs"])
+
+
+# --- адрес МСУ: нормализация и «порт набора != порт транспорта» -----------
+
+
+def test_set_sip_address_normalizes_domain_and_user():
+    cfg = load_config(None)
+    cfg.set_sip_address(domain=" sip:MCU.Example.COM ", user="Зал 1")
+    assert cfg.sip_domain == "MCU.Example.COM"
+    # pjsip не разбирает URI с пробелом/кириллицей — и молча не отвечает
+    assert cfg.sip_user == "1"
+
+
+def test_set_sip_address_keeps_port_out_of_transport():
+    # «mcu.corp:5065» = «набирайте на 5065». Порт транспорта трогать нельзя:
+    # иначе MCU перестанет слушать 5060, а все терминалы звонят именно туда.
+    cfg = load_config(None)
+    applied = cfg.set_sip_address(domain="mcu.corp:5065")
+    assert cfg.sip_domain == "mcu.corp:5065"
+    assert cfg.sip_port == 5060
+    assert applied["port"] == "5065"
+
+
+def test_set_sip_address_none_leaves_fields_untouched():
+    cfg = load_config(None)
+    cfg.set_sip_address(domain="vcu.corp", user="6001")
+    cfg.set_sip_address(domain=None, user=None)
+    assert cfg.sip_domain == "vcu.corp"
+    assert cfg.sip_user == "6001"
+
+
+def test_set_sip_address_ipv6_keeps_brackets():
+    cfg = load_config(None)
+    cfg.set_sip_address(domain="2001:db8::1")
+    # без скобок такой хост в SIP-URI невалиден
+    assert cfg.sip_domain == "[2001:db8::1]"

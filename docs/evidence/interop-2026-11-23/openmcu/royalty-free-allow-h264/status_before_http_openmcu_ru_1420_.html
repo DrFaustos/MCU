@@ -1,0 +1,252 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>OpenMCU-ru</title>
+  <link rel="icon" type="image/vnd.microsoft.icon" href="openmcu.ico" />
+  <link rel="stylesheet" type="text/css" href="main.css" />
+</head>
+
+<body
+  onmousemove='javascript:{if(typeof window.ddprogress=="function")ddprogress(event);}'
+  onmouseup='javascript:{if(typeof window.ddstop=="function")ddstop(event);}'
+>
+  <script type="text/javascript">
+    var LOCALIZATIONS_AVAILABLE = 'en|jp|ru|uk'; // первый = умалчиваемый // first = default
+    var DEFAULT_LOCALIZATION = LOCALIZATIONS_AVAILABLE.substr(0,2);
+    window.lang_code = "";
+    if(window.lang_code.length != 2)
+    {
+      var language = navigator.language || navigator.userLanguage || DEFAULT_LOCALIZATION;
+      window.lang_code = language.substring(0,2).toLowerCase();
+    }
+    if(LOCALIZATIONS_AVAILABLE.indexOf(window.lang_code) < 0)
+    {
+      window.lang_code = DEFAULT_LOCALIZATION;
+    }
+    document.write("<script type='text/javascript' src='locale_" + window.lang_code + ".js'><" + "/script>");
+defaultProtocol=0;
+  </script>
+
+  <div class="wrapper">
+    <div id="topnav">
+
+      <div class="panel_i_logo_text">
+        <a href="welcome.html"><img src="openmcu.ru_logo_text.png" border="0" /></a>
+      </div>
+
+      <ul id="topnav">
+        <li><span style="padding:0px 15px;"></span></li>
+
+        <li><script type='text/javascript'>document.write('<a href="http://openmcu.ru/wiki/'+window.lang_code+'/help/index/" target="_blank"><strong id="l_help"></strong></a>');</script>
+         <menu>
+          <li><script type='text/javascript'>document.write('<a href="http://openmcu.ru/wiki/'+window.lang_code+'/help/index/" id="l_help2" target="_blank"></a>');</script></li>
+          <li><script type='text/javascript'>document.write('<a href="http://openmcu.ru/wiki/'+window.lang_code+'/support/" id="l_support" target="_blank"></a>');</script></li>
+          <li><a href='http://openmcu.ru/forum/' target="_blank" id="l_forum"></a></li>
+         </menu>
+        </li>
+
+      <li><a href="Parameters" id="menu_param"><strong id="l_settings"></strong></a>
+       <menu>
+        <li><a href='Parameters' id="l_param_general"></a></li>
+        <li><a href='VideoParameters' id="l_param_video"></a></li>
+        <!-- <li><a href='RecordParameters' id="l_param_record"></a></li> -->
+        <li><a href='#' id="menu_users" onmouseover="javascript:displayElement('submenu1',true);" onmouseout="javascript:displayElement('submenu1',false);">Users</a>
+         <menu id="submenu1" style="display:none" onmouseover="javascript:displayElement('submenu1',true);" onmouseout="javascript:displayElement('submenu1',false);">
+          <li><a href='ManagingUsers' id="l_param_managing_users"></a></li>
+          <li><a href='ManagingGroups' id="l_param_managing_groups"></a></li>
+         </menu>
+        </li>
+        <li><a href='#' id="menu_codes" onmouseover="javascript:displayElement('submenu2',true);" onmouseout="javascript:displayElement('submenu2',false);">Control</a>
+         <menu id="submenu2" style="display:none" onmouseover="javascript:displayElement('submenu2',true);" onmouseout="javascript:displayElement('submenu2',false);">
+          <li><a href='ControlCodes' id="l_param_control_codes"></a></li>
+          <li><a href='RoomCodes' id="l_param_room_codes"></a></li>
+         </menu>
+        </li>
+        <li><a href='#' id="menu_h323" onmouseover="javascript:displayElement('submenu3',true);" onmouseout="javascript:displayElement('submenu3',false);">H.323</a>
+         <menu id="submenu3" style="display:none" onmouseover="javascript:displayElement('submenu3',true);" onmouseout="javascript:displayElement('submenu3',false);">
+          <li><a href='H323Parameters' id="l_param_h323"></a></li>
+          <li><a href='H323EndpointsParameters' id="l_param_h323_endpoints"></a></li>
+          <li><a href='ReceiveSoundCodecs' id="l_param_receive_sound"></a></li>
+          <li><a href='ReceiveVideoCodecs' id="l_param_receive_video"></a></li>
+          <li><a href='TransmitSoundCodecs' id="l_param_transmit_sound"></a></li>
+          <li><a href='TransmitVideoCodecs' id="l_param_transmit_video"></a></li>
+         </menu>
+        </li>
+        <li><a href='#' id="menu_sip" onmouseover="javascript:displayElement('submenu4',true);" onmouseout="javascript:displayElement('submenu4',false);">SIP</a>
+         <menu id="submenu4" style="display:none" onmouseover="javascript:displayElement('submenu4',true);" onmouseout="javascript:displayElement('submenu4',false);">
+          <li><a href='SIPParameters' id="l_param_sip"></a></li>
+          <li><a href='SipEndpointsParameters' id="l_param_sip_endpoints"></a></li>
+          <li><a href='SipSoundCodecs' id="l_param_sip_sound"></a></li>
+          <li><a href='SipVideoCodecs' id="l_param_sip_video"></a></li>
+          <li><a href='ProxyServers' id="l_param_sip_proxy"></a></li>
+          <li><a href='RoomAccess' id="l_param_access_rules"></a></li>
+         </menu>
+        </li>
+       </menu>
+      </li>
+
+      <li><a href="Records"><strong><script>try{document.write(window.l_records);}catch(e){document.write('Records');}</script></strong></a></li>
+      <li><a href="Select"><strong><script>try{document.write(window.l_control);}catch(e){document.write('Control');}</script></strong></a></li>
+      <li><a href="Status?js&start"><strong><script>try{document.write(window.l_status);}catch(e){document.write('Status');}</script></strong></a></li>
+
+      <!--li><a href="Select"><strong id="l_control"></strong></a>
+       <menu>
+        <li><a href='Select' id="l_rooms"></a></li>
+        <li><a href='Invite' id="l_invite"></a></li>
+       </menu>
+      </li>
+
+      <li><a href="Status?js&start"><strong id="l_status"></strong></a>
+       <menu>
+        <li><a href='Status?js&start' id="l_connections"></a></li>
+        <li><a href='Records' id="l_records"></a></li>
+       </menu>
+      </li-->
+      </ul>
+
+    </div>
+
+  </div>
+
+ <div class="clr"></div>
+ <div id="body-bg">
+ <div class="wrapper">
+ <div id="body-shad-r">
+ <div id="body-shad-l">
+ <div id="mainbody">
+ <div class="pathway-wrap">
+ <div></div>
+ <table class="tborder" style="border-bottom: 0pt none;" border="0" cellpadding="3" cellspacing="0" width="100%">
+ <tbody><tr class="catbg3">
+ <!-- тут задается версия программы и ОС -->
+ <td style="padding-left: 6px;" id="top_subject" valign="middle" width="96%">
+   <script type="text/javascript">
+     document.write(window.l_welcome);
+   </script>
+ </td>
+ </tr></tbody></table>
+ <table class="bordercolor" border="0" cellpadding="0" cellspacing="0" width="100%">
+ <tbody><tr>
+ <td style="padding: 1px 1px 0pt;"><table border="0" cellpadding="3" cellspacing="0" width="100%" style="table-layout:fixed;overflow:hidden;">
+ <tbody><tr>
+ <td valign="top" class="windowbg2"><div class="post">
+
+ <div class="quote">
+   <script type="text/javascript">
+     document.write(window.l_info_welcome);
+   </script>
+ </div>
+
+ </div>
+   <div class="mybody" id="mybody">
+<br><b>Monitor Text (<span style='cursor:pointer;text-decoration:underline' onclick='javascript:{if(document.selection){var range=document.body.createTextRange();range.moveToElementText(document.getElementById("monitorTextId"));range.select();}else if(window.getSelection){var range=document.createRange();range.selectNode(document.getElementById("monitorTextId"));window.getSelection().addRange(range);}}'>select all</span>)</b><div style='padding:5px;border:1px dotted #595;width:100%;height:auto;max-height:300px;overflow:auto'><pre style='margin:0px;padding:0px' id='monitorTextId'>OpenMCU REVISION 
+Program: OpenMCU-ru
+Version: 3.48.0
+Manufacturer: OpenMCU-ru Team
+OS: Unix Linux
+OS Version: 7.3.4-ogc8.1.fc45.x86_64
+Hardware: x86_64
+Compilation date: 20261119 104546 GMT
+Start Date: 20261123 193950 GMT
+Current Date: 20261123 194045 GMT
+Up time: 54.549
+Peer Addr: 10.89.0.3
+Local Host: b469ae44decf
+Local Addr: 10.89.0.2
+Local Port: 1420
+Room Count: 1
+Max Room Count: 1
+
+[Conference 1]
+Title: room101
+ID: 62a65161-e3e5-f111-9d0c-9a43f83e8144
+Duration: 27.480
+Member Count: 2
+Max Member Count: 1
+[Member 1]
+  Title: 139753202789920 (file object)
+  Name: file recorder
+  Outgoing video mixer: 0
+  Duration: 27.480
+  Format: recorder
+  IsVisible: 0
+  Status: Awake
+[Member 2]
+  Title: 139753202875936 (file object)
+  Name: cache
+  Outgoing video mixer: 0
+  Duration: 27.477
+  VFormat: H.261-CIF
+  IsVisible: 0
+  Status: Sleeping
+[Mixer 0]
+  Layout ID: 1 x 1
+  Layout capacity: 1
+  Frame store [352x288] last read time: 1795462841
+</pre></div><br><form method="post" enctype="multipart/form-data"><script type="text/javascript">document.write(window.l_welcome_logo);</script><img src="logo.jpeg"><br>Change: <input name="image" type="file"><input type="submit"></form>
+  </div>
+ <br />
+ </td></tr>
+ <!-- конец для модулей программы, дальше шаблонно -->
+ <tr><td style="padding: 0pt 0pt 1px;"></td></tr>
+ </tbody></table>
+ <div class="tborder"><div class="titlebg2" style="padding: 4px;" align="center">Copyright &copy;2026 by <A HREF="http://openmcu.ru" target="_blank"">OpenMCU-ru Team
+ </div></div><br />
+ <div class="clr"></div>
+
+ <!-- локализация -->
+ <script type="text/javascript">
+   <!-- локализация панели -->
+   document.getElementById("l_help").innerHTML = window.l_help;
+   document.getElementById("l_help2").innerHTML = window.l_help;
+   document.getElementById("l_forum").innerHTML = window.l_forum;
+   document.getElementById("l_support").innerHTML = window.l_support;
+   document.getElementById("l_settings").innerHTML = window.l_settings;
+   document.getElementById("l_param_general").innerHTML = window.l_param_general;
+   document.getElementById("l_param_managing_users").innerHTML = window.l_param_managing_users;
+   document.getElementById("l_param_managing_groups").innerHTML = window.l_param_managing_groups;
+   document.getElementById("l_param_control_codes").innerHTML = window.l_param_control_codes;
+   document.getElementById("l_param_room_codes").innerHTML = window.l_param_room_codes;
+   document.getElementById("l_param_h323_endpoints").innerHTML = window.l_param_h323_endpoints;
+   document.getElementById("l_param_sip_endpoints").innerHTML = window.l_param_sip_endpoints;
+   document.getElementById("l_param_video").innerHTML = window.l_param_video;
+   <!-- document.getElementById("l_param_record").innerHTML = window.l_param_record; -->
+   document.getElementById("l_param_h323").innerHTML = window.l_param_h323;
+   document.getElementById("l_param_sip").innerHTML = window.l_param_sip;
+   document.getElementById("l_param_sip_proxy").innerHTML = window.l_param_sip_proxy;
+   document.getElementById("l_param_access_rules").innerHTML = window.l_param_access_rules;
+   document.getElementById("l_param_receive_sound").innerHTML = window.l_param_receive_sound;
+   document.getElementById("l_param_receive_video").innerHTML = window.l_param_receive_video;
+   document.getElementById("l_param_transmit_sound").innerHTML = window.l_param_transmit_sound;
+   document.getElementById("l_param_transmit_video").innerHTML = window.l_param_transmit_video;
+   document.getElementById("l_param_sip_sound").innerHTML = window.l_param_sip_sound;
+   document.getElementById("l_param_sip_video").innerHTML = window.l_param_sip_video;
+//   document.getElementById("l_control").innerHTML = window.l_control;
+//   document.getElementById("l_rooms").innerHTML = window.l_rooms;
+//   document.getElementById("l_invite").innerHTML = window.l_invite;
+//   document.getElementById("l_status").innerHTML = window.l_status;
+//   document.getElementById("l_connections").innerHTML = window.l_connections;
+//   document.getElementById("l_records").innerHTML = window.l_records;
+   <!-- меню -->
+   document.getElementById("menu_users").innerHTML = window.l_param_managing_users;
+   document.getElementById("menu_codes").innerHTML = window.l_control;
+   <!-- управление -->
+   if(document.getElementById("l_select_create")) document.getElementById("l_select_create").value = window.l_select_create;
+   if(document.getElementById("button_accept")) document.getElementById("button_accept").value = window.l_name_accept;
+   if(document.getElementById("button_reset")) document.getElementById("button_reset").value = window.l_name_reset;
+ </script>
+
+ <script type="text/javascript">
+   function displayElement(obj,show)
+   {
+     if (show)
+       document.getElementById(obj).style.display = 'block';
+     else
+       document.getElementById(obj).style.display = 'none';
+   }
+ </script>
+
+<!-- Design by SchmeL  bizpnz.ru -->
+</body>
+</html>

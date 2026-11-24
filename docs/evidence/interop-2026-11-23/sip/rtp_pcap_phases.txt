@@ -1,0 +1,14 @@
+
+===================================================================
+Protocol Hierarchy Statistics
+Filter: 
+
+sll                                      frames:77 bytes:11748
+  ip                                     frames:77 bytes:11748
+    udp                                  frames:77 bytes:11748
+      dns                                frames:42 bytes:4460
+      rtcp                               frames:4 bytes:468
+        rtcp                             frames:4 bytes:468
+          rtcp                           frames:2 bytes:252
+      data                               frames:31 bytes:6820
+===================================================================

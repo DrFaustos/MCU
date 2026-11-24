@@ -1,0 +1,13 @@
+[1;30m  == [0mRegistered translator '[0;35mulawtoalaw[0m' from codec ulaw to alaw, table cost, 915000, computational cost 22
+[1;30m  == [0mcodec_a_mu.so => ([0;33mA-law and Mulaw direct Coder/Decoder[0m)
+[1;30m [0mLoading codec_alaw.so.
+[1;30m  == [0mRegistered translator '[0;35malawtolin[0m' from codec alaw to slin, table cost, 900000, computational cost 28
+[1;30m  == [0mRegistered translator '[0;35mlintoalaw[0m' from codec slin to alaw, table cost, 600000, computational cost 21
+[1;30m  == [0mcodec_alaw.so => ([0;33mA-law Coder/Decoder[0m)
+[1;30m  == [0mcodec_g722.so => ([0;33mITU G.722-64kbps G722 Transcoder[0m)
+[1;30m [0mLoading codec_ulaw.so.
+[1;30m  == [0mRegistered translator '[0;35mulawtolin[0m' from codec ulaw to slin, table cost, 900000, computational cost 15
+[1;30m  == [0mRegistered translator '[0;35mlintoulaw[0m' from codec slin to ulaw, table cost, 600000, computational cost 11
+[1;30m  == [0mcodec_ulaw.so => ([0;33mmu-Law Coder/Decoder[0m)
+[1;30m  == [0mRegistered application '[1;36mHangupCauseClear[0m'
+

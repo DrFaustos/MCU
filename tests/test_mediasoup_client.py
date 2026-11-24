@@ -76,6 +76,17 @@ def test_plain_transport_body():
     assert body["comedia"] is True and body["rtcpMux"] is True
 
 
+def test_close_transport_body():
+    # Маршрут /transports/close появился вместе с повторными попытками
+    # поднять RTP-мост: без него транспорт освобождается только вместе с
+    # комнатой и держит UDP-порт из rtc_min..rtc_max.
+    rec = _Recorder()
+    MediasoupClient(transport=rec).close_transport("room-1", "pt-1")
+    method, url, body, _h = rec.calls[0]
+    assert method == "POST" and url.endswith("/transports/close")
+    assert body == {"roomId": "room-1", "transportId": "pt-1"}
+
+
 def test_consume_body():
     rec = _Recorder()
     MediasoupClient(transport=rec).consume("r", "t", "prod", {"codecs": []}, paused=True)

@@ -13,9 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import sys
 import time
+from pathlib import Path
 
-from mcuclient.webrtc_ingest import WEBRTC_AVAILABLE, WebRTCManager
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _skip import skip  # noqa: E402
+from mcuclient.webrtc_ingest import WEBRTC_AVAILABLE, WebRTCManager  # noqa: E402
+from mcuclient.webrtc_ingest import WebRTCError  # noqa: E402
 
 if WEBRTC_AVAILABLE:  # pragma: no cover — зависит от окружения
     from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
@@ -25,11 +31,18 @@ else:  # pragma: no cover
     VideoFrame = None  # type: ignore
 
 
-def _skip_if_unavailable() -> bool:
+def _require_aiortc() -> None:
+    """Честный пропуск: без aiortc кейс обязан быть ПРОПУЩЕННЫМ, а не зелёным.
+
+    Раньше здесь был `print("SKIP") + return`, и обе обязательные точки проверки
+    засчитывали кейс прошедшим, ничего не проверив: pytest писал `passed`,
+    tests/_runner.py — `PASS`. В CI aiortc не устанавливается вовсе (см.
+    .github/workflows/ci.yml: ставятся только pytest/pytest-cov/ruff), т.е.
+    полный e2e offer/answer -> кадры в sink не исполнялся НИКОГДА, а прогон
+    оставался зелёным. Страж формы — tests/test_honest_skips.py.
+    """
     if not WEBRTC_AVAILABLE:
-        print("    SKIP: aiortc не установлен (pip install aiortc)")
-        return True
-    return False
+        skip("aiortc не установлен (pip install aiortc) — e2e offer/answer неприменим")
 
 
 if WEBRTC_AVAILABLE:
@@ -63,8 +76,7 @@ class _Sink:
 
 def test_real_offer_answer_and_frames():
     """Полный цикл: offer -> answer -> connected -> кадры в sink."""
-    if _skip_if_unavailable():
-        return
+    _require_aiortc()
 
     async def _run():
         sink = _Sink()
@@ -106,9 +118,27 @@ def test_real_offer_answer_and_frames():
     assert session.get("video_frames", 0) > 0
 
 
-def test_e2e_skips_cleanly_without_aiortc():
-    """Мягкая проверка: без aiortc менеджер недоступен, но модуль импортируется."""
-    m = WebRTCManager(aiortc_module=None)
-    if not m.available:
-        assert m.sessions() == []
-        assert m.close_session("x") is False
+def test_manager_without_aiortc_refuses_explicitly(monkeypatch):
+    """Без aiortc менеджер обязан отказывать ЯВНО — и это исполнимо всегда.
+
+    Прежняя редакция этого кейса была тем же ложным успехом с другой стороны:
+    `WebRTCManager(aiortc_module=None)` при УСТАНОВЛЕННОМ aiortc давал
+    `available is True`, ветка `if not m.available` не исполнялась, и тест не
+    проверял ничего. Теперь отсутствие модуля подменяется детерминированно
+    (`_default_aiortc` -> None), поэтому прогон проверяет контракт при любом
+    окружении — и с aiortc, и без него.
+    """
+    import mcuclient.webrtc_ingest as wi
+
+    monkeypatch.setattr(wi, "_default_aiortc", lambda: None)
+    m = WebRTCManager()
+    assert m.available is False
+    assert m.sessions() == []
+    assert m.close_session("x") is False
+    m.close_all()                      # не должно бросать на пустом реестре
+    try:
+        m.handle_offer("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n")
+    except WebRTCError as exc:
+        assert "aiortc" in str(exc), exc
+    else:
+        raise AssertionError("ожидали WebRTCError: offer без aiortc не имеет смысла")

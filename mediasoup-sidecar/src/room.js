@@ -34,6 +34,13 @@ const mediaCodecs = [
   },
   // Аудио: Opus — стандарт WebRTC.
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2, parameters: {} },
+  // Аудио: G.711 µ-law — кодек RTP-моста. Python льёт в PlainTransport ровно
+  // PCMU 8 кГц моно (mcuclient/mediasoup_rtp_bridge.PLAIN_RTP_PARAMETERS), а
+  // роутер принимает только заявленное здесь: без этой строки produce_plain
+  // отбивается 400 «unsupported codec [mimeType:audio/PCMU, payloadType:0]»
+  // и SIP-терминал в браузерах не слышно вовсе. Сверяется тестом
+  // tests/test_mediasoup_rtp_bridge.py::test_router_media_codecs_advertise_the_bridge_codec
+  { kind: 'audio', mimeType: 'audio/PCMU', clockRate: 8000, channels: 1, parameters: {} },
 ];
 
 export class Room {
@@ -95,6 +102,36 @@ export class Room {
     const t = this.transports.get(id);
     if (!t) throw new Error(`Транспорт ${id} не найден в комнате ${this.id}`);
     return t;
+  }
+
+  /**
+   * Закрыть ОДИН транспорт.
+   *
+   * Без этого маршрута транспорт освобождался только вместе с комнатой
+   * (Room.close), а Python пересоздаёт PlainTransport при каждой повторной
+   * попытке поднять RTP-мост (сайдкар поднимается секунды после старта
+   * приложения). Замерено пробом живьём на Node + C++ worker, 5 циклов
+   * start()/stop() одной комнаты: transports 0 -> 5, producers 0 -> 5, после
+   * stop() не освобождён ни один. Каждый висящий транспорт держит UDP-порт из
+   * rtc_min..rtc_max (по умолчанию 40000-40100 = 101 порт), поэтому ретрай без
+   * закрытия — утечка ресурсов: за ~17 минут непрерывных отказов диапазон
+   * исчерпался бы и сайдкар перестал бы создавать транспорты вовсе.
+   */
+  closeTransport(id) {
+    const transport = this.getTransport(id);
+    this.transports.delete(id);
+    try {
+      transport.close();
+    } catch {
+      /* уже закрыт */
+    }
+    // Producer'ы и consumer'ы этого транспорта закрывает сам mediasoup; с учёта
+    // их снимает server.js по событию 'transportclose', а записи consumer'ов
+    // остаются в map — вычищаются closed.
+    for (const [consumerId, consumer] of this.consumers) {
+      if (consumer.closed) this.consumers.delete(consumerId);
+    }
+    logger.info(`Комната ${this.id}: транспорт ${id} закрыт`);
   }
 
   async close() {

@@ -1,0 +1,12 @@
+# Проверка свежего инстанса OpenMCU-ru (StartedAt)
+$ podman restart openmcu-ru  # 2026-11-23, до прогонов интеропа
+$ podman inspect openmcu-ru --format '{{.State.StartedAt}} {{.State.Status}}'
+2026-11-23 23:39:50.718715177 +0400 +04 running
+
+Старт-строки их лога (свежий процесс объявляет кодеки):
+[TRANSMIT_SOUND]= OPUS_48K2{sw}, OPUS_48K{sw}, SILK_B40_24K{sw}, SILK_B40{sw}, OPUS_16K{sw}, Speex_32K{sw}, Speex_16K{sw}, G.722-64k{sw}, OPUS_8K{sw}, Speex_8K{sw}, G.711-uLaw-64k, G.711-ALaw-64k, G.7231-6.3k[e]{sw}, G.729A{sw}, G.729{sw}, G.726-40k{sw}, G.726-32k{sw}, G.726-24k{sw}, G.726-16k{sw}, iLBC-13k3{sw}, iLBC-15k2{sw}, 
+[TRANSMIT_SOUND]= OPUS_48K2{sw}, OPUS_48K{sw}, SILK_B40_24K{sw}, SILK_B40{sw}, OPUS_16K{sw}, Speex_32K{sw}, Speex_16K{sw}, G.722-64k{sw}, OPUS_8K{sw}, Speex_8K{sw}, G.711-uLaw-64k, G.711-ALaw-64k, G.7231-6.3k[e]{sw}, G.729A{sw}, G.729{sw}, G.726-40k{sw}, G.726-32k{sw}, G.726-24k{sw}, G.726-16k{sw}, iLBC-13k3{sw}, iLBC-15k2{sw}, 
+
+$ podman images | grep openmcu
+localhost/openmcu-ru               v3.48.0      34a270051138  4 days ago      938 MB
+git HEAD репозитория MCU-h323: 5c460cd (branch h323)

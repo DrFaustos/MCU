@@ -10,9 +10,74 @@ on:
         description: 'Собирать Linux-бинарник (PJSIP из исходников) — долго'
         type: boolean
         default: true
+      variant:
+        description: 'Вариант протокола для имени артефактов (ручной запуск)'
+        type: choice
+        default: 'h323'
+        options: ['h323', 'sip', 'none']
 
 jobs:
+  # Вариант протокола — факт ИСХОДНИКОВ (mcuclient.PROTOCOL_VARIANT), а не
+  # имя тега: суффикс тега обязан ему равняться. Без этой сверки тег
+  # v0.2.34-sip, поставленный на h323-коммит, собрал бы «sip»-бинарь с
+  # h323-кодом внутри, и имя артефакта только соврало бы красивее.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      variant: ${{ steps.v.outputs.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tag suffix must equal PROTOCOL_VARIANT
+        id: v
+        env:
+          DISPATCH_VARIANT: ${{ inputs.variant || 'none' }}
+        run: |
+          SRC=$(python -c "import sys; sys.path.insert(0,'.'); import mcuclient; print(mcuclient.PROTOCOL_VARIANT)")
+          VER=$(python -c "import sys; sys.path.insert(0,'.'); import mcuclient; print(mcuclient.__version__)")
+          if [ "${GITHUB_REF_NAME#refs/tags/v}" != "$GITHUB_REF_NAME" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" = "$VER" ] || [ "${TAG#*-}" = "$TAG" ]; then
+              echo "::error::тег '$GITHUB_REF_NAME' без суффикса варианта: ждём v$VER-h323 / v$VER-sip"
+              exit 1
+            fi
+            SUFFIX="${TAG#*-}"
+          else
+            SUFFIX="$DISPATCH_VARIANT"
+            [ "$SUFFIX" = "none" ] && SUFFIX="$SRC"
+          fi
+          if [ "$SUFFIX" != "$SRC" ]; then
+            echo "::error::тег зовёт вариант '$SUFFIX', а исходники этой ветки — '$SRC'. Тег поставлен не на ту ветку."
+            exit 1
+          fi
+          echo "variant=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "OK: тег/запуск = $SUFFIX, исходники = $SRC, версия = $VER"
+
+      - name: Prune old releases of this line (keep 2 + this one = 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VAR="${{ steps.v.outputs.variant }}"
+          # линия = релизы с суффиксом варианта + (только для sip) легаси-теги
+          # без суффикса: до введения вариантов это была sip-нумерация.
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r --arg var "$VAR" 'if type == "array" then .[] | select((.tag_name | endswith("-" + $var)) or ($var == "sip" and (.tag_name | test("^v[0-9.]+$")))) | "\(.created_at) \(.id) \(.tag_name)" else empty end' \
+            | sort -r | tail -n +3 | while read -r _ ID TAG; do
+              echo "prune: release $ID ($TAG)"
+              gh release delete "$TAG" --yes --cleanup-tag=false || true; done
+
+
+  # Windows-сборка приостановлена по просьбе владельца (2026-11-23): пока
+  # идёт живое тестирование — только Linux-бинарник (+ авто-архив GitHub).
+  # Вернуть: remove `if: false` + вернуть needs/шаг скачивания в release.
   build-windows:
+    if: false
+    needs: preflight
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,14 +106,21 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python build.py --debug-only
 
+      # Имя бинаря несёт вариант: в загрузках/архивах экзешник виден без
+      # описания артефакта, а внутренний ресурс .exe — только на Windows.
+      - name: Name binary after variant
+        shell: bash
+        run: mv dist/MCU-debug.exe "dist/MCU-${{ needs.preflight.outputs.variant }}-debug.exe"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Windows
-          path: dist/MCU-Client-debug.exe
+          name: MCU-Windows-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-${{ needs.preflight.outputs.variant }}-debug.exe
 
   # Linux-бинарник: собирается по тегу, а также вручную (workflow_dispatch).
   build-linux:
+    needs: preflight
     if: ${{ github.event_name == 'push' || inputs.build_linux }}
     runs-on: ubuntu-latest
     steps:
@@ -90,31 +162,38 @@ jobs:
           PYTHONIOENCODING: 'utf-8'
         run: python build.py --debug-only
 
+      - name: Name binary after variant
+        run: mv dist/MCU-debug "dist/MCU-${{ needs.preflight.outputs.variant }}-debug"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MCU-Client-Linux
-          path: dist/MCU-Client-debug
+          name: MCU-Linux-${{ needs.preflight.outputs.variant }}
+          path: dist/MCU-${{ needs.preflight.outputs.variant }}-debug
 
   release:
-    needs: [build-windows, build-linux]
+    if: ${{ github.event_name == 'push' }}
+    needs: [preflight, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # Windows-ассет не скачиваем: сборка приостановлена (см. build-windows).
       - uses: actions/download-artifact@v4
         with:
-          name: MCU-Client-Windows
-          path: release-files/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: MCU-Client-Linux
+          name: MCU-Linux-${{ needs.preflight.outputs.variant }}
           path: release-files/
 
       - name: List release files
         run: ls -la release-files/
 
+      # Линия варианта разрастается ассетами по 300–750 МБ на релиз.
+      # Чистим релизы старейшие-вниз, оставляя 3 свежих; git-теги не трогаем
+      # (--cleanup-tag=false). Сортировка по created_at, не по имени:
+      # лексикографический порядок врёт на легаси-номерах 0.2.9 vs 0.2.10.
+      # $VAR передаётся в jq через --arg: внутри jq-программы в двойных
+      # кавычках «$VAR == "sip"» раскрывался бы в голый h323/sip до вызова jq —
+      # compile error, молча маскируемый конвейером (проверено локально).
       # Если релиз по этому тегу уже существует (напр. тег переставлен),
       # удаляем его — иначе softprops/action-gh-release падает с
       # "already_exists: tag_name" на финализации.

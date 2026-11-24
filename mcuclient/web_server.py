@@ -26,18 +26,18 @@ from __future__ import annotations
 import json
 import os
 import queue
-import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from html import escape as _html_escape
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
+                    Optional, Tuple, Union)
+from urllib.parse import parse_qs, quote, urlparse
 
 from .log import get_logger
 from .video_stream import FrameHub
 from .webrtc_ingest import (
-    WEBRTC_AVAILABLE,
     WebRTCError,
     WebRTCManager,
     make_frame_hub_sink,
@@ -45,6 +45,10 @@ from .webrtc_ingest import (
 from .webrtc_sfu import AudioMixSession, Conference
 from .web_recorder import WebRecorder
 from .sip_web_bridge import SipWebAudioBridge
+
+if TYPE_CHECKING:  # только аннотации: эти модули подключаются лениво
+    from .mediasoup_rtp_bridge import MediasoupRtpBridge
+    from .mediasoup_signaling import MediasoupSignaling
 
 log = get_logger("web")
 
@@ -58,6 +62,100 @@ _MIME = {
     ".png": "image/png",
     ".ico": "image/x-icon",
 }
+
+
+def _registration_dict(engine: Any) -> Dict[str, Any]:
+    """Состояние регистрации на регистраторе для панели/API.
+
+    Движок без секции `sip.registration` (старый конфиг, stub-сборка без
+    pjsua2) обязан вернуть выключенное состояние, а не уронить /api/status —
+    поэтому всё через getattr и try.
+    """
+    state = getattr(engine, "registration", None)
+    if isinstance(state, dict):
+        return state
+    return {
+        "enabled": False,
+        "registrar": "",
+        "username": "",
+        "registered": False,
+        "hint": "",
+    }
+
+
+def _web_port(config: Any) -> int:
+    """Порт web-панели из конфига (для подсказки в интерфейсе)."""
+    try:
+        return int((getattr(config, "web", {}) or {}).get("port", 8080) or 8080)
+    except Exception:  # noqa: BLE001
+        return 8080
+
+
+def _address_dict(engine: Any) -> Dict[str, Any]:
+    """Отчёт об адресе МСУ для панели. Движок без метода -> пустой словарь.
+
+    Панель не имеет права падать/отказывать из-за отсутствия поля: старые
+    сборки движка и stub-режим (без pjsua2) обязаны отдавать статус.
+    """
+    getter = getattr(engine, "current_address", None)
+    if callable(getter):
+        try:
+            data = getter()
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            log.debug("current_address не отработал", exc_info=True)
+    return {}
+
+
+def _codec_dict(engine: Any, config: Any = None) -> Dict[str, Any]:
+    """Кодеки: что хотим (профиль) и что реально включил pjsip."""
+    report = getattr(engine, "codec_report", None)
+    if isinstance(report, dict) and report:
+        data = dict(report)
+    else:
+        data = {"profile": "", "audio_wanted": [], "video_wanted": [],
+                "audio_enabled": [], "video_enabled": []}
+    if not data.get("profile"):
+        data["profile"] = str(getattr(config, "codec_profile", "") or "")
+    if not data.get("audio_wanted"):
+        data["audio_wanted"] = list(getattr(config, "audio_codecs", []) or [])
+    if not data.get("video_wanted"):
+        data["video_wanted"] = list(getattr(config, "video_codecs", []) or [])
+    try:
+        from .config import CODEC_PROFILES
+
+        data["profiles"] = {
+            name: {"audio": len(p["audio"]), "video": len(p["video"])}
+            for name, p in CODEC_PROFILES.items()
+        }
+    except Exception:  # noqa: BLE001
+        data["profiles"] = {}
+    return data
+
+
+def _encryption_dict(config: Any) -> Dict[str, Any]:
+    """Состояние шифрования для панели (SRTP + TLS web + транспорт SIP)."""
+    out: Dict[str, Any] = {
+        "srtp": "off", "srtp_modes": ["off", "optional", "mandatory"],
+        "web_tls": "off",
+        "web_tls_modes": ["off", "self_signed", "custom"],
+        "sip_transport": "",
+    }
+    if config is None:
+        return out
+    try:
+        out["srtp"] = str(getattr(config, "srtp", "") or "off")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["web_tls"] = str(getattr(config, "web_tls_mode", "off") or "off")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["sip_transport"] = str(getattr(config, "sip_transport", "") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 class EngineDispatcher:
@@ -131,11 +229,19 @@ class EngineDispatcher:
 
 
 class ApiError(Exception):
-    """Ошибка API с HTTP-кодом."""
+    """Ошибка API с HTTP-кодом.
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    ``reason`` — машинно-читаемая причина отказа, уходит в тело ответа
+    отдельным полем (в дополнение к ``error``). Нужна для честных 501:
+    админ-рычаги, которые движок не поддерживает, обязаны отдавать причину,
+    а не только человекочитаемое сообщение (см. :meth:`WebSession.admin_video_gate`).
+    """
+
+    def __init__(self, message: str, status: int = 400,
+                 reason: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
+        self.reason = reason
 
 
 class _EventHub:
@@ -174,6 +280,21 @@ class _EventHub:
                 log.debug("SSE-клиент отстал, событие %s отброшено", event)
 
 
+#: Пауза между повторными попытками достучаться до mediasoup-sidecar, сек.
+#: Отказ «сайдкар ещё не поднялся» НЕ имеет права кэшироваться навсегда:
+#: транзиентный сбой на 20 секунд превращался в «mediasoup выключен» до
+#: перезапуска приложения (замерено пробом: после того как сайдкар ожил,
+#: новых обращений к control API — ровно 0). Но и повтор на каждый вызов здесь
+#: ОПАСЕН: push_sip_pcm_to_sfu() дёргает фабрику мостов на каждый кадр, а
+#: каждая попытка создаёт PlainTransport. Значит повтор обязан БЫТЬ и обязан
+#: быть ограниченным по частоте.
+MS_RETRY_INTERVAL = 10.0
+
+#: Интервал автообновления админ-страницы (meta refresh), сек. Как в
+#: OpenMCU-ru: страница перечитывается сама, без JS-каркаса.
+ADMIN_REFRESH_SECONDS = 10
+
+
 class WebSession:
     """Слой операций над движком, отдающий JSON-совместимые данные.
 
@@ -187,12 +308,22 @@ class WebSession:
     молча подменяется дефолтом.
     """
 
+    #: Параметры PCM, который приходит из RTP-моста mediasoup. Брать их надо не
+    #: «на глаз», а из PLAIN_RTP_PARAMETERS моста: PCMU, 8 кГц, моно — иначе
+    #: приёмник декодировал бы 8-кГц поток как 16-кГц и голос терминала ехал бы
+    #: на полтонны ниже.
+    SFU_AUDIO_RATE = 8000
+    SFU_AUDIO_CHANNELS = 1
+
     def __init__(self, engine: Any, config: Any = None, h323: Any = None,
                  ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
         self._config = config
         self._h323 = h323
         self._ice_servers = list(ice_servers or [])
+        # WebServer подставляет себя: переключать TLS/порт панель умеет
+        # только имея доступ к серверу (restart()).
+        self._server: Any = None
         self._dispatcher = EngineDispatcher(engine)
         # Последний кадр локального источника -> браузер (без WebRTC).
         self.frame_hub = FrameHub(min_interval=0.0)
@@ -211,20 +342,67 @@ class WebSession:
             self.conference.bus,
             recipients=self._mix_recipients,
             on_mix=self.sip_bridge.push_web_mix,
+            # Индикатор «говорит» для браузеров: микшер — единственный, кто
+            # видит их PCM, и он же раздаёт уровни в реестр конференции.
+            conference=self.conference,
         )
         self.webrtc = WebRTCManager(sink=make_frame_hub_sink(self.frame_hub),
                                     bus=self.conference.bus,
                                     ice_servers=self._ice_servers,
                                     audio_mix=self.audio_mix)
+        # Связка «вышел участник → закрыты его WebRTC-сессии». Хук, а не вызов
+        # из conference_leave(): реестр выгоняет участников не только по HTTP
+        # (restart/shutdown идут циклом прямо по реестру), и без хука
+        # RTCPeerConnection выгнанного переживал и кнопку, и перезапуск панели.
+        # Присваиванием, а не аргументом: Conference нужен менеджеру (его
+        # шина), значит менеджер физически не может быть создан раньше.
+        self.conference.on_leave = self.webrtc.close_for_participant
         self.audio_mix.start()
         # Запись web-конференции: кадры FrameHub + смешанное аудио.
         self._web_recorder = WebRecorder(output_dir=self._recording_dir())
         self._rec_thread: Optional[threading.Thread] = None
         self._rec_stop = threading.Event()
         # Сигналинг mediasoup (опционально): браузеры как SFU-участники.
-        self._ms_signaling = None
+        # False — «выключено оператором» (штатно, повтор не нужен). None —
+        # «ещё не пробовали» ИЛИ «пробовали и не вышло»; эти два случая
+        # различает _ms_signaling_error. Раньше False значил и то и другое,
+        # и отказ, попавшийся на старте, запрещал любую повторную попытку.
+        self._ms_signaling: Optional[Union[Literal[False], "MediasoupSignaling"]] = None
+        # Причина отказа сигналингa ("" — отказа не было). Без неё ветка
+        # except схлопывала «включено, но сайдкар недоступен» в то же None,
+        # что и «выключено».
+        self._ms_signaling_error: str = ""
         # RTP-мост SIP/H.323 <-> mediasoup (опционально).
-        self._ms_rtp = None
+        self._ms_rtp: Optional[Union[Literal[False], "MediasoupRtpBridge"]] = None
+        # Причина отказа моста ("" — отказа не было): чтобы «включён, но мост
+        # честно отказал» не схлопывался в тот же None, что и «выключено».
+        self._ms_rtp_error: str = ""
+        # Когда разрешена следующая попытка достучаться до mediasoup
+        # (time.monotonic(); 0.0 — «пробовать сразу»). Поле ОБЩЕЕ для обеих
+        # ленивых фабрик: push_sip_pcm_to_sfu() дёргает их на каждый кадр,
+        # повтор без троттла вылился бы в шторм control API и в повторные
+        # PlainTransport.
+        self._ms_rtp_retry_at: float = 0.0
+        # Нативный аудио-мост SIP <-> веб (ставится WebServer'ом).
+        self._sip_bridge_service = None
+        # --- админ-страница (в духе OpenMCU /Status) -----------------------
+        # Наблюдаемые таблицы СЛОЯ ПАНЕЛИ: движок ни времени жизни вызова,
+        # ни направлений кодеков не хранит (у H.323-хоста направления есть в
+        # событии, но H323Endpoint их сворачивает в один кодек), поэтому
+        # панель ведёт собственные наблюдатели — ровно как OpenMCU показывает
+        # «свои счётчики приёма». Формулировки честные: duration_source —
+        # "observed" (наблюдение панели, не протокол), направления — из
+        # сырых событий хоста, пока подписка жива.
+        self._admin_started = time.monotonic()
+        self._admin_lock = threading.Lock()
+        #: pid -> monotonic первого наблюдения в confirmed
+        self._admin_first_seen: Dict[int, float] = {}
+        #: pid -> направления медиа из сырых событий хоста
+        #: ({"audio_in": "G.722", "audio_in_rate": 16000, "video_out": "H.261",
+        #:    "video_out_size": "352x288", ...})
+        self._admin_media: Dict[int, Dict[str, Any]] = {}
+        #: подписка на события хоста уже выполнена (повтор не нужен)
+        self._admin_h323_attached = False
 
     # -- служебное ---------------------------------------------------------
     def close(self) -> None:
@@ -233,6 +411,14 @@ class WebSession:
                 self._ms_rtp.stop()
         except Exception:  # noqa: BLE001
             log.debug("Остановка RTP-моста с ошибкой", exc_info=True)
+        try:
+            # Комната и браузерные транспорты живут в процессе сайдкара, а он
+            # переживает restart() панели. Без close() старая сессия оставляла
+            # комнату и WebRtcTransport'ы висеть до смерти всего сайдкара.
+            if self._ms_signaling:
+                self._ms_signaling.close()
+        except Exception:  # noqa: BLE001
+            log.debug("Закрытие mediasoup-сигналинга с ошибкой", exc_info=True)
         try:
             self._rec_stop.set()
             self._web_recorder.stop()
@@ -251,6 +437,20 @@ class WebSession:
                 self.conference.leave(p["id"])
         except Exception:  # noqa: BLE001
             log.debug("Очистка веб-участников с ошибкой", exc_info=True)
+        try:
+            # Колбэк наблюдателя админ-страницы живёт в списке колбэков
+            # клиента хоста, а клиент переживает рестарт панели. Без отписки
+            # закрытая сессия продолжала бы получать события mcu_h323d и
+            # писать в свои словари — та же утечка «колбэк после смерти»,
+            # что закрыта для SSE-подписчиков.
+            if self._admin_h323_attached:
+                client = getattr(self._admin_h323_endpoint(), "client", None)
+                off = getattr(client, "unsubscribe_event", None)
+                if callable(off):
+                    off(self._on_h323_admin_event)
+                self._admin_h323_attached = False
+        except Exception:  # noqa: BLE001
+            log.debug("Отписка админ-наблюдателя с ошибкой", exc_info=True)
         self.detach_frame_listener()
         self._dispatcher.stop()
 
@@ -315,8 +515,19 @@ class WebSession:
             "video_jpeg": self.frame_hub.jpeg_available,
             "webrtc_available": bool(self.webrtc.available),
             "webrtc_sessions": self.webrtc.sessions(),
-            "conference_participants": self.conference.participants(),
-            "mediasoup_rtp": self._ms_rtp.stats() if self._ms_rtp else None,
+            # Через conference_participants(), а не реестр напрямую: иначе
+            # состояние соединения считалось бы в одном маршруте и вралось в
+            # другом, а панель читает именно /status.
+            "conference_participants": self.conference_participants(),
+            "mediasoup_rtp": self._ms_rtp_display(),
+            "sip_bridge": self.sip_bridge_stats(),
+            "registration": _registration_dict(eng),
+            "address": _address_dict(eng),
+            "encryption": _encryption_dict(self._config),
+            "codecs": _codec_dict(eng, self._config),
+            "web_port": _web_port(self._config),
+            "web_url": getattr(self._server, "url", ""),
+            "sip_ports": self.sip_ports_stats(),
             "web_recording": self._web_recorder.is_recording,
         }
 
@@ -327,7 +538,12 @@ class WebSession:
         return list(getattr(self._config, "available_layouts", []) or [])
 
     def chat_history(self) -> List[Dict[str, Any]]:
-        return self._call(lambda: [_chat_to_dict(m) for m in (self._engine.chat_history() or [])])
+        # ВАЖНО: `chat_history` — свойство, а не метод: скобки после него
+        # превращали GET /api/chat в 500 (вызов list).
+        return self._call(lambda: [_chat_to_dict(m) for m in (self._engine.chat_history or [])])
+
+    def dtmf_history(self) -> List[Dict[str, Any]]:
+        return self._call(lambda: [_dtmf_to_dict(e) for e in (self._engine.dtmf_history or [])])
 
     def video_devices(self) -> List[Dict[str, Any]]:
         return self._call(lambda: list(self._engine.list_video_devices() or []))
@@ -382,6 +598,182 @@ class WebSession:
                 self._call(lambda pid=p.id: self._engine.mute_participant_video(pid, True))
         return {"ok": True}
 
+    # --- адрес МСУ, шифрование, кодеки ------------------------------------
+    def address(self) -> Dict[str, Any]:
+        """Как нас набирают: домен/IP/URI + предупреждения."""
+        return self._call(lambda: _address_dict(self._engine))
+
+    def codecs(self) -> Dict[str, Any]:
+        return self._call(lambda: _codec_dict(self._engine, self._config))
+
+    def encryption(self) -> Dict[str, Any]:
+        return _encryption_dict(self._config)
+
+    def set_address(self, *, domain=None, user=None, display_name=None,
+                    listen=None, save: bool = True) -> Dict[str, Any]:
+        """Сменить домен/адрес МСУ на лету (то же, что делает нативный GUI).
+
+        Всё применение (account.modify, новый транспорт, запись конфига)
+        живёт в движке — здесь только разбор тела запроса, чтобы у GUI и
+        web не появилось двух разных реализаций.
+        """
+        apply = getattr(self._engine, "apply_sip_settings", None)
+        if not callable(apply):
+            raise ApiError("Движок не поддерживает смену адреса на лету", 501)
+        payload: Dict[str, Any] = {}
+        if domain is not None:
+            payload["domain"] = str(domain)
+        if user is not None:
+            payload["user"] = str(user)
+        if display_name is not None:
+            payload["display_name"] = str(display_name)
+        if listen is not None:
+            payload["listen"] = str(listen)
+        if not payload:
+            raise ApiError("Не указано ни одного поля адреса "
+                           "(domain/user/display_name/listen)")
+        result = self._call(lambda: apply(save=bool(save), **payload))
+        if isinstance(result, dict) and result.get("error"):
+            raise ApiError(str(result["error"]), 400)
+        return result if isinstance(result, dict) else {"ok": True}
+
+    def set_codecs(self, profile: str) -> Dict[str, Any]:
+        """Профиль кодеков: max_compat | g711_only | wideband."""
+        apply = getattr(self._engine, "apply_sip_settings", None)
+        if callable(apply):
+            res = self._call(lambda: apply(codec_profile=str(profile)))
+            if isinstance(res, dict) and res.get("error"):
+                raise ApiError(str(res["error"]), 400)
+            if isinstance(res, dict):
+                res["codecs"] = _codec_dict(self._engine, self._config)
+                return res
+        cfg = self._config
+        if cfg is None:
+            raise ApiError("Конфиг недоступен", 500)
+        try:
+            cfg.set_codec_profile(str(profile))
+            if getattr(cfg, "path", None):
+                cfg.save()
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(str(exc), 400) from exc
+        return {"ok": True, "codecs": _codec_dict(self._engine, cfg)}
+
+    def set_encryption(self, *, srtp=None, web_tls=None) -> Dict[str, Any]:
+        """Шифрование: SRTP (медиа) и TLS web-панели.
+
+        В закрытом контуре это переключатели «на всякий случай»: по умолчанию
+        всё выключено, вызовы идут по RTP, панель — по HTTP, и сертификаты
+        вообще не участвуют в установлении соединения.
+        """
+        out: Dict[str, Any] = {"ok": True, "warnings": []}
+        if srtp is not None:
+            apply = getattr(self._engine, "apply_sip_settings", None)
+            if callable(apply):
+                res = self._call(lambda: apply(srtp=str(srtp)))
+                if isinstance(res, dict):
+                    out["warnings"].extend(res.get("warnings") or [])
+                    out["srtp"] = res.get("srtp")
+                    if res.get("error"):
+                        raise ApiError(str(res["error"]), 400)
+                else:
+                    out["srtp"] = str(srtp)
+            else:
+                cfg = self._config
+                if cfg is None:
+                    raise ApiError("Конфиг недоступен", 500)
+                try:
+                    cfg.set_srtp(str(srtp))
+                    out["srtp"] = cfg.srtp
+                except Exception as exc:  # noqa: BLE001
+                    raise ApiError(str(exc), 400) from exc
+        if web_tls is not None:
+            tls_res = self.set_web_tls(web_tls)
+            out["web_tls"] = tls_res.get("web_tls")
+            out["warnings"].extend(tls_res.get("warnings") or [])
+        out["encryption"] = _encryption_dict(self._config)
+        return out
+
+    def set_web_tls(self, mode) -> Dict[str, Any]:
+        """TLS web-панели: 'off' | 'self_signed' | 'custom' | bool.
+
+        Панель обязана остаться доступной: если HTTPS не поднялся (нет
+        openssl, битый/протухший сертификат), сервер перезапускается на
+        HTTP. Отказ web-панели из-за сертификата — худший сценарий для
+        закрытого контура, поэтому он исключён конструктивно.
+        """
+        cfg = self._config
+        clean = bool(mode) if isinstance(mode, bool) else str(mode or "").strip().lower()
+        try:
+            applied = cfg.set_web_tls(clean) if cfg is not None else clean
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(str(exc), 400) from exc
+        warnings: List[str] = []
+        server = self._server
+        if server is not None and getattr(server, "running", False):
+            ok = False
+            try:
+                ok = bool(server.restart(tls_mode=applied))
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"перезапуск не удался: {exc}")
+            if not ok:
+                warnings.append("HTTPS недоступен — панель поднята на HTTP")
+                try:
+                    server.restart(tls_mode="off")
+                    if cfg is not None:
+                        cfg.set_web_tls("off")
+                        applied = "off"
+                except Exception:  # noqa: BLE001
+                    warnings.append("не удалось вернуться на HTTP (см. лог)")
+        self._save_config(warnings)
+        return {"ok": True, "web_tls": applied, "warnings": warnings,
+                "url": getattr(self._server, "url", "")}
+
+    def set_web_port(self, port: int) -> Dict[str, Any]:
+        """Перевесить web-панель на другой порт (с сохранением в конфиг)."""
+        cfg = self._config
+        if cfg is None:
+            raise ApiError("Конфиг недоступен", 500)
+        try:
+            applied = cfg.set_web_port(int(port))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(f"Некорректный порт: {port!r}") from exc
+        result: Dict[str, Any] = {"ok": True, "port": applied, "warnings": []}
+        server = self._server
+        if server is not None and getattr(server, "running", False):
+            old_port = int(getattr(server, "port", applied))
+            host = str(getattr(server, "host", "0.0.0.0"))
+            ok = False
+            try:
+                ok = bool(server.restart(host=host, port=applied))
+            except Exception as exc:  # noqa: BLE001
+                result["warnings"].append(f"перезапуск не удался: {exc}")
+            if not ok:
+                result["warnings"].append(
+                    f"порт {applied} недоступен — панель осталась на {old_port}")
+                try:
+                    server.restart(host=host, port=old_port)
+                except Exception:  # noqa: BLE001
+                    pass
+                if cfg is not None:
+                    cfg.set_web_port(old_port)
+                    result["port"] = old_port
+                result["ok"] = False
+        self._save_config(result["warnings"])
+        result["url"] = getattr(self._server, "url", "")
+        return result
+
+    def _save_config(self, warnings: Optional[List[str]] = None) -> None:
+        """Сохранить конфиг, если он был загружен из файла (ошибка — warning)."""
+        cfg = self._config
+        if cfg is None or not getattr(cfg, "path", None):
+            return
+        try:
+            cfg.save()
+        except Exception as exc:  # noqa: BLE001
+            if warnings is not None:
+                warnings.append(f"конфиг не сохранён: {exc}")
+            log.warning("Не удалось сохранить конфиг: %s", exc)
+
     def set_layout(self, layout: str) -> Dict[str, Any]:
         available = self.layouts()
         if available and layout not in available:
@@ -414,6 +806,22 @@ class WebSession:
             self._call(lambda: self._engine.send_message(pid, text))
         return {"ok": True}
 
+    def send_dtmf(self, digits: str, pid: Optional[int] = None,
+                  method: str = "auto") -> Dict[str, Any]:
+        """POST /api/dtmf: тона в конкретный вызов или всем (IVR/PIN).
+
+        `pid=None` — рассылка всем активным: так работает «набрать PIN в
+        IVR для всего зала».
+        """
+        if not digits or not str(digits).strip():
+            raise ApiError("Нет DTMF-тонов")
+        if pid is not None:
+            self._require_pid(pid)
+        ok = self._call(lambda: bool(self._engine.send_dtmf(str(digits), pid, method)))
+        if not ok:
+            raise ApiError("Не удалось отправить тоны: нет активного вызова", status=409)
+        return {"ok": True, "digits_sent": True}
+
     def set_camera(self, enabled: bool) -> Dict[str, Any]:
         return {"ok": True, "camera": bool(self._call(lambda: self._engine.set_camera_enabled(bool(enabled))))}
 
@@ -432,13 +840,24 @@ class WebSession:
         self._call(lambda: self._engine.set_video_source(kind, device))
         return {"ok": True, "video_source": kind}
 
+    # Отказ движка обязан быть ошибкой с HTTP-кодом, а не 200 + {"ok": false}.
+    # Док уже определяет отказ как «{"ok": false, "error": "..."} с HTTP-кодом»
+    # (см. docs/WEB_CONTROL.md, раздел про ответы), а панель читает тело ответа
+    # только чтобы достать error при !res.ok: при ok:false без статуса alert не
+    # срабатывал вовсе, и UI показывал «переключено» на выбор, который не
+    # применился. Движок устройствами отказывает по-настоящему: null-аудио,
+    # Windows-wheel без аудиоустройств, gscam-источник без камеры.
     def set_video_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_video_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+        dev = self._require_dev(device, "id камеры")
+        if not self._call(lambda: bool(self._engine.set_video_device(dev))):
+            raise ApiError(f"Камера {dev} недоступна", status=409)
+        return {"ok": True, "device": dev}
 
     def set_audio_device(self, device: int) -> Dict[str, Any]:
-        ok = self._call(lambda: bool(self._engine.set_audio_device(int(device))))
-        return {"ok": ok, "device": int(device)}
+        dev = self._require_dev(device, "id микрофона")
+        if not self._call(lambda: bool(self._engine.set_audio_device(dev))):
+            raise ApiError(f"Микрофон {dev} недоступен", status=409)
+        return {"ok": True, "device": dev}
 
     # -- Конференция веб-участников ---------------------------------------
     def conference_join(self, name: str, role: str = "participant") -> Dict[str, Any]:
@@ -453,13 +872,161 @@ class WebSession:
         return {"ok": self.conference.leave(str(pid))}
 
     def conference_participants(self) -> List[Dict[str, Any]]:
-        return self.conference.participants()
+        """Ряды веб-участников для оператора: реестр + состояние соединения.
+
+        ЕДИНСТВЕННОЕ место, где ``state`` становится правдой. Реестр
+        ``Conference`` про WebRTC-сессии не знает физически (шина нужна
+        ``WebRTCManager``, реестр создаётся раньше), поэтому его собственное
+        значение — ``joined``: «вошёл», про соединение оно молчит. Здесь сводка
+        обогащается по ДВУМ медиа-путям, и второй обязателен:
+
+        * сессии aiortc-менеджера — ``sessions()`` знает ``participant`` с
+          2026-10-21 (``tests/test_webrtc_ingest.py``);
+        * транспорты на mediasoup-sidecar — ``ms-conference.js`` зовёт
+          ``POST /api/mediasoup/join`` с ``participant: me.id``, и у такого
+          браузера aiortc-сессий нет вообще. Считать живость только по
+          ``sessions()`` означало бы показать «вошёл» живому человеку, т.е.
+          починкой одной лжи завести вторую в том же поле (заперто
+          ``test_mediasoup_participant_without_aiortc_is_connected``).
+
+        Состояние ВЫЧИСЛЯЕТСЯ при отдаче, а не пишется в реестр: запись
+        пришлось бы продублировать на каждый путь закрытия (``close_session``,
+        ``close_all``, ``close_for_participant``, обрыв по
+        ``connectionstatechange``), и пропущенный путь снова дал бы вечно
+        неверный ``state`` — тот же класс, что «у публикации нет парного drop».
+
+        Оба маршрута — ``GET /api/status`` и ``GET /api/conference`` — обязаны
+        идти ЧЕРЕЗ этот метод. До правки ``status()`` звал
+        ``self.conference.participants()`` напрямую, и обогащение, положенное
+        только сюда, до панели не доехало бы: панель берёт участников из
+        ``/status`` (заперто ``test_both_participant_routes_agree_on_state``).
+
+        Третье значение — ``dropped``: у участника БЫЛА живая сессия и её
+        больше нет. Реестр различить это не может физически, а без третьего
+        значения два разных факта сворачиваются в один (замер 2026-10-21
+        сразу после правки про ``state``)::
+
+            ОТВАЛИВСЯ   : joined
+            НЕ ПУБЛИКУЕТ: joined
+            НЕРАЗЛИЧИМЫ : True
+
+        т.е. тот срез убрал ложь, но оставил ДВЕ неразличимые правды: «вошёл и
+        ещё не включил камеру» — человека ждём; «сессия умерла» — человека надо
+        выгнать (или его уже нет), и оператор по панели не видел разницы.
+        Источник — след закрытия в :class:`WebRTCManager` (единая точка
+        ``_close_session``). Приоритет именно такой: ``connected`` проверяется
+        ПЕРВЫМ, потому что живой через mediasoup-sidecar не может быть показан
+        отвалившимся (заперто ``test_live_sidecar_beats_the_close_trace``).
+
+        Авто-выдворение по таймауту сознательно НЕ делаем: у панели нет
+        reconnect'а (``onconnectionstatechange`` лишь пишет подсказку,
+        ``joinConference`` вызывается ровно из одного места), поэтому reap
+        выгнал бы браузер после короткого обрыва молча и навсегда — это
+        опаснее самого фантомного тайла. Различать — можно, выгонять — пока
+        нельзя (авторизации операторских действий тоже нет, см. docs/STATUS.md).
+
+        ``close()`` (evict) и ``_mix_recipients()`` читают реестр напрямую
+        СОЗНАТЕЛЬНО: им нужны только id, а звать сюда ленивую фабрику
+        mediasoup-сигналинга ради них — второй источник истины без нужды.
+
+        Счётчики кадров (`video_frames`/`audio_frames`) рождаются здесь же и по
+        той же причине: у реестра таких полей больше нет. Раньше они жили в слое,
+        который про медиа не знает ничего, и увеличивал их только
+        `Conference.on_frame` — метод, БОЕВОГО вызова которого не было никогда
+        (`git log -S conference.on_frame` — пусто по всей истории; единственный
+        вызов жил в tests/test_webrtc_sfu.py). Замер 2026-10-22 перед правкой:
+        участник вылил в комнату 4 аудио-кадра, сводка сессий под тем же
+        участником показала 4, ряд наружу уехал с `audio_frames=0` — поле-обманка
+        того же класса, что `remote` у сессий и прежнее `connected` у реестра.
+        Поля и метод удалены (заперто tests/test_webrtc_sfu.py): оставить их —
+        значит оставить следующему читателю иллюзию живого счётчика; ровно так
+        этот кандидат был отвергнут один раз.
+
+        Считаю по номерам версий шины медиа (`video_version`/
+        `audio_version`), а не по сессиям, и вот почему: шина — ЕДИНСТВЕННОЕ
+        место, где видно, ЧТО участник даёт комнате, и из неё же
+        `AudioMixSession.tick` берёт состав публикаторов и признак «говорит»
+        (mcuclient/webrtc_sfu.py:368, 379-381). Счёт по `sessions()` дал бы
+        вторую истину о медиа: `SessionInfo` считает кадры, ПРИНЯТЫЕ релеем,
+        и у зрителя без публикации тоже растёт, т.е. оператор увидел бы у
+        молчаливого наблюдателя «говорит 400 кадров» (заперто
+        `test_participant_row_counters_come_from_the_media_bus`).
+
+        Семантика — ТЕКУЩИЙ канал, а не накопленное за участие: `bus.drop`
+        убирает канал публикатора вместе с номером версии, поэтому после
+        обрыва ряд показывает ноль. Иначе отвалившийся браузер выглядел бы
+        говорящим (заперто `test_participant_row_counters_do_not_outlive_the_channel`). Пространства
+        id разведены: SIP-мост льёт в ту же шину под `sip-<слот>`
+        (mcuclient/sip_web_bridge.py:97), поэтому кадры SIP-вызова не
+        записываются веб-участнику (заперто
+        `test_participant_row_counters_are_per_participant`).
+
+        Цена — два взятия локала на ряд (панель опрашивает `/status` раз в
+        3 с), что тривиально против уже существующих здесь `sessions()` и
+        `closed_participants()`.
+        """
+        rows = self.conference.participants()
+        live = {s.get("participant") for s in self.webrtc.sessions()}
+        sig = self.mediasoup_signaling()
+        if sig is not None:
+            try:
+                live.update(sig.participant_ids())
+            except Exception:  # noqa: BLE001 — сводка не имеет права падать
+                log.debug("mediasoup participant_ids не получены", exc_info=True)
+        live.discard(None)          # анонимные offer'а участниками не являются
+        # ``closed_participants`` уже вычитает живые aiortc-сессии, но вычитаю
+        # и здесь: менеджер не видит сайдкар, а приоритет живого — выше.
+        dropped = self.webrtc.closed_participants() - live
+        bus = self.conference.bus
+        for row in rows:
+            pid = row["id"]
+            if pid in live:
+                row["state"] = "connected"
+            elif pid in dropped:
+                row["state"] = "dropped"
+            # Счётчики КАДРОВ ряда рождаются здесь: номера версий каналов
+            # публикатора в шине — единственный источник (у реестра таких полей
+            # нет вовсе): см. абзац про счётчики в docstring.
+            row["video_frames"] = bus.video_version(pid)
+            row["audio_frames"] = bus.audio_version(pid)
+        return rows
 
     def conference_rename(self, pid: str, name: str) -> Dict[str, Any]:
-        return {"ok": self.conference.rename(str(pid), name)}
+        """Переименовать веб-участника; отказ — ошибка с HTTP-кодом.
+
+        ``rename`` возвращает False ТОЛЬКО когда участника нет в комнате
+        (mcuclient/webrtc_sfu.py:536-543), поэтому 404 здесь — правда, а не
+        вежливость. До правки маршрут отвечал 200 + ``{"ok": false}`` без
+        ``error``, и панель (mcuclient/webui) читает тело только при !res.ok —
+        оператор не увидел бы отказ никогда. Тот же класс дыры, что закрыт у
+        ``/api/video_device``.
+
+        Сознательно НЕ перенесено на ``conference_leave``: там ok:false наступает
+        при ПОВТОРНОМ выходе, т.е. является штатным идемпотентным исходом
+        (заперто test_conference_leave_repeat_is_not_an_error).
+        """
+        if not pid:
+            raise ApiError("Не указан id участника")
+        if not str(name).strip():
+            # Пустое имя молча отбрасывается на уровне конференции
+            # (``or p.name``) и возвращает True: до правки «ok: true» при
+            # неизменном имени было второй ложью того же маршрута.
+            raise ApiError("Имя участника не может быть пустым")
+        if not self.conference.rename(str(pid), str(name)):
+            raise ApiError(f"Веб-участника {pid} нет в комнате", status=404)
+        return {"ok": True, "id": str(pid)}
 
     def conference_media(self, pid: str, *, video=None, audio=None) -> Dict[str, Any]:
-        return {"ok": self.conference.set_media(str(pid), video=video, audio=audio)}
+        """Включить/выключить медиа веб-участнику; отказ — 404 с причиной."""
+        if not pid:
+            raise ApiError("Не указан id участника")
+        if video is None and audio is None:
+            # set_media на «ничего не менять» возвращает True, ничего не сделав:
+            # «ok» на пустом запрос — та же молчаливая ложь в миниатюре.
+            raise ApiError("Не указано, что менять: video или audio")
+        if not self.conference.set_media(str(pid), video=video, audio=audio):
+            raise ApiError(f"Веб-участника {pid} нет в комнате", status=404)
+        return {"ok": True, "id": str(pid)}
 
     def attach_sip_call_port(self, port) -> None:
         """Связать нативный SipAudioPort с мостом (SIP<->Web-аудио).
@@ -472,8 +1039,9 @@ class WebSession:
             port._on_sip_audio = self.on_sip_audio  # noqa: SLF001
 
             def _take() -> bytes:
-                item = self.audio_mix.record_mix()
-                return item[1] if item is not None else b""
+                # Общий микс БЕЗ канала SIP: record_mix() отдаёт микс со всеми
+                # и терминал слышал бы собственный голос (эхо).
+                return self.web_mix_for_sip()
 
             port._take_web_pcm = _take  # noqa: SLF001
             self._sip_call_port = port
@@ -485,12 +1053,67 @@ class WebSession:
         """Подключить нативный media-port SIP как приёмник веб-микса."""
         self.sip_bridge._sip_sink = sink  # noqa: SLF001 — осознанно: точка связи
 
-    def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1) -> None:
-        """Точка входа для media-port движка: SIP-звук -> в общий микс веба."""
-        self.sip_bridge.on_sip_audio(pcm, rate, channels)
+    def web_mix_for_sip(self, publisher: Optional[str] = None) -> bytes:
+        """Веб-микс для ОДНОГО SIP-терминала: все голоса, КРОМЕ его канала.
+
+        Вычитается канал именно ЭТОГО вызова (``sip-<слот>``), а не «весь SIP»:
+        при общем канале на двух терминалах вычитание глушило обоих — вызовы
+        слышали только браузеров, но не друг друга. Без вычитания терминал
+        слышал бы собственный голос (эхо).
+        """
+        try:
+            return self.audio_mix.mix_excluding(
+                publisher or self.sip_bridge.SIP_PUBLISHER_ID)
+        except Exception:  # noqa: BLE001 — нет микшера: тишина лучше падения
+            log.debug("web_mix_for_sip: микс не собран", exc_info=True)
+            return b""
+
+    def forget_sip_channel(self, publisher: str) -> None:
+        """Убрать канал SIP из шины (вызов завершился, порт закрыт).
+
+        Микшера у канала нет: ``AudioMixSession`` берёт публикаторов из шины,
+        а ``MediaBus`` держит последний кадр до ``drop``. Без этого завершённый
+        вызов навсегда остаётся в миксе всех браузеров.
+        """
+        forget = getattr(self.sip_bridge, "forget", None)
+        if callable(forget):
+            forget(publisher)
+
+    def attach_sip_bridge(self, service) -> None:
+        """Запомнить сервис нативного моста SIP (для статуса панели).
+
+        Ставится WebServer'ом: сессия не создаёт порты сама — ей от них
+        нужны только счётчики в :meth:`sip_ports_stats`.
+        """
+        self._sip_bridge_service = service
+
+    def sip_bridge_service(self):
+        """Поднятый сервис нативного моста или None."""
+        return self._sip_bridge_service
+
+    def on_sip_audio(self, pcm: bytes, rate: int = 0, channels: int = 1,
+                     publisher: Optional[str] = None) -> None:
+        """Точка входа для media-port движка: SIP-звук -> в общий микс веба.
+
+        ``publisher`` — канал ЭТОГО вызова (``sip-<слот>``). Он обязателен для
+        нативного моста: при общем канале на всех вызовах их PCM затирали друг
+        друга, а вычитание эха глушило сразу все терминалы.
+        """
+        self.sip_bridge.on_sip_audio(pcm, rate, channels, publisher)
 
     def sip_bridge_stats(self) -> Dict[str, Any]:
         return self.sip_bridge.stats()
+
+    def sip_ports_stats(self) -> Dict[str, Any]:
+        """Состояние нативных аудио-портов SIP (0 портов — мост не поднят)."""
+        service = self._sip_bridge_service
+        stats = getattr(service, "stats", None)
+        if not callable(stats):
+            return {"enabled": False, "ports": 0}
+        try:
+            return dict(stats() or {})
+        except Exception:  # noqa: BLE001 — статус не должен падать
+            return {"enabled": False, "ports": 0}
 
     def _recording_dir(self) -> str:
         try:
@@ -565,10 +1188,21 @@ class WebSession:
         ошибке возвращает None и не мешает базовому режиму.
         """
         if self._ms_rtp is not None:
-            return self._ms_rtp or None
+            if self._ms_rtp:
+                return self._ms_rtp
+            if time.monotonic() < self._ms_rtp_retry_at:
+                return None
+            # Срок повтора истёк: кэш отказа сбрасывается, пробуем снова.
+            self._ms_rtp = None
+            self._ms_rtp_error = ""
         sig = self.mediasoup_signaling()
         if sig is None:
             self._ms_rtp = False
+            # Отказ signaling обязан доехать до панели: иначе «включено, но
+            # сайдкар недоступен» снова схлопывается в None, неотличимое от
+            # «выключено». «Выключено оператором» оставляет reason пустым.
+            self._ms_rtp_error = self._ms_signaling_error
+            self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
             return None
         try:
             from .mediasoup_rtp_bridge import MediasoupRtpBridge
@@ -577,18 +1211,57 @@ class WebSession:
                 sig._client, room_id, on_sip_pcm=self._on_sfu_audio)  # noqa: SLF001
             if not bridge.start():
                 self._ms_rtp = False
+                self._ms_rtp_error = bridge.start_error() or "мост не поднят"
+                self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
                 return None
             self._ms_rtp = bridge
-        except Exception:  # noqa: BLE001
-            log.debug("mediasoup RTP-мост не поднялся", exc_info=True)
+            self._ms_rtp_error = ""
+        except Exception as exc:  # noqa: BLE001
+            # Молчаливый log.debug прятал отказ того же класса: панель
+            # оставалась с None без причины.
+            log.warning("mediasoup RTP-мост не поднялся: %s: %s — повтор "
+                        "через %g с", type(exc).__name__, exc,
+                        MS_RETRY_INTERVAL, exc_info=True)
             self._ms_rtp = False
+            self._ms_rtp_error = "mediasoup RTP-мост: %s: %s" % (
+                type(exc).__name__, exc)
+            self._ms_rtp_retry_at = time.monotonic() + MS_RETRY_INTERVAL
         return self._ms_rtp or None
 
     def _on_sfu_audio(self, pcm: bytes) -> None:
-        """Звук из mediasoup (SIP-участник слышен) -> в общий микс веба."""
+        """Входящий RTP из mediasoup: это звук ДЛЯ SIP-терминала, а не из веба.
+
+        Направление описано в самом мосту
+        (:mod:`mcuclient.mediasoup_rtp_bridge`): «Браузеры -> SIP: mediasoup
+        PlainTransport -> RTP -> ``RtpUdpEndpoint`` (``on_pcm``) -> колбэк
+        ``on_sip_pcm``». Голос самого терминала едет в обратную сторону — нашим
+        же ``produce_plain`` (``push_sip_pcm_to_sfu``). Значит кадр обязан
+        уйти в терминал, а не в шину веба.
+
+        Прежняя редакция выкладывала его в :class:`MediaBus` под id ``"sip"``
+        (замерено пробой живьём):
+
+        * браузеры получали СВОИ же голоса — микс Алисы: амплитуда 1000 при
+          нулевой речи в вебе; и это ещё и контур: шина -> ``on_mix`` ->
+          терминал -> ``push_sip_pcm_to_sfu`` -> SFU -> этот же колбэк;
+        * публикация была без парного ``drop`` — никто, включая ``close()``,
+          канал не убирал (после остановки панели ``publishers() == ['sip']``,
+          ``latest_audio('sip')`` — ЕСТЬ), т.е. фантом в миксе навсегда; тот
+          же класс, что закрыт в ``32f8fb8`` и ``7bd25e9``;
+        * id ``"sip"`` = :attr:`SipWebAudioBridge.SIP_PUBLISHER_ID`, то есть
+        чужой канал: ``web_mix_for_sip('sip-0')`` вычесть его не мог и
+        терминалу возвращался звук из SFU (замер: амплитуда 1000 вместо 0).
+
+        Канал не заводится вообще — убирать тогда нечего. Некому слушать (нет
+        ``sip_sink``) — кадр выбрасывается, а не остаётся в шине.
+        """
+        if not pcm:
+            return
         try:
-            self.conference.bus.publish_audio("sip", pcm, 8000, 1)  # G.711
-        except Exception:  # noqa: BLE001
+            # G.711: PLAIN_RTP_PARAMETERS у моста — PCMU, 8 кГц, моно.
+            self.sip_bridge.push_web_mix(pcm, self.SFU_AUDIO_RATE,
+                                         self.SFU_AUDIO_CHANNELS)
+        except Exception:  # noqa: BLE001 — RTP-поток не имеет права ронять панель
             log.debug("_on_sfu_audio упал", exc_info=True)
 
     def push_sip_pcm_to_sfu(self, pcm: bytes) -> bool:
@@ -600,38 +1273,96 @@ class WebSession:
 
     def mediasoup_rtp_stats(self) -> Dict[str, Any]:
         bridge = self.mediasoup_rtp_bridge()
-        return bridge.stats() if bridge is not None else {"started": False}
+        if bridge is not None:
+            return bridge.stats()
+        out: Dict[str, Any] = {"started": False}
+        if self._ms_rtp_error:
+            out["reason"] = self._ms_rtp_error
+        return out
+
+    def _ms_rtp_display(self) -> Optional[Dict[str, Any]]:
+        """mediasoup_rtp для GET /api/status: поднятый мост, отказ либо None.
+
+        Сводить отказ к None нельзя: «выключено» и «включено, но сайдкар
+        отказал» давали один и тот же None, и оператор с тишиной в обоих
+        каналах не видел причины — она жила только в журнале.
+        """
+        if self._ms_rtp:
+            return self._ms_rtp.stats()
+        if self._ms_rtp_error:
+            return {"started": False, "reason": self._ms_rtp_error}
+        return None
 
     # -- mediasoup-сигналинг (опциональный SFU) ----------------------------
     def mediasoup_signaling(self):
-        """Ленивый MediasoupSignaling по features.web.mediasoup. Или None."""
+        """Ленивый MediasoupSignaling по features.web.mediasoup. Или None.
+
+        `False` в кэше — «выключено оператором»: штатно, повтор не нужен.
+        ОТКАЗ (сайдкар ещё не поднялся) в False НЕ пишется: `_ms_signaling`
+        остаётся None, причина ложится в `_ms_signaling_error`, а повтор
+        разрешён не чаще MS_RETRY_INTERVAL. Раньше отказ кэшировался как
+        False — транзиентные 20 секунд простоя сайдкара превращались в
+        «mediasoup выключен» до перезапуска приложения (замерено пробом:
+        после того как сайдкар ожил, новых обращений к control API — 0).
+        """
         if self._ms_signaling is not None:
             return self._ms_signaling or None
+        now = time.monotonic()
+        if now < self._ms_rtp_retry_at:
+            # Окно повтора не наступило: hot-path (push_sip_pcm_to_sfu дёргает
+            # фабрику на каждый кадр) не должен превращать ретрай в шторм
+            # обращений к control API.
+            return None
         try:
             from .mediasoup_client import MediasoupClient
             from .mediasoup_signaling import MediasoupSignaling
             cfg = (self._config.web or {}).get("mediasoup", {}) if self._config else {}
             if not cfg.get("enabled"):
                 self._ms_signaling = False
+                self._ms_signaling_error = ""
                 return None
             host = cfg.get("host", "127.0.0.1")
             port = cfg.get("port", 4443)
             client = MediasoupClient(base_url=f"http://{host}:{port}",
                                      token=str(cfg.get("token", "") or ""))
             self._ms_signaling = MediasoupSignaling(client)
-        except Exception:  # noqa: BLE001
-            log.debug("mediasoup-сигналинг недоступен", exc_info=True)
-            self._ms_signaling = False
+            self._ms_signaling_error = ""
+        except Exception as exc:  # noqa: BLE001
+            # log.debug здесь читался как «сайдкара нет», и панель врала про
+            # «выключено». Причина едет в панель; WARNING — только на переход
+            # в отказ, чтобы каждые 10 с не выть.
+            was_ok = not self._ms_signaling_error
+            self._ms_signaling_error = "mediasoup-сигналинг недоступен: %s: %s" % (
+                type(exc).__name__, exc)
+            if was_ok:
+                log.warning("%s — повтор через %g с", self._ms_signaling_error,
+                            MS_RETRY_INTERVAL)
+            else:
+                log.debug("%s (повтор)", self._ms_signaling_error, exc_info=True)
+            self._ms_rtp_retry_at = now + MS_RETRY_INTERVAL
         return self._ms_signaling or None
 
     def mediasoup_available(self) -> bool:
         sig = self.mediasoup_signaling()
         return bool(sig and sig.available)
 
+    def _ms_unavailable(self) -> str:
+        """Почему mediasoup недоступен, словами: «выключено» ≠ «не достучались».
+
+        После того как отказ перестал кэшироваться навсегда,
+        :meth:`mediasoup_signaling` возвращает ``None`` в обоих случаях. Если
+        и в ответ API свести их к «не включён», оператор с ``enabled: true`` и
+        упавшим сайдкаром получит враньё уже не в панели, а в лице браузера
+        (``ms-conference.js`` показывает этот текст как причину отказа входа).
+        """
+        if self._ms_signaling is False:
+            return "mediasoup не включён"
+        return self._ms_signaling_error or "mediasoup недоступен"
+
     def mediasoup_join(self, pid: str) -> Dict[str, Any]:
         sig = self.mediasoup_signaling()
         if sig is None:
-            raise ApiError("mediasoup не включён", status=503)
+            raise ApiError(self._ms_unavailable(), status=503)
         try:
             return sig.join(pid)
         except Exception as exc:  # noqa: BLE001
@@ -644,7 +1375,7 @@ class WebSession:
     def mediasoup_signal(self, action: str, pid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         sig = self.mediasoup_signaling()
         if sig is None:
-            raise ApiError("mediasoup не включён", status=503)
+            raise ApiError(self._ms_unavailable(), status=503)
         try:
             if action == "connect":
                 return sig.connect(pid, payload.get("dtlsParameters") or {})
@@ -703,6 +1434,385 @@ class WebSession:
             raise ApiError("Не указан id сессии")
         return {"ok": self.webrtc.close_session(str(sid))}
 
+    # -- админ-страница: реестр терминалов в духе OpenMCU /Status ----------
+    def admin_uptime(self) -> int:
+        """Аптайм панели (web-сессии), сек. Не аптайм движка: сессия
+        переживает рестарты HTTP-сервера, но создаётся вместе с панелью."""
+        return max(0, int(time.monotonic() - self._admin_started))
+
+    def _admin_h323_endpoint(self) -> Any:
+        """H.323-эндпоинт с поиском по токену или None.
+
+        run.py передаёт панели ``H323Gateway`` (устаревший путь через
+        chan_ooh323), а нативный эндпоинт доезжает до движка через
+        ``set_h323_native`` — читаем оба места. Эндпоинт узнаём по методу
+        ``find_by_token``, а не по типу: тестовые заглушки и будущие
+        реализации тогда работают без импорта реального класса.
+        """
+        for cand in (self._h323, getattr(self._engine, "_h323_native", None)):
+            if cand is not None and callable(getattr(cand, "find_by_token", None)):
+                return cand
+        return None
+
+    def _admin_attach_h323(self) -> None:
+        """Подписаться на СЫРЫЕ события хоста (call.media с направлением).
+
+        Направления («encoder» = МСУ->терминал, «decoder» = терминал->МСУ,
+        см. emit_media_event в tools/h323d/main.cpp) доживает до Python в
+        событии ``call.media``, но :class:`H323Endpoint` их сворачивает в
+        один ``audio_codec`` на оба направления. Модуль эндпоинта я не
+        трогаю — подписываюсь вторым читателем на тот же клиент
+        (``on_event`` поддерживает несколько колбэков), как это уже делает
+        видео-мост. Клиент поднимается в ``endpoint.start()`` — если его
+        ещё нет, подписка повторится при следующем запросе.
+        """
+        if self._admin_h323_attached:
+            return
+        ep = self._admin_h323_endpoint()
+        client = getattr(ep, "client", None)
+        on_event = getattr(client, "on_event", None)
+        if not callable(on_event):
+            return
+        try:
+            on_event(self._on_h323_admin_event)
+            self._admin_h323_attached = True
+            log.debug("Админ-панель: подписка на события хоста mcu_h323d")
+        except Exception:  # noqa: BLE001 — панель не имеет права падать
+            log.debug("Админ-панель: подписка на события хоста не удалась",
+                      exc_info=True)
+
+    def _admin_token_to_pid(self, token: str) -> Optional[int]:
+        ep = self._admin_h323_endpoint()
+        find = getattr(ep, "find_by_token", None)
+        if not callable(find) or not token:
+            return None
+        try:
+            p = find(token)
+        except Exception:  # noqa: BLE001
+            return None
+        pid = getattr(p, "id", None)
+        return pid if isinstance(pid, int) else None
+
+    def _on_h323_admin_event(self, event: Any) -> None:
+        """Наблюдатель направлений медиа: call.media -> строка терминала.
+
+        Вызывается из потока читателя IPC: только словарь под локапом, без
+        движка и без исключений наружу (колбэки клиента общие для всех
+        подписчиков, и чужой подписчик не имеет права видеть мой трейсбек).
+        """
+        try:
+            if isinstance(event, dict):
+                name = str(event.get("event", "") or "")
+                data = event
+            else:
+                name = str(getattr(event, "event", "") or "")
+                data = getattr(event, "fields", None) or {}
+            if name == "call.disconnected":
+                pid = self._admin_token_to_pid(str(data.get("token", "") or ""))
+                if pid is not None:
+                    with self._admin_lock:
+                        self._admin_media.pop(pid, None)
+                        self._admin_first_seen.pop(pid, None)
+                return
+            if name != "call.media":
+                return
+            pid = self._admin_token_to_pid(str(data.get("token", "") or ""))
+            if pid is None:
+                return  # токен ещё не зарегистрирован (или это не наш)
+            codec = str(data.get("codec", "") or "")
+            if not codec:
+                return  # то же правило, что в H323Endpoint: нет данных ≠ кодек пропал
+            kind = str(data.get("kind", "") or "").lower()
+            direction = str(data.get("direction", "") or "").lower()
+            # «decoder» — канал, откуда МСУ БЕРЁТ звук терминала (in);
+            # «encoder» — куда МСУ КЛАДЁТ микс (out). Направление нераспознано
+            # — поля не заполняем: лучше «нет данных», чем угаданное.
+            if direction.startswith("decode"):
+                side = "in"
+            elif direction.startswith("encode"):
+                side = "out"
+            else:
+                return
+            with self._admin_lock:
+                row = self._admin_media.setdefault(pid, {})
+                if kind == "audio":
+                    row["audio_" + side] = codec
+                    try:
+                        rate = int(data.get("rate") or 0)
+                    except (TypeError, ValueError):
+                        rate = 0
+                    if rate:
+                        row["audio_" + side + "_rate"] = rate
+                elif kind == "video":
+                    row["video_" + side] = codec
+                    try:
+                        width = int(data.get("width") or 0)
+                        height = int(data.get("height") or 0)
+                    except (TypeError, ValueError):
+                        width = height = 0
+                    if width and height:
+                        row["video_" + side + "_size"] = "%dx%d" % (width, height)
+        except Exception:  # noqa: BLE001
+            log.debug("Админ-наблюдатель: событие хоста обработано с ошибкой",
+                      exc_info=True)
+
+    def admin_terminals(self) -> List[Dict[str, Any]]:
+        """Ряды терминалов для админ-страницы (схема стабильна, ключи ниже).
+
+        Строится из ОБЩЕГО реестра движка (в нём SIP и H.323 в одном ряду:
+        H.323-вызовы регистрирует ``H323Endpoint`` через ``engine.registry``)
+        плюс собственные наблюдатели панели. Синтетические каналы шины медиа
+        (``mix``, ``sip-<слот>``) терминалами НЕ являются и в реестре не
+        живут — в таблицу они попасть не могут по построению.
+
+        Ключи ряда (заперто ``tests/test_admin_page.py``; их же рисует
+        HTML ``GET /admin``):
+
+        ``id``              — id участника в общем реестре движка;
+        ``name``            — алиас (для ``h323:``) или user (для ``sip:``)
+                              без схемы; при пустом URI — «#id»;
+        ``address``         — remote URI как есть (``h323:ALIAS``/``sip:u@h``);
+        ``protocol``        — ``h323`` | ``sip`` | ``other``;
+        ``state``           — значение CallState (``incoming``/``confirmed``/…);
+        ``duration_s``      — длительность в СВЕДЕНИИ ПАНЕЛИ (int, с первой
+                              минуты наблюдения в confirmed) или None, пока
+                              терминал не подтверждён;
+        ``duration_source`` — ``observed`` (панель видит вызов с момента
+                              первого подтверждения: ни движок, ни хост
+                              протокольной отметки соединения не отдают)
+                              или ``""`` — не считалась;
+        ``audio_in`` / ``audio_out`` — согласованные аудио-кодеки по
+                              направлениям: in = терминал->МСУ (decoder),
+                              out = МСУ->терминал (encoder);
+        ``audio_in_rate`` / ``audio_out_rate`` — частота канала, Гц,
+                              None — не сообщалась;
+        ``audio_codec_source`` — ``host-event`` (из ``call.media`` хоста,
+                              направления раздельные) | ``engine`` (движок
+                              отдаёт ОДИН согласованный кодек — он в обеих
+                              колонках) | ``""`` — данных нет;
+        ``video_in`` / ``video_out`` — видеокодеки по направлениям;
+        ``video_in_size`` / ``video_out_size`` — «WxH» или None;
+        ``video_codec_source`` — та же семантика, что у аудио;
+        ``video_present``   — есть ли видеоканал хотя бы в одну сторону;
+        ``rtp_port``        — RTP-порт терминала: движок и хост его НЕ
+                              публикуют (у хоста ``port`` — сигнальный
+                              H.225/1720) — всегда None, честная пустота
+                              вместо выдуманного числа;
+        ``muted_audio``     — мут аудио (рычаг поддержан: SIP — pjsua2
+                              setMute, H.323 — h323_audio_bridge режет PCM
+                              до микса по этому флагу);
+        ``muted_video``     — ФЛАГ видео-мута движка: медиа-путь его не
+                              читает, рабочий рычаг — 501 (см.
+                              :meth:`admin_video_gate`);
+        ``speaking``        — признак голосовой активности;
+        ``rx_kbps`` / ``tx_kbps`` — битрейт или None (в текущей сборке
+                              не измеряется — 0 означало бы «медиа нет»).
+        """
+        self._admin_attach_h323()
+
+        def _snap() -> List[Dict[str, Any]]:
+            return [_participant_to_dict(p)
+                    for p in _participants(getattr(self._engine, "room", None))]
+
+        snap = self._call(_snap)
+        now = time.monotonic()
+        rows: List[Dict[str, Any]] = []
+        live = {p.get("id") for p in snap}
+        with self._admin_lock:
+            for pid in list(self._admin_first_seen):
+                if pid not in live:
+                    self._admin_first_seen.pop(pid, None)
+            for pid in list(self._admin_media):
+                if pid not in live:
+                    self._admin_media.pop(pid, None)
+        for p in snap:
+            pid = p.get("id")
+            uri = str(p.get("uri") or "")
+            protocol = ("h323" if uri.startswith("h323")
+                        else "sip" if uri.startswith("sip") else "other")
+            name = uri.split(":", 1)[1] if ":" in uri else uri
+            if not name:
+                name = "#%s" % pid
+            confirmed = p.get("state") == "confirmed"
+            duration_s: Optional[int] = None
+            duration_source = ""
+            media: Dict[str, Any] = {}
+            if isinstance(pid, int):
+                with self._admin_lock:
+                    if confirmed and pid not in self._admin_first_seen:
+                        self._admin_first_seen[pid] = now
+                    ts = self._admin_first_seen.get(pid)
+                    media = dict(self._admin_media.get(pid, {}))
+                if confirmed and ts is not None:
+                    duration_s = max(0, int(now - ts))
+                    duration_source = "observed"
+            engine_audio = p.get("audio_codec") or None
+            engine_video = p.get("video_codec") or None
+            audio_in = media.get("audio_in") or engine_audio
+            audio_out = media.get("audio_out") or engine_audio
+            video_in = media.get("video_in") or engine_video
+            video_out = media.get("video_out") or engine_video
+            a_source = ("host-event" if ("audio_in" in media or "audio_out" in media)
+                        else "engine" if engine_audio else "")
+            v_source = ("host-event" if ("video_in" in media or "video_out" in media)
+                        else "engine" if engine_video else "")
+            rows.append({
+                "id": pid,
+                "name": name,
+                "address": uri,
+                "protocol": protocol,
+                "state": str(p.get("state") or ""),
+                "duration_s": duration_s,
+                "duration_source": duration_source,
+                "audio_in": audio_in,
+                "audio_in_rate": media.get("audio_in_rate"),
+                "audio_out": audio_out,
+                "audio_out_rate": media.get("audio_out_rate"),
+                "audio_codec_source": a_source,
+                "video_in": video_in,
+                "video_in_size": media.get("video_in_size"),
+                "video_out": video_out,
+                "video_out_size": media.get("video_out_size"),
+                "video_codec_source": v_source,
+                "video_present": bool(video_in or video_out),
+                "rtp_port": None,
+                "muted_audio": bool(p.get("muted")),
+                "muted_video": bool(p.get("video_muted")),
+                "speaking": bool(p.get("speaking")),
+                "rx_kbps": p.get("rx_kbps"),
+                "tx_kbps": p.get("tx_kbps"),
+            })
+        rows.sort(key=lambda r: (str(r["id"])))
+        return rows
+
+    def admin_summary(self) -> Dict[str, Any]:
+        """Сводка для ``GET /api/admin/status``.
+
+        Ключи ответа (стабильны): ``version`` (полная строка с вариантом,
+        ``mcuclient.version_string()``), ``variant`` (например ``h323``),
+        ``uptime_s`` (аптайм панели), ``room`` (имя комнаты движка),
+        ``terminals_total`` / ``terminals_active`` (терминалы реестра:
+        все / в разговоре), ``web_participants`` (веб-участники панели),
+        ``h323`` ({configured, available, port, socket, note} — порт хоста
+        это сигнальный H.225, не RTP), ``counters`` ({video_frames} — кадры
+        FrameHub панели).
+        """
+        terminals = self.admin_terminals()
+        room = self._call(lambda: str(
+            getattr(getattr(self._engine, "room", None), "name", "") or ""))
+        try:
+            from . import PROTOCOL_VARIANT
+            variant = str(PROTOCOL_VARIANT)
+        except Exception:  # noqa: BLE001
+            variant = ""
+        ep = self._admin_h323_endpoint()
+        h323_info = {
+            "configured": ep is not None,
+            "available": bool(_prop(ep, "available", False)),
+            "port": int(_prop(ep, "port", 0) or 0),
+            "socket": str(_prop(ep, "socket_path", "") or ""),
+            "note": ("порт хоста — сигнальный H.225 (1720); "
+                     "RTP-порты по терминалам хост не публикует"),
+        }
+        return {
+            "version": _version(),
+            "variant": variant,
+            "uptime_s": self.admin_uptime(),
+            "room": room,
+            "terminals_total": len(terminals),
+            "terminals_active": sum(
+                1 for t in terminals if t["state"] == "confirmed"),
+            "web_participants": self.conference.count(),
+            "h323": h323_info,
+            "counters": {"video_frames": int(self.frame_hub.frames)},
+        }
+
+    def admin_page(self, token: str = "") -> str:
+        """HTML ``GET /admin``: та же таблица, что ``admin_terminals``.
+
+        Без JS и внешних ресурсов: inline CSS, авто-refresh meta-тегом
+        (:data:`ADMIN_REFRESH_SECONDS`), рычаги — обычные form POST
+        (движок понимает и urlencoded тело именно у админ-роутов).
+        """
+        summary = self.admin_summary()
+        return render_admin_page(summary=summary,
+                                 terminals=self.admin_terminals(),
+                                 token=token)
+
+    def admin_audio_mute(self, pid: Any, muted: bool) -> Dict[str, Any]:
+        """Мут аудио терминала — рычаг, который движок ДЕЙСТВИТЕЛЬНО делает.
+
+        SIP: pjsua2 ``setMute`` на живом вызове. H.323: команды мута у
+        ``mcu_h323d`` нет, но ``h323_audio_bridge`` читает флаг
+        ``is_muted`` до завода PCM в микшер — заглушенный терминал в микс
+        не попадает. Оба пути реальные; каждый поворот уходит в журнал
+        аудит-строкой с префиксом ``ADMIN``.
+        """
+        pid_int = self._require_pid(pid)
+        apply_mute = getattr(self._engine, "mute_participant", None)
+        if not callable(apply_mute):
+            reason = "у движка нет метода mute_participant"
+            log.warning("ADMIN: отказ терминалу %s в муте аудио (501): %s",
+                        pid_int, reason)
+            raise ApiError("Движок не поддерживает мут аудио", status=501,
+                           reason=reason)
+
+        def _apply() -> Optional[Tuple[bool, str]]:
+            for p in _participants(getattr(self._engine, "room", None)):
+                if getattr(p, "id", None) == pid_int:
+                    apply_mute(pid_int, bool(muted))
+                    return bool(getattr(p, "is_muted", False)), str(
+                        getattr(p, "remote_uri", "") or "")
+            return None
+
+        applied = self._call(_apply)
+        if applied is None:
+            raise ApiError("Терминала %s нет в комнате" % pid_int, status=404)
+        state, uri = applied
+        log.info("ADMIN: терминал %s (%s): мут аудио := %s (web-панель)",
+                 pid_int, uri or "?", "включён" if state else "снят")
+        return {"ok": True, "id": pid_int, "audio_muted": state,
+                "participant": uri}
+
+    def admin_video_gate(self, pid: Any, direction: str = "both",
+                         muted: Optional[bool] = None) -> Dict[str, Any]:
+        """Видео-рычаг in/out по терминалу — честный ответ, без имитации.
+
+        Движок в текущей сборке НЕ умеет перекрывать видеоканал
+        терминала: ``mute_participant_video`` лишь выставляет флаг
+        ``is_video_muted`` (его читает только Qt-отрисовка, медиа-путь не
+        читает никогда — проверено поиском по кодовой базе), а у хоста
+        ``mcu_h323d`` такой команды нет. Поэтому без capability-хука
+        движка рычаг отвечает 501 с полем ``reason``; реализует движок
+        ``apply_video_gate(id, direction, muted)`` — рычаг включится сам,
+        логику перекрытия делает движок, а не этот слой.
+        """
+        pid_int = self._require_pid(pid)
+        direction = str(direction or "both").strip().lower()
+        if direction not in ("in", "out", "both"):
+            raise ApiError("direction должен быть in|out|both")
+        if muted is None:
+            raise ApiError("Укажите muted (true/false)")
+        gate = getattr(self._engine, "apply_video_gate", None)
+        if callable(gate):
+            ok = self._call(lambda: bool(gate(pid_int, direction, bool(muted))))
+            if not ok:
+                raise ApiError(
+                    "Движок не применил видео-рычаг для %s" % pid_int,
+                    status=409)
+            log.info("ADMIN: терминал %s: видео %s := %s (web-панель)",
+                     pid_int, direction, "заглушено" if muted else "открыто")
+            return {"ok": True, "id": pid_int, "direction": direction,
+                    "video_muted": bool(muted)}
+        reason = ("движок не перекрывает видеоканал по терминалу: "
+                  "mute_participant_video только выставляет флаг, который "
+                  "медиа-путь не читает, и у хоста mcu_h323d такой команды "
+                  "нет; рычаг активен после реализации движком "
+                  "apply_video_gate(id, direction, muted)")
+        log.warning("ADMIN: отказ терминалу %s в видео-рычаге (501): %s",
+                    pid_int, reason)
+        raise ApiError(reason, status=501, reason=reason)
+
     # -- внутреннее --------------------------------------------------------
     def _require_pid(self, pid: Any) -> int:
         try:
@@ -711,13 +1821,37 @@ class WebSession:
             raise ApiError("Некорректный participant id") from exc
         return value
 
+    def _require_dev(self, dev: Any, what: str) -> int:
+        """Индекс устройства обязан быть целым — иначе 400, а не 500.
+
+        Тот же приём, что у ``_require_pid``. Разница с ``_opt_int`` здесь
+        принципиальна: устройство обязано быть указано (``None`` — это ошибка,
+        а не «не задано»), поэтому ``_opt_int`` для этих маршрутов не годится.
+
+        Замерено до правки: POST без ``device`` и ``{"device": "abc"}``
+        доходили до сырого ``int()`` и давали HTTP 500 с ``TypeError`` в
+        ``error``, хотя docs/WEB_CONTROL.md обещает 400. 500 от клиентской
+        опечатки хуже, чем кажется: он выглядит как поломка МСУ, и оператор
+        идёт читать логи вместо того, чтобы просто выбрать устройство.
+
+        :param what: название устройства в родительном падеже («id камеры»),
+            чтобы сообщение читалось по-русски: «Не указан id камеры».
+        """
+        if dev is None or dev == "":
+            raise ApiError(f"Не указан {what} (device)")
+        try:
+            return int(dev)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                f"Ожидался целый id устройства, получено {dev!r}") from exc
+
 
 # --- сериализация -----------------------------------------------------------
 
 def _version() -> str:
     try:
-        from . import __version__
-        return str(__version__)
+        from . import version_string
+        return version_string()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -748,6 +1882,22 @@ def _prop(obj: Any, name: str, default: Any = None) -> Any:
     return value
 
 
+def _kbps_or_none(value: Any) -> Optional[int]:
+    """Битрейт наружу: None = «не измерено», 0 = «измерено: ноль».
+
+    Прежний ``int(value or 0)`` превращал неизвестность в ноль, и оператор
+    читал ``rx_kbps: 0`` при активном звонке как «медиа нет». ``_opt_int`` для
+    этого не годится: он рассчитан на ВХОДЯЩИЕ параметры и бросает ApiError,
+    а проекция статуса падать не имеет права.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _participant_to_dict(p: Any) -> Dict[str, Any]:
     state = getattr(p, "state", None)
     return {
@@ -761,8 +1911,8 @@ def _participant_to_dict(p: Any) -> Dict[str, Any]:
         "video_muted": bool(getattr(p, "is_video_muted", False)),
         "speaking": bool(getattr(p, "is_speaking", False)),
         "volume_level": int(getattr(p, "volume_level", 0) or 0),
-        "rx_kbps": int(getattr(p, "rx_bitrate_kbps", 0) or 0),
-        "tx_kbps": int(getattr(p, "tx_bitrate_kbps", 0) or 0),
+        "rx_kbps": _kbps_or_none(getattr(p, "rx_bitrate_kbps", None)),
+        "tx_kbps": _kbps_or_none(getattr(p, "tx_bitrate_kbps", None)),
     }
 
 
@@ -774,6 +1924,19 @@ def _chat_to_dict(m: Any) -> Dict[str, Any]:
         "participant_id": getattr(m, "participant_id", None),
         "direction": getattr(m, "direction", ""),
         "text": getattr(m, "text", ""),
+    }
+
+
+def _dtmf_to_dict(ev: Any) -> Dict[str, Any]:
+    if isinstance(ev, dict):
+        return _jsonable(ev)
+    as_dict = getattr(ev, "as_dict", None)
+    if callable(as_dict):
+        return _jsonable(as_dict())
+    return {
+        "digits": getattr(ev, "digits", ""),
+        "direction": getattr(ev, "direction", ""),
+        "participant_id": getattr(ev, "participant_id", None),
     }
 
 
@@ -795,6 +1958,147 @@ def _jsonable(value: Any) -> Any:
         if isinstance(value, (list, tuple)):
             return [_jsonable(v) for v in value]
         return str(value)
+
+
+# --- админ-страница: HTML для глаз (OpenMCU-ru /Status, но своя) ------------
+
+_ADMIN_CSS = """
+body { background:#14171c; color:#d8dee6; font:14px/1.45 system-ui,sans-serif;
+       margin:1.2rem; }
+h1 { font-size:1.15rem; margin:0 0 .3rem; }
+.head { color:#8ea0b5; margin-bottom:.8rem; }
+.head b { color:#d8dee6; }
+table { border-collapse:collapse; width:100%; }
+th,td { border:1px solid #2c333d; padding:.32rem .5rem; text-align:left;
+        vertical-align:top; white-space:nowrap; }
+th { background:#1d222a; font-weight:600; }
+tr.confirmed td { }
+tr.incoming  td { color:#9aa6b4; }
+.muted { color:#e5b04c; }
+.codec { color:#9fd08a; }
+button { background:#263041; color:#d8dee6; border:1px solid #3a4657;
+         border-radius:4px; padding:.15rem .5rem; cursor:pointer; }
+form { margin:0; display:inline; }
+.foot { color:#77869a; margin-top:.8rem; font-size:.85rem; }
+.foot div { margin-top:.15rem; }
+"""
+
+
+def _fmt_duration(seconds: Optional[float]) -> str:
+    """Длительность как в OpenMCU: MM:SS или H:MM:SS; None — длинное тире."""
+    if seconds is None:
+        return "—"
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return "%d:%02d:%02d" % (hours, minutes, secs)
+    return "%02d:%02d" % (minutes, secs)
+
+
+def _admin_codec_cell(codec: Any, extra: Any = None) -> str:
+    """Ячейка кодека: «G.722-64k@16000Hz» / «H.261@352x288» или тире."""
+    if not codec:
+        return "—"
+    esc = _html_escape(str(codec))
+    if extra:
+        esc += "@%s" % _html_escape(str(extra))
+    return '<span class="codec">%s</span>' % esc
+
+
+def render_admin_page(*, summary: Dict[str, Any],
+                      terminals: List[Dict[str, Any]],
+                      token: str = "") -> str:
+    """Собрать HTML админ-страницы. Без JS, без внешних ресурсов, офлайн.
+
+    Данные — ровно те же словари, что отдают ``/api/admin/*`` (одна
+    реализация таблицы для глаз и для машин). Все значения экранируются:
+    алиасы терминалов приходят из сети.
+    """
+    query = ("?token=" + quote(token, safe="")) if token else ""
+    h323 = summary.get("h323") or {}
+    rows = []
+    for t in terminals:
+        pid = t.get("id")
+        muted = bool(t.get("muted_audio"))
+        state = str(t.get("state") or "")
+        mute_cell = (
+            '<form method="post" action="/api/admin/terminal/mute%s">'
+            '<input type="hidden" name="id" value="%s">'
+            '<input type="hidden" name="muted" value="%s">'
+            '<button type="submit">%s</button></form>'
+            % (_html_escape(query),
+               _html_escape(str(pid)),
+               "0" if muted else "1",
+               "снять" if muted else "заглушить"))
+        rows.append(
+            '<tr class="%s"><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td class="%s">%s%s</td></tr>'
+            % (
+                _html_escape(state),
+                _html_escape(str(pid)),
+                _html_escape(str(t.get("name") or "")),
+                _html_escape(str(t.get("address") or "")) or "—",
+                _html_escape(_fmt_duration(t.get("duration_s"))),
+                _admin_codec_cell(t.get("audio_in"), t.get("audio_in_rate")),
+                _admin_codec_cell(t.get("audio_out"), t.get("audio_out_rate")),
+                _admin_codec_cell(t.get("video_in"), t.get("video_in_size")),
+                _admin_codec_cell(t.get("video_out"), t.get("video_out_size")),
+                _html_escape(str(t.get("rtp_port") or "—")),
+                "muted" if (muted or t.get("muted_video")) else "",
+                ("аудио выкл" if muted else "")
+                + (" видео-флаг" if t.get("muted_video") else ""),
+                mute_cell,
+            ))
+    if not rows:
+        rows.append('<tr><td colspan="11">Терминалов нет: позвоните на МСУ '
+                    "(H.323 на порт %s, SIP — как обычно) или подождите "
+                    "входящий.</td></tr>"
+                    % _html_escape(str(h323.get("port") or "?")))
+    uptime = _fmt_duration(summary.get("uptime_s"))
+    head_bits = [
+        "версия <b>%s</b>" % _html_escape(str(summary.get("version") or "?")),
+        "аптайм панели <b>%s</b>" % _html_escape(uptime),
+        "комната <b>%s</b>" % (_html_escape(str(summary.get("room") or "")) or "—"),
+        "терминалов <b>%s</b> (в разговоре <b>%s</b>)" % (
+            summary.get("terminals_total", 0),
+            summary.get("terminals_active", 0)),
+    ]
+    if h323.get("configured"):
+        head_bits.append(
+            "H.323: %s, порт <b>%s</b>" % (
+                "слушает" if h323.get("available") else "не готов",
+                _html_escape(str(h323.get("port") or "?"))))
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="ru"><head><meta charset="utf-8">'
+        '<meta http-equiv="refresh" content="%d">'
+        "<title>МСУ — терминалы</title>"
+        "<style>%s</style></head><body>"
+        "<h1>Пульт МСУ — терминалы (как /Status в OpenMCU)</h1>"
+        '<div class="head">%s</div>'
+        "<table><tr><th>ID</th><th>Имя</th><th>Адрес</th><th>Длит.</th>"
+        "<th>Audio&nbsp;in</th><th>Audio&nbsp;out</th>"
+        "<th>Video&nbsp;in</th><th>Video&nbsp;out</th><th>RTP</th>"
+        "<th>Mute</th><th>Рычаг</th></tr>"
+        "%s</table>"
+        '<div class="foot">'
+        "<div>Направления: <b>in</b> — терминал-&gt;МСУ (decoder), "
+        "<b>out</b> — МСУ-&gt;терминал (encoder); источник — события хоста "
+        "call.media, при их отсутствии — согласованный кодек движка в обе "
+        "колонки.</div>"
+        "<div>Длительность — время в сведении панели (наблюдение с первого "
+        "подтверждения), протокольных отметок движок не отдаёт.</div>"
+        "<div>RTP-порты по терминалам движок/хост не публикует — колонка "
+        "честно пустая (rtp_port=null в JSON).</div>"
+        "<div>Видео-рычаг in/out: 501 без поддержки движком (apply_video_gate); "
+        "имитации нет — «флаг видео-мута» показывается как флаг.</div>"
+        "</div>"
+        "</body></html>\n"
+        % (ADMIN_REFRESH_SECONDS, _ADMIN_CSS, " · ".join(head_bits),
+           "\n".join(rows))
+    )
 
 
 # --- HTTP ------------------------------------------------------------------
@@ -833,8 +2137,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error_json(self, message: str, status: int) -> None:
-        self._send_json({"ok": False, "error": message}, status)
+    def _send_error_json(self, message: str, status: int,
+                         reason: Optional[str] = None) -> None:
+        body: Dict[str, Any] = {"ok": False, "error": message}
+        if reason:
+            body["reason"] = reason
+        self._send_json(body, status)
 
     def _read_json(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -850,6 +2158,24 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ApiError("Тело запроса должно быть объектом JSON")
         return data
+
+    def _read_body(self) -> Dict[str, Any]:
+        """Тело POST: JSON или urlencoded-форма.
+
+        Форму понимают только админ-роуты: там она нужна, чтобы рычаг
+        дёргался ОБЫЧНОЙ кнопкой страницы (form POST) без единой строки JS.
+        Остальные роуты форма не трогает — прежний JSON-договор в силе.
+        """
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if "application/x-www-form-urlencoded" in ctype:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            if length > 1_000_000:
+                raise ApiError("Тело запроса слишком велико", status=413)
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            return {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+        return self._read_json()
 
     def _serve_static(self, rel: str) -> None:
         # Защита от выхода за пределы каталога webui.
@@ -867,6 +2193,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _MIME.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_admin_page(self) -> None:
+        """GET /admin — HTML-страница терминалов (авто-refresh, без JS)."""
+        qs = parse_qs(urlparse(self.path).query)
+        token = (qs.get("token") or [""])[0]
+        try:
+            body = self.session.admin_page(token=token).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001 — 500 вместо обрыва соединения
+            log.exception("Админ-страница не отрендерилась")
+            self._send_error_json(f"Страница не отрендерилась: {exc}", 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -891,6 +2234,18 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._handle_api_get(path)
             return
+        if path in ("/admin", "/admin/"):
+            # Косой черта на конце — норма для curl и ручного ввода:
+            # /admin/ обязан открыть то же, а не выдать 404 статики.
+            # Серверный HTML несёт данные — гейтится как API, а не как
+            # статика индекса (индекс — пустой каркас, страница — сводка).
+            # Серверный HTML несёт данные — гейтится как API, а не как
+            # статика индекса (индекс — пустой каркас, страница — сводка).
+            if not self._authorized():
+                self._send_error_json("Требуется авторизация", 401)
+                return
+            self._serve_admin_page()
+            return
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         self._serve_static(rel)
 
@@ -903,11 +2258,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error_json("Требуется авторизация", 401)
             return
         try:
-            data = self._read_json()
+            if path.startswith("/api/admin/"):
+                data = self._read_body()
+            else:
+                data = self._read_json()
             result = self._handle_api_post(path, data)
             self._send_json(result)
         except ApiError as exc:
-            self._send_error_json(str(exc), exc.status)
+            self._send_error_json(str(exc), exc.status,
+                                  getattr(exc, "reason", None))
         except Exception as exc:  # noqa: BLE001 — API не должно ронять сервер
             log.exception("Ошибка API %s", path)
             self._send_error_json(f"Внутренняя ошибка: {exc}", 500)
@@ -921,12 +2280,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"participants": s.participants()})
             elif path == "/api/chat":
                 self._send_json({"messages": s.chat_history()})
+            elif path == "/api/dtmf":
+                self._send_json({"events": s.dtmf_history()})
             elif path == "/api/devices/video":
                 self._send_json({"devices": s.video_devices()})
             elif path == "/api/devices/audio":
                 self._send_json({"devices": s.audio_devices()})
             elif path == "/api/layouts":
                 self._send_json({"layouts": s.layouts()})
+            elif path == "/api/address":
+                self._send_json(s.address())
+            elif path == "/api/codecs":
+                self._send_json(s.codecs())
+            elif path == "/api/encryption":
+                self._send_json(s.encryption())
             elif path == "/api/web_recording":
                 self._send_json(s.web_recording_state())
             elif path == "/api/conference":
@@ -939,6 +2306,12 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/webrtc/sessions":
                 self._send_json({"sessions": s.webrtc_sessions(),
                                  "available": s.webrtc.available})
+            elif path == "/api/admin/terminals":
+                self._send_json({"terminals": s.admin_terminals(),
+                                 "version": _version(),
+                                 "uptime_s": s.admin_uptime()})
+            elif path == "/api/admin/status":
+                self._send_json(s.admin_summary())
             else:
                 self._send_error_json("Не найдено", 404)
         except ApiError as exc:
@@ -960,21 +2333,38 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/mute":
             return s.mute(data.get("id"), audio=_opt_bool(data.get("audio")), video=_opt_bool(data.get("video")))
         if path == "/api/mute_all":
-            return s.mute_all(audio=bool(data.get("audio", True)), video=bool(data.get("video", False)))
+            return s.mute_all(audio=_flag_bool(data.get("audio"), True),
+                              video=_flag_bool(data.get("video"), False))
         if path == "/api/layout":
             return s.set_layout(str(data.get("layout", "")))
+        if path == "/api/address":
+            return s.set_address(domain=data.get("domain"), user=data.get("user"),
+                                 display_name=data.get("display_name"),
+                                 listen=data.get("listen"),
+                                 save=_flag_bool(data.get("save"), True))
+        if path == "/api/codecs":
+            return s.set_codecs(str(data.get("profile", "")))
+        if path == "/api/encryption":
+            return s.set_encryption(srtp=data.get("srtp"), web_tls=data.get("web_tls"))
+        if path == "/api/web_tls":
+            return s.set_web_tls(data.get("mode", "off"))
+        if path == "/api/web_port":
+            return s.set_web_port(_opt_int(data.get("port")) or 0)
         if path == "/api/recording":
             return s.toggle_recording(_opt_bool(data.get("enabled")))
         if path == "/api/chat":
             return s.send_chat(str(data.get("text", "")), _opt_int(data.get("id")))
+        if path == "/api/dtmf":
+            return s.send_dtmf(str(data.get("digits", "")), _opt_int(data.get("id")),
+                               str(data.get("method", "auto")))
         if path == "/api/camera":
-            return s.set_camera(bool(data.get("enabled", True)))
+            return s.set_camera(_flag_bool(data.get("enabled"), True))
         if path == "/api/microphone":
-            return s.set_microphone(bool(data.get("enabled", True)))
+            return s.set_microphone(_flag_bool(data.get("enabled"), True))
         if path == "/api/video_send":
-            return s.set_video_send(bool(data.get("enabled", True)))
+            return s.set_video_send(_flag_bool(data.get("enabled"), True))
         if path == "/api/screen_share":
-            return s.set_screen_share(bool(data.get("enabled", True)))
+            return s.set_screen_share(_flag_bool(data.get("enabled"), True))
         if path == "/api/video_source":
             return s.set_video_source(str(data.get("kind", "camera")), _opt_int(data.get("device")))
         if path == "/api/video_device":
@@ -1009,6 +2399,19 @@ class _Handler(BaseHTTPRequestHandler):
             return s.conference_media(str(data.get("id", "")),
                                       video=_opt_bool(data.get("video")),
                                       audio=_opt_bool(data.get("audio")))
+        # --- админ-рычаги: ровно там, где движок реально поддерживает -----
+        if path == "/api/admin/terminal/mute":
+            muted = _opt_bool(data.get("muted"))
+            if muted is None:
+                raise ApiError("Укажите muted (true/false)")
+            return s.admin_audio_mute(data.get("id"), muted)
+        if path == "/api/admin/terminal/video":
+            # direction: in (терминал->МСУ, decoder) | out (МСУ->терминал,
+            # encoder) | both. Ответ 501 с reason, пока у движка нет
+            # apply_video_gate — имитации рычага здесь нет и не будет.
+            return s.admin_video_gate(data.get("id"),
+                                      str(data.get("direction", "both")),
+                                      _opt_bool(data.get("muted")))
         raise ApiError("Не найдено", status=404)
 
     def _serve_frame(self, as_jpeg: bool) -> None:
@@ -1090,10 +2493,53 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.events.unsubscribe(q)  # type: ignore[attr-defined]
 
 
+#: Строковые записи флага, которые реально присылают внешние клиенты: curl,
+#: shell-переменная, ENV/YAML из автоматизации. Приведение `bool()` тут не
+#: помогает никогда: `bool("false")`, `bool("0")`, `bool("no")` есть True, т.е.
+#: «выключи» превращалось в «включи». Панель шлёт JSON-литералы и дефекта не
+#: видит вообще — видят его ровно те, ради кого проект называет себя
+#: совместимым MCU.
+_BOOL_TRUE = {"true", "yes", "on", "1"}
+_BOOL_FALSE = {"false", "no", "off", "0", ""}
+
+
+def _as_bool(value: Any) -> bool:
+    """Логическое значение тела запроса без `bool(str)`.
+
+    Числа значат то, что значат (0 — ложь), строки разбираются по смыслу, а
+    мусор поднимает ApiError: молчаливое «стало истина» равносильно молчаливой
+    лжи. Идиома взята у `_opt_int` рядом — тот тоже отказывает, а не возвращает
+    ноль.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _BOOL_TRUE:
+            return True
+        if token in _BOOL_FALSE:
+            return False
+    raise ApiError("Ожидалось логическое значение (true/false), "
+                   "получено " + repr(value))
+
+
 def _opt_bool(value: Any) -> Optional[bool]:
     if value is None:
         return None
-    return bool(value)
+    return _as_bool(value)
+
+
+def _flag_bool(value: Any, default: bool) -> bool:
+    """Флаг тела со значением по умолчанию: ключа нет — прежнее поведение.
+
+    Такие места до правки писались `bool(data.get("enabled", True))`: дефолт
+    сохранялся, а разбор строки — нет.
+    """
+    if value is None:
+        return default
+    return _as_bool(value)
 
 
 def _opt_int(value: Any) -> Optional[int]:
@@ -1111,22 +2557,49 @@ class WebServer:
     def __init__(self, engine: Any, config: Any = None, h323: Any = None,
                  host: str = "0.0.0.0", port: int = 8080,
                  auth_token: Optional[str] = None,
-                 tls: bool = False, certfile: Optional[str] = None,
+                 tls=False, certfile: Optional[str] = None,
                  keyfile: Optional[str] = None,
                  ice_servers: Optional[List[Dict[str, Any]]] = None) -> None:
         self._engine = engine
         self._config = config
         self._h323 = h323
+        # Нативный аудио-мост SIP<->веб: живёт ровно столько, сколько
+        # панель (без браузеров мост в вакууме не нужен).
+        self._sip_bridge = None
+        # Держим ICE-серверы: restart() пересоздаёт сессию и обязан их
+        # сохранить, иначе после включения HTTPS браузер остаётся без TURN.
+        self._ice_servers = list(ice_servers or [])
         self.session = WebSession(engine, config, h323, ice_servers=ice_servers)
         self.host = host
         self.port = int(port)
         self.auth_token = auth_token
-        self.tls = bool(tls)
+        # tls принимает и legacy bool, и режим 'off'|'self_signed'|'custom'.
+        # Смысл разделения: 'off' — HTTP без сертификатов ВООБЩЕ (закрытый
+        # контур, никаких предупреждений браузера и протухших дат), а любой
+        # другой режим — HTTPS с авто-генерацией, если своих файлов нет.
+        self.tls_mode = self._normalize_tls_mode(tls)
+        self.tls_warning = ""
         self.certfile = certfile
         self.keyfile = keyfile
         self.events = _EventHub(engine)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _normalize_tls_mode(value) -> str:
+        if isinstance(value, bool):
+            return "self_signed" if value else "off"
+        mode = str(value or "").strip().lower()
+        return mode if mode in ("off", "self_signed", "custom") else "off"
+
+    @property
+    def tls(self) -> bool:
+        """Нужен ли SSLContext (совместимость со старым кодом/GUI)."""
+        return self.tls_mode != "off"
+
+    @tls.setter
+    def tls(self, value) -> None:
+        self.tls_mode = self._normalize_tls_mode(value)
 
     @property
     def scheme(self) -> str:
@@ -1155,26 +2628,75 @@ class WebServer:
         if self.tls:
             try:
                 context = _make_ssl_context(self.certfile, self.keyfile)
+                httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+                self.tls_warning = ""
             except Exception as exc:  # noqa: BLE001
-                log.error("TLS включён, но контекст не создан: %s", exc)
-                httpd.server_close()
-                return False
-            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+                # КЛЮЧЕВОЕ: отказ TLS не имеет права лишать оператора панели.
+                # Откатываемся на HTTP и говорим об этом прямо.
+                log.error("TLS не поднялся (%s) — запускаем панель на HTTP", exc)
+                self.tls_mode = "off"
+                self.tls_warning = f"HTTPS недоступен: {exc} — панель на HTTP"
         httpd.daemon_threads = True
         # Пробрасываем зависимости в хендлер через атрибуты сервера.
         httpd.session = self.session          # type: ignore[attr-defined]
+        # Сессии нужен сервер, чтобы перезапускать себя при смене TLS/порта.
+        self.session._server = self           # type: ignore[attr-defined]
         httpd.events = self.events            # type: ignore[attr-defined]
         httpd.auth_token = self.auth_token    # type: ignore[attr-defined]
         self._httpd = httpd
-        self._thread = threading.Thread(target=httpd.serve_forever, name="mcu-web", daemon=True)
+        # poll_interval=0.1: у serve_forever дефолт 0.5 с. stop() дергает shutdown(),
+        # который ждёт конца текущего цикла — любая остановка/рестарт панели
+        # стоили ~0.5 с (в тестовом прогоне web-тесты дают ~13 с простоя).
+        self._thread = threading.Thread(
+            target=httpd.serve_forever, kwargs={"poll_interval": 0.1},
+            name="mcu-web", daemon=True,
+        )
         self._thread.start()
         # Подписываемся на кадры видеоисточника (если движок умеет).
         try:
             self.session.attach_frame_listener()
         except Exception:  # noqa: BLE001
             log.debug("Подписка на кадры источника не удалась", exc_info=True)
+        self._start_sip_bridge()
         log.info("Web-панель: %s (host=%s, port=%s)", self.url, self.host, self.port)
         return True
+
+    def _start_sip_bridge(self) -> None:
+        """Поднять нативный аудио-мост SIP<->веб (порты на живые вызовы).
+
+        Без этого шага весь тракт SIP<->веб собран, но не вызывается:
+        браузеры не слышат терминал и наоборот. Мост поднимается только
+        при доступном pjsua2; без стека — тихий no-op (базовый режим не
+        меняется), поэтому панель работает и в заглушке.
+        """
+        if self._sip_bridge is not None:
+            return
+        engine = self._engine
+        if engine is None or not bool(_prop(engine, "pjsip_available", False)):
+            log.debug("pjsua2 недоступен — аудио-мост SIP<->веб не поднимается")
+            return
+        try:
+            from .sip_bridge_service import SipBridgeService  # noqa: PLC0415
+            service = SipBridgeService(
+                self.session, engine,
+                get_calls=getattr(engine, "active_audio_calls", None),
+                register_thread=getattr(engine, "register_pjsip_thread", None),
+            )
+            if not service.start():
+                return
+            self._sip_bridge = service
+            self.session.attach_sip_bridge(service)
+        except Exception:  # noqa: BLE001 — панель не должна падать из-за моста
+            log.debug("Аудио-мост SIP<->веб не поднят", exc_info=True)
+
+    def _stop_sip_bridge(self) -> None:
+        service, self._sip_bridge = self._sip_bridge, None
+        if service is None:
+            return
+        try:
+            service.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("Остановка аудио-моста SIP упала", exc_info=True)
 
     def stop(self) -> None:
         httpd, thread = self._httpd, self._thread
@@ -1187,10 +2709,12 @@ class WebServer:
                 log.debug("Остановка web-сервера с ошибкой", exc_info=True)
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
+        # Мост раньше сессии: порты должны уйти, пока медиа и шина живы.
+        self._stop_sip_bridge()
         self.session.close()
         log.info("Web-панель остановлена")
 
-    def restart(self, *, tls: Optional[bool] = None, host: Optional[str] = None,
+    def restart(self, *, tls=None, tls_mode=None, host: Optional[str] = None,
                 port: Optional[int] = None) -> bool:
         """Перезапустить сервер (например, при переключении HTTP/HTTPS).
 
@@ -1200,14 +2724,18 @@ class WebServer:
         was_running = self._httpd is not None
         if was_running:
             self.stop()
-        if tls is not None:
-            self.tls = bool(tls)
+        if tls_mode is not None:
+            self.tls_mode = self._normalize_tls_mode(tls_mode)
+        elif tls is not None:
+            self.tls = tls
         if host is not None:
             self.host = host
         if port is not None:
             self.port = int(port)
-        # Свежая сессия: старый dispatcher остановлен в stop().
-        self.session = WebSession(self._engine, self._config, self._h323)
+        # Свежая сессия: старый dispatcher остановлен в stop(). ICE-серверы
+        # передаём явно — иначе после включения HTTPS браузер теряет TURN.
+        self.session = WebSession(self._engine, self._config, self._h323,
+                                  ice_servers=self._ice_servers)
         return self.start()
 
     def __enter__(self) -> "WebServer":
@@ -1216,6 +2744,14 @@ class WebServer:
 
     def __exit__(self, *exc: Any) -> None:
         self.stop()
+
+
+def _tls_mode_of(config: Any, web_cfg: Dict[str, Any]) -> str:
+    """Режим TLS панели: доверяем Config.web_tls_mode, иначе разбираем JSON."""
+    mode = getattr(config, "web_tls_mode", None)
+    if isinstance(mode, str) and mode:
+        return mode
+    return WebServer._normalize_tls_mode(web_cfg.get("tls", False))
 
 
 def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
@@ -1231,7 +2767,7 @@ def make_web_server(engine: Any, config: Any, h323: Any = None) -> WebServer:
         host=str(web_cfg.get("host", "0.0.0.0")),
         port=int(web_cfg.get("port", 8080)),
         auth_token=token,
-        tls=bool(web_cfg.get("tls", False)),
+        tls=_tls_mode_of(config, web_cfg),
         certfile=web_cfg.get("cert_file") or None,
         keyfile=web_cfg.get("key_file") or None,
         ice_servers=getattr(config, "web_ice_servers", None),
@@ -1244,7 +2780,7 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
     if not web_cfg.get("enabled", False):
         return None
     token = web_cfg.get("auth_token") or os.environ.get("MCU_WEB_TOKEN") or None
-    tls = bool(web_cfg.get("tls", False))
+    tls = _tls_mode_of(config, web_cfg)
     certfile = web_cfg.get("cert_file") or None
     keyfile = web_cfg.get("key_file") or None
     return WebServer(
@@ -1261,7 +2797,10 @@ def build_web_server(engine: Any, config: Any, h323: Any = None) -> Optional[Web
 
 
 # TLS-хелперы — в отдельном модуле (единый источник, тестируется без сокетов).
-from .tls_utils import ensure_self_signed as _ensure_self_signed, make_ssl_context as _make_ssl_ctx
+from .tls_utils import (  # noqa: E402  # хвост осознанный: единый источник TLS-кода, а не забытый импорт
+    ensure_self_signed as _ensure_self_signed,
+    make_ssl_context as _make_ssl_ctx,
+)
 
 
 def ensure_self_signed_cert(certfile=None, keyfile=None, host="localhost"):

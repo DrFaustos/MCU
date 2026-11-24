@@ -148,6 +148,40 @@ class CallManager:
         log.info("Вызов %s: состояние %s", call_id, state_text)
         self._events.emit("call.state", id=call_id, state=state_text)
 
+    def apply_negotiated_codecs(
+        self, call_info: Any, call: Any = None
+    ) -> dict[str, Optional[str]]:
+        """Записывает согласованные кодеки в модель и возвращает разбор.
+
+        ``active_codecs`` считалась и раньше, но её результат жил только в
+        ``log.info``: ``Participant.audio_codec``/``video_codec`` для SIP не
+        заполнял никто (писателем полей оказался один H.323-эндпоинт), а их
+        читают REST-проекция панели (``_participant_to_dict``) и тайл видео —
+        при активном звонке оператор видел «кодека нет».
+
+        Пустое значение стека НЕ затирает уже согласованный кодек: «стек не
+        заполнил ``mi.codecName``» — не то же самое, что «кодек пропал». То же
+        правило, что введено для ``rx_bitrate_kbps``: неизвестность не имеет
+        права выглядеть как измеренный ноль/пустота.
+        """
+        codecs: dict[str, Optional[str]] = dict(
+            active_codecs(getattr(call_info, "media", None), self._pj)
+        )
+        part = self._registry.find_by_call(call, getattr(call_info, "id", None))
+        if part is None and call is not None:
+            # Тот же фолбэк, что в apply_media_state: id pjsua2 != Participant.id.
+            for cand in self._registry.participants():
+                if getattr(cand, "_call", None) is call:
+                    part = cand
+                    break
+        if part is None:
+            return codecs
+        for field, kind in (("audio_codec", "audio"), ("video_codec", "video")):
+            value = codecs.get(kind)
+            if value:
+                setattr(part, field, value)
+        return codecs
+
     def apply_media_state(self, call_info: Any, call: Any = None) -> None:
         """Обновляет видео-окна участника по событию onCallMediaState.
 
