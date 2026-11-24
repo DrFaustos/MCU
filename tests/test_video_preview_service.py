@@ -275,7 +275,6 @@ def test_stop_falls_back_to_hard_stop_when_hide_fails():
 
     class _NoHidePj:
         def VideoPreview(self, dev):  # noqa: N802
-            outer = self
 
             class _P:
                 n = 0

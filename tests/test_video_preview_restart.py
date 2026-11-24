@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from mcuclient.models import EventBus
 from mcuclient.video_preview_service import VideoPreviewService
 
 
