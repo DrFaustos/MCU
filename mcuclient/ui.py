@@ -444,6 +444,19 @@ if QT_AVAILABLE:
             self.level_bar.setValue(int(min(100, level * 100)))
             self.peak_label.setText(f"пик: {self._peak:.3f}")
 
+        def hideEvent(self, event) -> None:  # noqa: N802
+            # Любое скрытие окна (WM close прячет виджет из базы, hide по
+            # переключению и т.п.) — самопрослушивание больше не нужно,
+            # а опрос уровней некому рисовать.
+            timer = getattr(self, "_timer", None)
+            if timer is not None:
+                timer.stop()
+            try:
+                self.engine.close_mic_monitor()
+            except Exception:  # noqa: BLE001
+                pass
+            super().hideEvent(event)
+
         def closeEvent(self, event) -> None:  # noqa: N802
             self._timer.stop()
             self._opened = False
@@ -1630,6 +1643,12 @@ if QT_AVAILABLE:
                 return
             self._mic_window = MicMonitorWindow(self.engine, dev_id, self,
                                                 dev_name=dev_name)
+            # Belt-and-braces: finished — C++ сигнал QDialog (done/reject),
+            # до него доходит даже если Python-переопределение closeEvent
+            # по какой-то причине не отработает (док v0.3.8: окно гаснет,
+            # «отключено» в логе нет). close_mic_monitor идемпотентен.
+            self._mic_window.finished.connect(
+                self.engine.close_mic_monitor)
             self._mic_window.show()
             self.device_status.setText("Окно монитора микрофона открыто")
 

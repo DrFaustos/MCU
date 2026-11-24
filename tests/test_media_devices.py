@@ -994,3 +994,14 @@ def test_monitor_echo_survives_transmit_failure():
     assert mm.open_mic_monitor(3) is True
     assert mm._monitor_echo is False
     mm.close_mic_monitor()  # тихо, без падения
+
+
+def test_close_monitor_without_link_logs_diagnosis(caplog):
+    # Док v0.3.8: «отключено» не появлялось и нельзя было отличить
+    # закрытие, до хука не дошедшее, от уже снятого соединения.
+    import logging
+    mm = _manager(_AudioMgr(capture_dev=3))
+    with caplog.at_level(logging.INFO, logger="mcuclient.media"):
+        mm.close_mic_monitor()
+    assert any("активного самопрослушивания нет" in r.getMessage()
+               for r in caplog.records)

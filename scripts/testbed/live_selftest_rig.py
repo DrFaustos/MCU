@@ -62,6 +62,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import struct
@@ -81,9 +82,9 @@ SANDBOX = RIG / "sandbox"
 CONTAINERFILE = Path(__file__).resolve().parent / "rig-x" / "Containerfile"
 XSOCK_DIR = Path("/run/user/1000") / "mcu-rig-x11"
 RELEASE_URL = ("https://github.com/DrFaustos/MCU/releases/download/"
-               "v0.3.8-h323/MCU-h323-debug")   # запаска, если API недоступен
+               "v0.3.9-h323/MCU-h323-debug")   # запаска, если API недоступен
 RELEASE_LIST = "https://api.github.com/repos/DrFaustos/MCU/releases?per_page=1"
-EXPECTED_VERSION = os.environ.get("RIG_EXPECTED_VERSION", "0.3.8-h323")
+EXPECTED_VERSION = os.environ.get("RIG_EXPECTED_VERSION", "0.3.9-h323")
                  # заголовок окна обязан совпасть; вотчер передаёт
                  # RIG_EXPECTED_VERSION=<тег без v>
 
@@ -932,6 +933,105 @@ def main() -> int:
                     return mm, nm
             return None, ""
 
+        # ── цифровой тон (метод лида, v0.3.8) ──
+        # Акустика «колонки→воздух→микрофон» даёт level 0.02–0.04 при пороге
+        # 0.05 — лотерея от громкости комнаты. Digital-петля: дефолтным
+        # source временнО становится monitor-копия динамиков (в Pulse-слое
+        # pactl он есть всегда: alsa_output…Speaker__sink.monitor), тон
+        # приходит в capture без воздуха: level 0.2–0.4. Монитор = копия
+        # ПОСЛЕ громкости, поэтому при MUTED sink ещё и расглушаем (0.7), а
+        # в конце ВСЁ вернём: source, mute, volume. Док, умерший посреди (в),
+        # чинится state-файлом при следующем старте — хост не остаётся
+        # «микрофоном из динамиков» или с внезапно заговорившими колонками.
+        PW_STATE = RUN / "default_pw_state.json"
+
+        def pw_sink() -> tuple[int, float, bool] | None:
+            """(id, volume, muted) единственного Speaker-sink из wpctl."""
+            out = sh(["wpctl", "status"], errors="ignore").stdout.split(
+                "Sinks:", 1)
+            for ln in (out[1] if len(out) > 1 else "").splitlines():
+                if "Speaker" in ln:
+                    m = re.search(r"\s(\d+)\.", ln)
+                    v = re.search(r"vol:\s*([\d.]+)", ln)
+                    if m:
+                        return (int(m.group(1)),
+                                float(v.group(1)) if v else 1.0,
+                                "MUTED" in ln)
+            return None
+
+        def pactl_default_source() -> str:
+            r = sh(["pactl", "get-default-source"], errors="ignore")
+            return (r.stdout or "").strip()
+
+        def pactl_set_source(name: str) -> None:
+            sh(["pactl", "set-default-source", name], errors="ignore")
+
+        close_ev = 0                      # «самопрослушивание отключено»
+        digital = False
+        orig_src = pactl_default_source()
+        sink = pw_sink()
+        mon_name_src = next(
+            (p.split("\t")[1] for p in
+             sh(["pactl", "list", "short", "sources"], errors="ignore"
+                 ).stdout.splitlines()
+             if len(p.split("\t")) > 1 and "Speaker__sink.monitor" in p), None)
+        if PW_STATE.exists():             # прошлый док умер до возврата
+            try:
+                st = json.loads(PW_STATE.read_text(encoding="utf-8"))
+                pactl_set_source(st["source"])
+                if st.get("sink"):
+                    i, v, mu = st["sink"]
+                    sh(["wpctl", "set-volume", str(i), f"{v:.2f}"],
+                       errors="ignore")
+                    sh(["wpctl", "set-mute", str(i), "1" if mu else "0"],
+                       errors="ignore")
+                V.info("(в) состояние PipeWire возвращено из state-файла "
+                       "после прошлого крэша")
+            except Exception:
+                pass
+            PW_STATE.unlink(missing_ok=True)
+            orig_src = pactl_default_source()
+            sink = pw_sink()
+        if mon_name_src and orig_src != mon_name_src:
+            pactl_set_source(mon_name_src)
+            if sink and (sink[2] or sink[1] < 0.4):
+                sh(["wpctl", "set-mute", str(sink[0]), "0"], errors="ignore")
+                sh(["wpctl", "set-volume", str(sink[0]), "0.70"],
+                   errors="ignore")
+            PW_STATE.write_text(json.dumps(
+                {"source": orig_src, "sink": list(sink) if sink else None}),
+                encoding="utf-8")
+            digital = pactl_default_source() == mon_name_src
+            V.info(f"(в) digital-петля: source «{orig_src}» → «{mon_name_src}»"
+                   + (", sink расглушён до 0.70" if sink and (
+                       sink[2] or sink[1] < 0.4) else "")
+                   + "; возврат в конце (в)")
+        else:
+            V.info("(в) digital-петля недоступна (monitor динамиков не найден "
+                   "или уже дефолт) — раунды акустические")
+
+        def restore_source() -> None:
+            nonlocal digital
+            if not digital:
+                return
+            try:
+                st = json.loads(PW_STATE.read_text(encoding="utf-8"))
+                pactl_set_source(st["source"])
+                if st.get("sink"):
+                    i, v, mu = st["sink"]
+                    sh(["wpctl", "set-volume", str(i), f"{float(v):.2f}"],
+                       errors="ignore")
+                    sh(["wpctl", "set-mute", str(i), "1" if mu else "0"],
+                       errors="ignore")
+                PW_STATE.unlink(missing_ok=True)
+                digital = False
+                V.info(f"(в) PipeWire возвращён: source «{st['source']}»"
+                       + (f", sink #{st['sink'][0]} vol={st['sink'][1]:.2f} "
+                          f"mute={st['sink'][2]}" if st.get("sink") else ""))
+            except Exception as exc:
+                V.info(f"(в) возврат состояния не вышел ({exc}) — state-файл "
+                       "будет подхвачен следующим прогоном")
+
         mon, mon_name = open_monitor()
         if mon is None:
             # константа не бьётся — плотный скан панели с ЭТАЛОНОМ в логе
@@ -1012,17 +1112,39 @@ def main() -> int:
                     lv_tone)
 
         def close_monitor():
+            """Закрыть ПО-НАСТОЯЩЕМУ: WM_DELETE вызывает closeEvent — только
+            он снимает самопрослушивание (Alt+F4 срабатывает не всегда, а
+            hideleave-стиль leaving окно живым). Проверяем исчезновение окна и
+            считаем маркер «самопрослушивание отключено»."""
+            nonlocal close_ev
             if mon is None:
                 return
-            x.d.set_input_focus(mon, x.X.RevertToParent, x.X.CurrentTime)
+            m = lg.mark()
+            try:
+                mon.delete_window()
+            except Exception:
+                pass
             x.d.sync()
-            alt = x.kc(0xffe9)
-            f4 = x.kc(0xffc0)
-            x.xtest.fake_input(x.d, x.X.KeyPress, alt)
-            x.xtest.fake_input(x.d, x.X.KeyPress, f4)
-            x.xtest.fake_input(x.d, x.X.KeyRelease, f4)
-            x.xtest.fake_input(x.d, x.X.KeyRelease, alt)
-            time.sleep(1.2)
+            gone = False
+            for _ in range(10):
+                time.sleep(0.4)
+                if x.window_by_name(MONITOR_NAME)[0] is None:
+                    gone = True
+                    break
+            if not gone:                      # упрямый WM — Alt+F4
+                x.d.set_input_focus(mon, x.X.RevertToParent, x.X.CurrentTime)
+                x.d.sync()
+                alt = x.kc(0xffe9)
+                f4 = x.kc(0xffc0)
+                for ev, key in ((x.X.KeyPress, alt), (x.X.KeyPress, f4),
+                                (x.X.KeyRelease, f4), (x.X.KeyRelease, alt)):
+                    x.xtest.fake_input(x.d, ev, key)
+                for _ in range(8):
+                    time.sleep(0.4)
+                    if x.window_by_name(MONITOR_NAME)[0] is None:
+                        gone = True
+                        break
+            close_ev += lg.since(m).count("самопрослушивание отключено")
 
         # Стартовое (дефолтное) устройство меряем ПЕРВЫМ: с самопрослушиванием
         # v0.3.8 именно «системный дефолт» отвечает владельцу «слышу ли себя»;
@@ -1106,7 +1228,12 @@ def main() -> int:
 
         def tone_ok(r) -> bool:
             a_base, a_tone, lb, lt, _ = r
-            lvl_ok = lt > 0.03 and lt >= lb + 0.02
+            if digital:
+                # digital-петля: «громко» = 0.2–0.4 (метод лида, контейнер
+                # давал ровно 0.32); 0.15 — трёхкратный запас над шумом
+                lvl_ok = lt >= 0.15 and lt >= lb + 0.05
+            else:
+                lvl_ok = lt > 0.03 and lt >= lb + 0.02
             px_ok = a_tone > max(60, a_base * 3)
             return lvl_ok or px_ok
 
@@ -1125,8 +1252,11 @@ def main() -> int:
                f"тон {r2[1]}px/{r2[3]:.3f}lvl" if mic2_desc != "не выбран"
                else "")
             + f"; живых раундов {live_count} из {need}; "
-            + f"самопрослушивание в логе: {'есть' if self_listen else 'НЕТ'}; "
+            + f"самопрослушивание в логе: {'есть' if self_listen else 'НЕТ'}"
+            + f" (отключений при закрытиях: {close_ev}); "
+            + f"тон {'digital' if digital else 'акустический'}; "
             + f"watcher: {watcher_mics}")
+        restore_source()
 
         # ── (г) имена устройств ──
         alltxt = lg.since(mark_boot)
@@ -1185,6 +1315,23 @@ def main() -> int:
         if tone_proc and tone_proc.poll() is None:
             tone_proc.kill()
         sh(["pkill", "-x", "paplay"], errors="ignore")
+        try:  # digital-петля не должна переживать док ни при каком исходе
+            f = RUN / "default_pw_state.json"
+            if f.exists():
+                st = json.loads(f.read_text(encoding="utf-8"))
+                if st.get("source"):
+                    sh(["pactl", "set-default-source", st["source"]],
+                       errors="ignore")
+                if st.get("sink"):
+                    i, v, mu = st["sink"]
+                    sh(["wpctl", "set-volume", str(i), f"{float(v):.2f}"],
+                       errors="ignore")
+                    sh(["wpctl", "set-mute", str(i), "1" if mu else "0"],
+                       errors="ignore")
+                f.unlink(missing_ok=True)
+                print("[i] PipeWire-состояние возвращено (finally)", flush=True)
+        except Exception:
+            pass
         if app:
             app.stop()
         if x:
